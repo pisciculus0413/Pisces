@@ -1,0 +1,33 @@
+{
+  "name": "pisces",
+  "version": "0.0.1",
+  "description": "An agent harness built for transparency, control, and templating",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "biome check --write .",
+    "format": "biome format --write .",
+    "test": "vitest run"
+  },
+  "keywords": [],
+  "author": "Pisciculus",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.8.1",
+      "onFail": "download"
+    }
+  },
+  "packageManager": "pnpm@12.8.1",
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "@types/node": "^26.6.3",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

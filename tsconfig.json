@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "paths": {
+      "@pisces/protocol": ["./packages/protocol/src/index.ts"],
+      "@pisces/core": ["./packages/core/src/index.ts"],
+      "@pisces/daemon": ["./packages/daemon/src/index.ts"],
+      "@pisces/client": ["./packages/client/src/index.ts"]
+    }
+  },
+  "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts"],
+  "exclude": ["**/dist/**", "**/node_modules/**"]
+}
