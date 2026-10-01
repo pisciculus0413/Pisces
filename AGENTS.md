@@ -13,4 +13,4 @@
 
 - Do not commit to the `main` branch.
 - Stage explicit files (`git add <path1> ...`) YOU changed in THIS session; run `git status` and verify you are only staging your files before committing; never `git add -A` or `git add .`.
-- Keep message informative and concise with format: `{feat,fix,docs}[(cli,core,daemon,protocol)]: <commit message> (optional multiple lines)`.
+- Keep message informative and concise with format: `{feat,fix,docs}[(client,core,daemon,protocol)]: <commit message> (optional multiple lines)`.
