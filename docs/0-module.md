@@ -3,7 +3,7 @@
 ## 分层
 
 ```
-client
+客户端进程（cli / tui / web / 自定义）
         │  protocol（传输无关的请求·响应·事件契约）
         ▼
 daemon（长驻服务，持有 core，对外只暴露 protocol）
@@ -12,7 +12,7 @@ daemon（长驻服务，持有 core，对外只暴露 protocol）
 core（纯引擎逻辑，不含传输与客户端交互）
 ```
 
-依赖方向：`client → protocol ← daemon → core`。
+依赖方向：`客户端进程 → protocol ← daemon → core`。
 
 ## `protocol` — 契约层
 
@@ -24,9 +24,10 @@ core（纯引擎逻辑，不含传输与客户端交互）
 
 | 模块 | 职责 |
 |---|---|
-| `types` | Message、ContentPart、ToolCall、Event 等内部数据模型与错误类型 |
-| `llm` + `provider-*` | 适配器接口与注册表；具体供应商实现；请求构建、响应解析、流式处理、工具调用格式转换 |
-| `model-registry` / `credentials` | 模型能力元数据与凭据访问 |
+| `types` | 类型原语：brand 机制、`JsonValue`/`JsonObject`、错误基类 |
+| `llm` | 与供应商无关的消息、内容、工具调用、请求、响应、流式事件类型；适配器接口与注册表 |
+| `providers` | 协议方言驱动；从软件配置目录发现供应商配置（方言、baseUrl、鉴权、请求头）并绑定适配；供应商模型目录（上下文窗口、模态、定价等能力元数据）与外部目录同步 |
+| `credentials` | 凭据访问：供应商密钥、OAuth token 的存取与刷新 |
 | `agent-loop` | turn/step 驱动器，编排各模块并判定闭环 |
 | `context` | 上下文组装：系统提示词注入、消息队列、工具与技能声明装配、裁剪压缩 |
 | `session` | 追加型树形日志与读投影，存储经统一接口访问 |
@@ -51,10 +52,7 @@ core（纯引擎逻辑，不含传输与客户端交互）
 - 持久化后端的具体实现。
 - 模板存储。
 - 工作区访问与子进程执行环境。
+- 从软件配置目录发现并注册客户端启动命令。
 - 工具与 hook 模块的发现、加载与注入。
 - 对外只暴露 `protocol`。
 
-## `client` — 客户端发现与注册
-
-- 发现软件配置目录下的自定义客户端。
-- 在 daemon 中注册客户端启动命令。
