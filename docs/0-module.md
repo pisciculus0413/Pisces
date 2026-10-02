@@ -3,7 +3,7 @@
 ## 分层
 
 ```
-clients (cli / tui / web …)
+client
         │  protocol（传输无关的请求·响应·事件契约）
         ▼
 daemon（长驻服务，持有 core，对外只暴露 protocol）
@@ -12,7 +12,7 @@ daemon（长驻服务，持有 core，对外只暴露 protocol）
 core（纯引擎逻辑，不含传输与客户端交互）
 ```
 
-依赖方向：`clients → protocol ← daemon → core`。
+依赖方向：`client → protocol ← daemon → core`。
 
 ## `protocol` — 契约层
 
@@ -47,7 +47,7 @@ core（纯引擎逻辑，不含传输与客户端交互）
 - hook 模块的发现、加载与注入。
 - 对外只暴露 `protocol`。
 
-## `clients` — 客户端层
+## `client` — 客户端发现与注册
 
 - 发现软件配置目录下的自定义客户端。
 - 在 daemon 中注册客户端启动命令。
