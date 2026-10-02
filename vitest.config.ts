@@ -9,7 +9,6 @@ export default defineConfig({
       "@pisces/protocol": source("./packages/protocol/src/index.ts"),
       "@pisces/core": source("./packages/core/src/index.ts"),
       "@pisces/daemon": source("./packages/daemon/src/index.ts"),
-      "@pisces/client": source("./packages/client/src/index.ts"),
     },
   },
   test: {

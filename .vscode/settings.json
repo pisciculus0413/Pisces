@@ -1,8 +1,3 @@
 {
-    "conventionalCommits.scopes": [
-        "client",
-        "core",
-        "daemon",
-        "protocol"
-    ]
+  "conventionalCommits.scopes": ["core", "daemon", "protocol"]
 }
