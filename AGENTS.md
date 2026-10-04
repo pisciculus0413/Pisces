@@ -1,6 +1,6 @@
 # Development Rules
 
-## General Principle
+## General Criteria
 
 - Keep it simple and stupid; keep answers short and concise.
 
