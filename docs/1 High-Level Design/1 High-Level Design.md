@@ -685,13 +685,13 @@ interface ToolResult {
 }
 
 type ToolFunction = (args: JsonValue) => Promise<ToolResult>;
-type ToolWrapper = (wrapped: ToolFunction) => ToolFunction;
+type ToolWrapper = (wrapped: ToolDeclaration) => ToolDeclaration;
 
 interface ToolDeclaration {
-  name: string;
-  description: string;
-  parameters: JsonSchema;
-  implementation: ToolFunction;
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: JsonSchema;
+  execute?: ToolFunction;  // 智能体工作循环开始后才导入已选中条目的实现
 }
 
 class ToolDeniedError extends Error {
@@ -710,9 +710,9 @@ class ToolDeniedError extends Error {
 // 包装器示例
 let wrapper_exapmle: ToolWrapper = (wrapped: ToolFunction) => ToolFunction {
   return (args: JsonValue) => Promise<ToolResult> {
-    ...
-    wrapped(args);
-    ...
+    // pre-hook 代码 ...
+    wrapped.execute(args);
+    // post-hook 代码 ...
   };
 };
 
@@ -720,14 +720,17 @@ let wrapper_exapmle: ToolWrapper = (wrapped: ToolFunction) => ToolFunction {
 let tool: ToolDeclaration = ...
 let wrappers: ToolWrapper[] = ...
 
+// 若工具选择状态变更
+tool.execute = ...
+
 // 包装
-let toolFunc = tool.implementation;
+let toolCopy = tool;
 for (let w in wrappers) {
-  toolFunc = w(toolFunc);
+  toolCopy = w(toolCopy);
 }
 
 // 执行
-let result = await toolFunc();
+let result = await toolCopy.execute(args);
 
 // 结果处理
 ...
