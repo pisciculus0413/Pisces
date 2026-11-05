@@ -729,16 +729,17 @@ interface Event<E = JsonValue> {
 | 协议 | `protocol.hello` | `{ versions }` | `{ version, compatible }` |
 | 会话 | `session.create` | `{ workspace?, templateId?, model?, provider?, systemPrompt?, extensions? }` | `SessionMeta` |
 | 会话 | `session.list` | `{}` | `{ sessions: SessionMeta[] }` |
-| 会话 | `session.read` | `{ sessionId, nodeId? }` | `{ meta: SessionMeta, nodes: SessionNode[], selection }` |
+| 会话 | `session.read` | `{ sessionId, nodeId? }` | `{ meta: SessionMeta, records: SessionNode[], queue: QueueEntry[], selection }` |
 | 会话 | `session.configure` | `{ sessionId, model?, provider?, systemPrompt? }` | `SessionMeta` |
 | 会话 | `session.subscribe` | `{ sessionId }` | 订阅确认，事件经推送 |
 | 执行 | `turn.list` | `{}` | `{ turns: [{ sessionId, turnId, startedAt }] }` |
 | 执行 | `turn.start` | `{ sessionId }` | `{ turnId, mode }` |
 | 执行 | `turn.cancel` | `{ turnId }` | `{ cancelled }` |
 | 供应商 | `provider.list` | `{}` | `{ providers: ProviderInfo[] }` |
-| 消息队列 | `queue.enqueue` | `{ sessionId, entries }` | `{ entryIds }` |
-| 消息队列 | `queue.edit` | `{ sessionId, entryId, content }` | `{ entryId }`，仅 `kind=agent` |
-| 消息队列 | `queue.remove` | `{ sessionId, entryId }` | `{ entryId }` |
+| 消息队列 | `queue.enqueue` | `{ sessionId, entries }` | `{ ids }` |
+| 消息队列 | `queue.edit` | `{ sessionId, id, content }` | `{ id }`，仅 `kind=agent` |
+| 消息队列 | `queue.remove` | `{ sessionId, id }` | `{ id }` |
+| 消息队列 | `queue.clear` | `{ sessionId }` | `{ ids }` |
 | 可用条目 | `entries.snapshot` | `{ sessionId }` | `{ entries, selection }` |
 | 模板 | `template.list` | `{}` | `{ templates }` |
 | 模板 | `template.preview` | `{ templateId, workspace }` | `{ directories, files, initScript }` |
@@ -753,23 +754,28 @@ interface Event<E = JsonValue> {
 | `turn.started` | 活跃 turn 开始 |
 | `turn.step` | 一个 step 完成 |
 | `turn.ended` | 活跃 turn 结束，含中止 |
-| `queue.updated` | 队列条目变化 |
+| `queue.updated` | 队列条目变化，载荷为当前完整 `QueueEntry[]` |
 | `selection.updated` | 声明选择状态变化 |
 | `client.launched` | 客户端进程启动 |
 
-`SessionMeta` 是会话的持久元数据，字段见 §6.5。运行状态不属于会话元数据：`turn.list` 返回当前活跃 turn，会话出现在其中即为热会话，否则为冷会话；`session.list` 只返回持久元数据，`session.read` 返回持久元数据、记录与选择状态，客户端按 `sessionId` 与 `turn.list` 合并，`session.read` 的 `meta` 为 `SessionMeta`。`session.configure` 修改会话级设置；若该会话存在活跃 turn，设置在下一次 turn 生效。模型能力（如上下文窗口）由 `provider.list` 的 `ModelInfo` 提供，不写入会话元数据。
+`SessionMeta` 是会话的持久元数据，字段见 §6.5。运行状态不属于会话元数据：`turn.list` 返回当前活跃 turn，会话出现在其中即为热会话，否则为冷会话；`session.list` 只返回持久元数据，`session.read` 返回持久元数据、记录、待装配队列与选择状态，客户端按 `sessionId` 与 `turn.list` 合并，`session.read` 的 `meta` 为 `SessionMeta`。`session.configure` 修改会话级设置；若该会话存在活跃 turn，设置在下一次 turn 生效。模型能力（如上下文窗口）由 `provider.list` 的 `ModelInfo` 提供，不写入会话元数据。
 
-`session.read` 的 `SessionMeta` 与 `SessionNode` 定义在 §6.5；协议按相同字段序列化。
+`session.read` 的 `SessionMeta`、`SessionNode` 定义在 §6.5，`QueueEntry` 定义见本节；协议按相同字段序列化。
 
 `provider.list` 返回 `ProviderInfo[]`。`ProviderInfo` 包含 `id`、`ready`、`models`；`ModelInfo` 包含 `id`、`contextWindow`、`maxOutput`、`modalities`、`pricing?`。`ModelInfo.id` 在所属 provider 内唯一，选择单位是 `(provider, model)`；`ready` 表示凭据有效且至少有一个模型，不可用或无模型的 provider 返回 `ready` 为 false（无模型时 `models` 为空），详细原因由 CLI `providers check` 提供。该清单不返回 `dialect`、`baseUrl`、`auth`、`headers` 等配置细节；`session.create`、`session.configure` 的 `provider`、`model` 取自该清单，不在清单中的组合由 daemon 拒绝。
+
+`QueueEntry` 是 `Omit<SessionNode, "parentId" | "schemaVersion">`（`SessionNode` 见 §6.5），包含 `id`、`kind`、`role`、`content`、`source`、`createdAt`；`id` 由 `Context` 在入队时分配，仅在队列阶段有效，出队后作废。`queue.enqueue` 的 `entries` 为 `Omit<QueueEntry, "id" | "createdAt">`，`session.read` 的 `queue` 返回 `QueueEntry[]`，`queue.updated` 携带当前完整 `QueueEntry[]`。
 
 - 版本协商：连接建立时客户端先发 `protocol.hello` 交换版本；主版本不同返回错误并关闭连接，次版本向下兼容。daemon 升级会断开连接，客户端重连后重新握手。
 - 传输：默认 Unix domain socket；连接建立时校验 peer 凭据，要求与 daemon 同用户。Windows 使用命名管道。
 - 中止：`turn.cancel` 按 `turnId` 立即中止当前供应商流；正在执行的工具不被强制终止，`ToolInvocationContext.signal` 置为中止，工具可自行提前返回。中止后不再发起新的 step，当前工具结果回填后活跃 turn 结束；已产生的智能体回复与控制消息写入会话并标记为中断。客户端连接断开或取消会话订阅不视为中止，活跃 turn 继续进行。CLI 的 `sessions cancel <id>` 先解析该会话的活跃 turn。
 - turn 与 steer：无活跃 turn 时，`turn.start` 启动新的 turn（`mode` 为 `new`）；已有活跃 turn 时，`turn.start` 只确认队列中新增条目，作为 steer 在下一个 step 边界装配，不启动第二个 turn（`mode` 为 `steer`）。并发 `turn.start` 由 `Concurrency` 串行处理，后到者按 steer 处理。
 - 运行时：`turn.list` 给出活跃 turn 快照，`turn.started` / `turn.ended` 维护该集合；会话是否在运行由成员资格表示，不设 `status` 字段。`session.subscribe` 按会话推送记录、队列、选择与 turn 事件，不另设订阅方法。
-- 队列：`queue.enqueue` 只入队；`turn.start` 时确认。`queue.edit` 只作用于 `kind=agent` 的条目；声明变更、压缩记录、中止标记等控制消息只能整条 `queue.enqueue` 或 `queue.remove`。条目被装配取走后，不再接受 `queue.edit` 或 `queue.remove`。
-- 事件：会话与 turn 事件带 `sessionId` 与时间戳，客户端按 `sessionId` 路由多会话订阅。
+- 队列：`session.read` 的 `queue` 返回待装配条目；`queue.enqueue` 只入队；`turn.start` 时确认。`queue.edit` 只作用于 `kind=agent` 的条目；声明变更、压缩记录、中止标记等控制消息只能整条 `queue.enqueue` 或 `queue.remove`；`queue.clear` 清空全部待装配条目。条目被装配取走后，不再接受 `queue.edit`/`queue.remove`。队列按入队顺序，不提供重排方法。
+- 队列事件：`queue.updated` 在入队、编辑、删除、清空与出队后推送当前完整 `QueueEntry[]`；客户端整体替换本地队列。`session.read` 用于首次加载和重连，订阅仍由 `session.subscribe` 承担，不新增 `queue.subscribe`。
+- 多客户端：队列写操作由 `Concurrency` 串行化；客户端以 `session.read` 的 `queue` 为初始快照、`queue.updated` 为增量，重连后重新 `session.read`；并发编辑按最后写入者获胜。
+- 会话视图：`session.read` 在同一会话锁内返回 `meta`、`records`、`queue` 与 `selection`；`nodeId` 只影响 `records`，`queue` 始终是当前待装配条目。
+- 事件：会话、队列与 turn 事件带 `sessionId` 与时间戳，客户端按 `sessionId` 路由多会话订阅。
 - 事件推送：引擎事件和协议事件的相互转换由 `Gateway` 完成。
 - CLI 与协议：`run`、`sessions`、`client`、`templates` 与只读的 `provider.list` 经协议方法完成；`providers check`、`extensions`、`auth`、`config` 仅 CLI。CLI 的管理命令直接读写本地配置、凭据与扩展目录，不经 daemon 协议；daemon 在创建会话或发起请求时读取，`config` 只影响此后创建的会话。协议不提供全局配置、凭据与扩展安装的写方法。
 
@@ -934,13 +940,12 @@ interface SessionMeta {
 }
 
 interface SessionNode {
-  id: string;             // 会话内唯一
+  id: string;             // 持久化时由 Sessions 分配，会话内唯一
   parentId: string;       // 根节点指向自身
   kind: "agent" | "control";
   role: "system" | "user" | "assistant" | "tool" | "declaration" | "compaction" | "cancel";
   content: ContentBlock[]; // 工具结果带 toolCallId
   source: string;         // 扩展条目、上下文来源、系统提示词等
-  entryId?: string;       // 来源队列条目，同一进程重试去重
   createdAt: string;      // 写入时间
   schemaVersion: number;  // 记录格式版本
 }
@@ -970,6 +975,7 @@ interface Exec {
 
 - `Sessions` 定义 `SessionNode` 形态与分支语义，存储经 `SessionRepository` 接口访问；具体后端由服务层 `SessionStore` 实现。
 - `SessionNode` 的 `parentId` 表达树结构，根节点指向自身；`readBranch` 从 `headNodeId` 沿父指针上溯到根，按根到 head 的顺序返回。`SessionMeta` 是 `list` 返回的会话元数据。
+- `Sessions` 在持久化时分配 `SessionNode.id` 与 `parentId`；队列条目的临时 `id` 不写入节点，出队后作废。`SessionRepository` 只写入已确定 `id`/`parentId` 的节点。
 - `SessionRepository` 只承载持久记录与元数据；活跃 turn、锁与中止信号由服务层 `Concurrency` 维护，不进入该接口。
 - `Credentials` 与 `Exec` 同理：接口在核心层，实现在服务层。
 
@@ -1109,7 +1115,7 @@ interface ProjectRef {
 - `compaction`：记录被压缩的消息范围与摘要内容。
 - `cancel`：记录活跃 turn 被中止的位置与原因。
 
-装配时以会话当前节点为起点，沿父指针上溯得到活动分支；`Context` 据此确定智能体可见消息序列。裁剪只影响本次装配的可见序列，不新增节点；压缩产生一条控制消息。队列条目在装配时追加为节点，`entryId` 写入节点元数据，同一进程内重试时按 `entryId` 去重；崩溃丢失的队列条目不参与恢复。
+装配时以会话当前节点为起点，沿父指针上溯得到活动分支；`Context` 据此确定智能体可见消息序列。裁剪只影响本次装配的可见序列，不新增节点；压缩产生一条控制消息。装配时 `Sessions` 为节点分配 `id` 与 `parentId`，队列条目的临时 `id` 不写入节点、出队后作废；持久化与出队在同一临界区完成，失败时条目保留且不产生节点；崩溃丢失的队列条目不参与恢复。
 
 ### 7.2 存储布局
 
