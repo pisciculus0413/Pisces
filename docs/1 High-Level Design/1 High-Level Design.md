@@ -526,10 +526,6 @@ Sessions --> Gateway : 会话记录
 alt 已有服务于该会话的 Context 实例
   Gateway -> Context : 读取选择状态和消息队列
   Context --> Gateway : 选择状态和消息队列
-  opt 已有热会话
-    Gateway -> Driver : 建立事件订阅
-    Driver --> Gateway : 事件
-  end
 else 无 Context 实例
   Gateway -> Context : 发送会话记录\n请求计算选择状态
   Context -> Context : 计算并缓存选择状态
