@@ -419,7 +419,8 @@ interface ConfigureSessionParams {
 
 - `model`/`provider` 必须成对校验；校验通过后通过 `SessionRepository.updateMeta` 写入已落盘会话的 `meta.json`。
 - 临时会话只更新内存 `SessionMeta`；不调用持久化。
-- 活跃 turn 使用启动时的模型与供应商快照；新设置在下一次 turn 生效。
+- 活跃 turn 使用启动时的模型与供应商快照；仅携带 `model`/`provider` 的新设置在下一次 turn 生效。
+- 若存在活跃 turn 且请求携带 `systemPrompt`，整个 `session.configure` 返回 `turn.active`，不更新 `model`/`provider`、队列或会话记录；不做部分更新。
 - `systemPrompt` 只操作消息队列：
   - 已有 `role=system` 队列条目：更新该条目；
   - 没有：新增一条 `kind=agent`、`role=system` 的队列条目；
@@ -647,6 +648,7 @@ type ProtocolEvent =
 | 队列 | `queue.duplicate_name` | `toggle` 中名称重复 |
 | turn | `turn.not_found` | 活跃 turn 不存在 |
 | turn | `turn.node_id_forbidden` | 活跃 turn 的 `turn.start` 带 `nodeId` |
+| turn | `turn.active` | 活跃 turn 中修改 `systemPrompt` |
 | turn | `turn.empty` | 首次 turn 未产生任何节点 |
 | 上下文 | `context.source_failed` | 上下文来源解析失败 |
 | 上下文 | `context.window_exceeded` | 裁剪后仍超出模型窗口 |
@@ -1181,7 +1183,7 @@ interface SessionRuntime {
 - `session.create`：校验 provider/model、workspace 与 extensions；创建运行时；将 `systemPrompt` 和扩展选择物化为队列条目；返回临时 `SessionMeta`。
 - `session.list`：只查 `SessionStore`；不经过运行时。
 - `session.read`：在会话锁内读取 `meta`、`records`、`queue` 与 `selection`；无 `nodeId` 读全树，有 `nodeId` 读分支；临时会话没有节点。`selection` 由 `Context.selectionFor` 计算，只含已持久化记录。
-- `session.configure`：`model`/`provider` 校验后更新 meta；临时会话只改内存，已落盘会话调用 `SessionStore.updateMeta`；`systemPrompt` 只更新或新增 `role=system` 队列条目。
+- `session.configure`：带 `systemPrompt` 时先检查活跃 turn，存在则返回 `turn.active`，不修改队列/meta；仅 `model`/`provider` 时校验后更新 meta；临时会话只改内存，已落盘会话调用 `SessionStore.updateMeta`；`systemPrompt` 只更新或新增 `role=system` 队列条目。
 - `session.subscribe` / `session.unsubscribe`：维护连接的订阅集合；重复订阅幂等；退订不发事件；断开清理。
 - `queue.enqueue` / `edit` / `remove` / `clear`：委托 `Context`；返回队列 id；推送 `queue.updated`。
 - `entries.snapshot`：从 `Extensions` 取得可用条目，从 `Context` 取得已持久化选择；不合并队列。
@@ -1716,6 +1718,5 @@ class PiscesError extends Error {
 |---|---|---|---|
 | 活跃 turn 恢复标记 | 使用 `active-turn.json` 记录未完成 turn | §7.2 存储布局未列出该运行时文件，§8.1 要求标记未完成热会话 | 在 HLD §7.2/§8.1 补充运行时标记，或放弃崩溃标记能力 |
 | `session.create` 默认值 | 由服务层配置解析 workspace/provider/model | HLD 参数可选，但未定义默认值与配置键 | 明确默认值来源与错误码 |
-| `session.configure.systemPrompt` 的生效时机 | 只更新/新增 system 队列条目，按队列规则参与后续装配 | §6.1 写“活跃 turn 时设置下一次 turn 生效” | 明确 systemPrompt 是否受“下一次 turn”约束，还是按 steer 队列规则 |
 
 在这些项确认前，相关章节按本详细设计的处理实现；不把未确认的语义写死为 HLD 结论。

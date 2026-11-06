@@ -794,7 +794,7 @@ interface Event<E = JsonValue> {
 | `selection.updated` | 声明选择状态变化 |
 | `client.launched` | 客户端进程启动 |
 
-`SessionMeta` 是会话元数据，字段见 §6.5。服务层在 `session.create` 创建临时 `SessionMeta`，首次落盘前不写盘，也不出现在 `session.list`；`session.list` 只返回已落盘的 `SessionMeta`。`SessionMeta` 不含活动分支信息；默认活动分支为最新节点所在分支，由于会话记录只追加式写入，最新节点总能在会话记录末尾找到。运行状态不属于会话元数据：`turn.list` 返回当前活跃 turn，会话出现在其中即为热会话，否则为冷会话；`session.read` 返回 `meta`（临时或已落盘）、记录、待装配队列与选择状态，客户端按 `sessionId` 与 `turn.list` 合并，`session.read` 的 `meta` 为 `SessionMeta`。`session.configure` 的 `model`、`provider` 经校验后通过 `SessionRepository.updateMeta` 持久化，临时会话仅更新内存 meta；活跃 turn 使用启动时的模型与供应商快照，下一次 turn 生效。`systemPrompt` 只更新消息队列中已有的 `role=system` 条目，没有则新增；不写 meta，不修改会话记录。扩展选择不在该方法中修改。模型能力（如上下文窗口）由 `provider.list` 的 `ModelInfo` 提供，不写入会话元数据。
+`SessionMeta` 是会话元数据，字段见 §6.5。服务层在 `session.create` 创建临时 `SessionMeta`，首次落盘前不写盘，也不出现在 `session.list`；`session.list` 只返回已落盘的 `SessionMeta`。`SessionMeta` 不含活动分支信息；默认活动分支为最新节点所在分支，由于会话记录只追加式写入，最新节点总能在会话记录末尾找到。运行状态不属于会话元数据：`turn.list` 返回当前活跃 turn，会话出现在其中即为热会话，否则为冷会话；`session.read` 返回 `meta`（临时或已落盘）、记录、待装配队列与选择状态，客户端按 `sessionId` 与 `turn.list` 合并，`session.read` 的 `meta` 为 `SessionMeta`。`session.configure` 的 `model`、`provider` 经校验后通过 `SessionRepository.updateMeta` 持久化，临时会话仅更新内存 meta；活跃 turn 使用启动时的模型与供应商快照，下一次 turn 生效。`systemPrompt` 只更新消息队列中已有的 `role=system` 条目，没有则新增；不写 meta，不修改会话记录。若该会话存在活跃 turn，携带 `systemPrompt` 的 `session.configure` 返回 `turn.active`，不修改队列、meta 或记录；仅携带 `model`/`provider` 的配置仍可更新并随 SessionMeta 在下一次 turn 生效。扩展选择不在该方法中修改。模型能力（如上下文窗口）由 `provider.list` 的 `ModelInfo` 提供，不写入会话元数据。
 
 `session.read` 的 `SessionMeta`、`SessionNode` 定义在 §6.5，`QueueEntry` 定义见本节；协议按相同字段序列化。
 
@@ -1217,6 +1217,7 @@ interface ProjectRef {
 | 供应商传输 | `provider.transport`、`provider.timeout` | 按 429/5xx 重试并退避；4xx 除 429 外不重试；取消不重试 |
 | 供应商响应 | `provider.invalid_response`、`provider.refusal` | 转为错误事件，结束当前 step |
 | 工具 | `tool.failed`、`tool.denied` | 以 `isError` 工具结果回填，继续循环 |
+| turn | `turn.active` | 活跃 turn 中修改 `systemPrompt` 时整体拒绝，不部分更新 |
 | 存储 | `storage.io`、`storage.corrupt` | 立即失败，不返回部分结果；报告会话 id |
 | 配置 | `config.invalid`、`config.unknown_key` | 拒绝写入并返回校验错误 |
 
