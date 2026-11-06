@@ -831,6 +831,7 @@ interface Context {
 - `Context.snapshot().selection` 只返回已持久化记录的选择；客户端自行叠加队列中的 `toggle`。
 - `selectionFor(nodeId?)` 按指定分支或默认分支计算选择，供 `session.read` 使用；不改变缓存与活动分支。
 - 包装器、工具、技能、上下文来源均通过同一选择集表达启用状态；包装器的执行顺序不入选择状态。
+- 技能和上下文来源的智能体消息只承载内容，不参与选择计算；内容节点存在不等于条目被选中。
 
 #### 4.2.4 装配流程
 
@@ -840,9 +841,9 @@ interface Context {
 2. 读取分支节点（临时会话为空）；计算分支的选择。
 3. 将队列中的声明类控制消息异或到选择上。
 4. 把队列条目按队列顺序转成 `SessionNodeDraft`；控制消息的内容保持为单个 `text` 块 JSON。
-5. 对选择中尚未出现在分支里的上下文来源，按名称升序调用 `resolve`；每个 `ContextFragment` 追加为 `kind=agent`、`role=system` 的节点，`source` 使用片段的 `source`。
-6. 对选择中尚未出现在分支里的技能，按名称升序追加为 `kind=agent`、`role=system` 的节点，`source` 使用技能来源。
-7. 把分支节点、队列节点、来源节点和技能节点按顺序组成节点序列；控制消息参与选择、压缩或中止处理，不直接进入消息序列。
+5. 对选择中尚未出现在分支里的上下文来源，按名称升序调用 `resolve`；每个 `ContextFragment` 追加为 `kind=agent`、`role=system` 的节点，`source` 使用片段的 `source`。已存在的复用，未选中的不解析、不追加。
+6. 对选择中尚未出现在分支里的技能，按名称升序追加为 `kind=agent`、`role=system` 的节点，`source` 使用技能来源。已存在的复用，未选中的不追加。
+7. 把分支节点、队列节点、来源节点和技能节点按顺序组成节点序列；来源/技能节点只在其 `source` 位于当前选择集时进入序列，普通 system 节点不受此过滤；未选中的内容节点保留在记录中，但不进入消息序列。控制消息参与选择、压缩或中止处理，不直接进入消息序列。
 8. 对节点序列应用压缩控制：按 `from`/`to` 跳过范围，使用 `summary` 生成一条 `system` 消息；重叠或越界范围按 `storage.corrupt` 处理。
 9. 将剩余节点转换为 `Message[]`；`system`/`user`/`assistant`/`tool` 直接进入消息序列，`declaration`/`compaction`/`cancel` 不进入。
 10. 按窗口预算裁剪消息序列；裁剪不新增节点。
@@ -898,6 +899,9 @@ interface Skills {
 - 来源解析失败返回 `context.source_failed`，本次装配失败，队列与已读节点不受影响。
 - 技能内容按名称升序追加；同一分支中同一技能只追加一次。
 - 技能和来源写入的节点都是 `role=system` 的智能体消息，`source` 保留来源标识。
+- 来源/技能节点是内容，不是选择状态；每个 `package#name` 在分支中最多追加一次。
+- 取消选择不删除已有节点，只从本次消息序列中排除；再次选择时复用已有节点，不重新解析、不重复追加。
+- 普通 system 提示词节点不参与该过滤；来源/技能节点的 `source` 必须使用 `package#name`。
 
 #### 4.2.6 裁剪与压缩
 
@@ -1455,10 +1459,11 @@ interface ClientRegistry {
 2. `Gateway` 在会话锁内加载或复用运行时；已落盘会话创建 `Context` 并 `initialize`。
 3. 无 `nodeId`：返回完整会话树与默认活动分支的选择；有 `nodeId`：返回根到该节点的分支与该分支的选择。
 4. `queue` 始终是当前队列；`selection` 只含已持久化记录，不含队列中的声明 delta。
-5. `session.read` 不改变活动分支；分支由后续 `turn.start.nodeId` 选择。
-6. 客户端用 `entries.snapshot` 取得可用条目与已持久化选择，再按队列中的声明 delta 计算界面显示状态。
-7. 客户端选择/取消条目时，通过 `queue.enqueue` 入队新的声明类控制消息；`queue.updated` 推送完整队列。
-8. 订阅后，`queue.updated`、`selection.updated`、`session.updated` 与 turn 事件按 `sessionId` 推送。
+5. `records` 可能保留已取消选择的来源/技能节点；`selection` 表示当前是否启用。客户端不应以节点存在推断选中，`Context` 装配时按同一选择过滤请求内容。
+6. `session.read` 不改变活动分支；分支由后续 `turn.start.nodeId` 选择。
+7. 客户端用 `entries.snapshot` 取得可用条目与已持久化选择，再按队列中的声明 delta 计算界面显示状态。
+8. 客户端选择/取消条目时，通过 `queue.enqueue` 入队新的声明类控制消息；`queue.updated` 推送完整队列。
+9. 订阅后，`queue.updated`、`selection.updated`、`session.updated` 与 turn 事件按 `sessionId` 推送。
 
 临时会话：`records` 为空，`selection` 为空，`nodeId` 返回 `session.node_not_found`。
 
@@ -1711,7 +1716,6 @@ class PiscesError extends Error {
 |---|---|---|---|
 | 活跃 turn 恢复标记 | 使用 `active-turn.json` 记录未完成 turn | §7.2 存储布局未列出该运行时文件，§8.1 要求标记未完成热会话 | 在 HLD §7.2/§8.1 补充运行时标记，或放弃崩溃标记能力 |
 | 工具声明的系统提示词 | 通过 `LlmRequest.tools` 提供结构化声明 | §5.4 写“声明写入系统提示词” | 明确“系统提示词”是否包含供应商工具参数；若要求文本声明，需补 `Tools` 的渲染接口 |
-| 上下文来源/技能的消息角色 | 使用 `role=system` 的智能体消息 | HLD 未规定来源片段/技能内容的消息角色 | 在 HLD 或本详细设计中明确角色 |
 | `session.create` 默认值 | 由服务层配置解析 workspace/provider/model | HLD 参数可选，但未定义默认值与配置键 | 明确默认值来源与错误码 |
 | `session.configure.systemPrompt` 的生效时机 | 只更新/新增 system 队列条目，按队列规则参与后续装配 | §6.1 写“活跃 turn 时设置下一次 turn 生效” | 明确 systemPrompt 是否受“下一次 turn”约束，还是按 steer 队列规则 |
 
