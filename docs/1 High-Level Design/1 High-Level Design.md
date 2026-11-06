@@ -317,7 +317,7 @@ client --> user : 展示
 | `ProviderManagement` | 供应商描述符 schema、方言注册、模型能力元数据查询 | `ProviderDescriptor`、`ModelDescriptor` |
 | `Credentials` | 凭据访问 | `get`、`refresh` |
 | `Context` | 消息队列、请求上下文装配、上下文来源接口、选择状态、追加消息/系统提示词/声明变化/压缩记录 | 装配与队列操作 |
-| `Sessions` | 按树形结构持久化智能体消息与控制消息，按分支读取 | `SessionRepository` |
+| `Sessions` | 按树形结构持久化智能体消息与控制消息，按分支或全树读取 | `SessionRepository` |
 | `Tools` | 工具与包装器契约、实现注册表、调用流水线 | `ToolDeclaration`、`ToolWrapper` |
 | `Exec` | 命令与子进程执行 | `run` |
 | `Skills` | 技能标准与实现注册表 | 技能条目 |
@@ -501,9 +501,9 @@ stop
 
 构建用于发起智能体工作循环的请求体时使用的所有智能体上下文必须来源于会话记录和消息队列。上下文来源由用户显式启用，启用即授权其在装配时产出片段；`Context` 先把片段追加为会话节点，再据此写入请求体。`AGENTS.md` `SYSTEM.md` 等以文件形式存储的上下文，以及 skill 、 tool 等工作机制要求的上下文，只能在特定时机自动插入消息队列作为独立条目，在用户审查、修改完毕并发出确认信号后才能写入请求体及会话记录，绝不允许在确认信号发出后修改已确认条目的内容；新增条目属于后续装配。不允许将会话记录及消息队列以外的内容写入请求体。
 
-会话记录包括直接写入请求体的“智能体消息”和不直接写入请求体的“控制消息”两个大类。每个会话的所有消息使用树型结构表示、存储，各消息节点必须有父节点指针，根节点的父节点指针指向自己。在每个 step 组装请求上下文时，根据当前消息节点的父节点指针可向上获取会话树的活动分支的完整记录，智能体消息可直接写入请求体，控制消息由 `role` 判别并指导 `Context` 完成组装工作。用户可在消息队列中操作智能体消息和控制消息，其中控制消息的内容不允许修改，用户只能完整增加或删除控制消息条目。系统提示词作为角色为 `system` 的智能体消息写入请求体，用户可在队列中修改；声明变更、压缩记录与中止标记作为控制消息，只能整条增删。
+会话记录包括直接写入请求体的“智能体消息”和不直接写入请求体的“控制消息”两个大类。每个会话的所有消息使用树型结构表示、存储，各消息节点必须有父节点指针，根节点的父节点指针指向自己。在每个 step 组装请求上下文时，根据当前消息节点的父节点指针可向上获取会话树的活动分支的完整记录，智能体消息可直接写入请求体，控制消息由 `role` 判别并指导 `Context` 完成组装工作；控制消息的 `content` 同样由 `ContentBlock[]` 承载。用户可在消息队列中操作智能体消息和控制消息，其中控制消息的内容不允许修改，用户只能完整增加或删除控制消息条目。系统提示词作为角色为 `system` 的智能体消息写入请求体，用户可在队列中修改；声明变更、压缩记录与中止标记作为控制消息，只能整条增删。
 
-skill、tool 声明的变更使用控制消息表示，组装上下文时根据会话记录及消息队列中所有声明类控制消息计算当前消息节点的声明集合并写入请求体。
+skill、tool 等声明的变更使用控制消息表示，某条目状态变更记为1，组装上下文时根据会话记录及消息队列中所有声明类控制消息按异或计算当前消息节点的声明集合并写入请求体；不保存完整选择集。
 
 当请求上下文超出模型窗口时，按策略裁剪或压缩；压缩结果作为消息节点写入会话记录。窗口取当前模型描述符的 `contextWindow`；裁剪阈值、保留策略与压缩算法由详细设计定义，概设只约定裁剪不新增节点、压缩写入控制消息。
 
@@ -548,6 +548,8 @@ Client --> User : 更新面板
 @enduml
 ```
 
+`session.read` 无 `nodeId` 返回完整会话树，有 `nodeId` 返回根到该节点的线性分支；临时会话只有空记录与当前队列，`selection` 返回全 false 。客户端根据需要，自行从消息队列计算 queue.enqueue 后的选择状态，`Context` 只在装配上下文时根据消息队列更新选择状态及缓存。
+
 #### 5.2.2 发送与执行
 
 ```plantuml
@@ -568,8 +570,8 @@ Driver -> Context : 获取请求上下文
 Context -> Sessions : 读取活动分支
 Sessions --> Context : 事件与控制消息
 Context -> Context : 组装请求上下文
-critical 消息队列已组装条目持久化存储
-Context -> Sessions : 请求持久化
+critical create / 后续 append 原子持久化
+Context -> Sessions : 请求创建或批量追加
 Sessions --> Context : 成功信号
 Context -> Context : 出队
 end
@@ -587,9 +589,11 @@ Client --> User : 展示
 
 `execute` 由服务层实现并注入，见 §6.2。
 
+首次 turn 由 `SessionRepository.create` 原子写入 `SessionMeta` 与初始节点；后续 turn 使用批量 `append`。全部成功后才出队；失败时队列保留、不产生节点。
+
 ### 5.3 会话持久化与读取
 
-会话由消息节点按树形结构组织而成。会话树的消息节点不允许删除，分支通过父指针表达。各会话之间彼此隔离。`Gateway` 读取会话发送至客户端供其构建界面视图。`Context` 在装配请求上下文时读取当前消息节点所在分支的历史消息记录，确定智能体可见消息序列，同时将其消息队列的各条目与装配结果发送给 `Sessions` 进行存储。
+会话由消息节点按树形结构组织而成。会话树的消息节点不允许删除，分支通过父指针表达。各会话之间彼此隔离。`Gateway` 读取会话发送至客户端供其构建界面视图：无 `nodeId` 读取完整树，有 `nodeId` 读取根到该节点的分支。`Context` 在装配请求上下文时读取当前消息节点所在分支的历史消息记录，确定智能体可见消息序列，同时将其消息队列的各条目与装配结果发送给 `Sessions` 进行存储。
 
 会话存储经统一接口访问，具体后端由服务层提供。
 
@@ -599,11 +603,11 @@ participant "Context" as core
 participant "Sessions" as store
 participant "Gateway / Clients" as ui
 
-core -> store : 追加消息
+core -> store : 创建/批量追加消息
 core -> store : 读取活动分支的消息记录
 store --> core : 该会话的事实（确定智能体可见消息序列）
-ui -> store : 读取会话
-store --> ui : 会话记录（成型为界面视图）
+ui -> store : 读取全树/分支
+store --> ui : 全树或分支记录（成型为界面视图）
 @enduml
 ```
 
@@ -729,7 +733,7 @@ interface Event<E = JsonValue> {
 | 会话 | `session.configure` | `{ sessionId, model?, provider?, systemPrompt? }` | `SessionMeta` |
 | 会话 | `session.subscribe` | `{ sessionId }` | 订阅确认，事件经推送 |
 | 执行 | `turn.list` | `{}` | `{ turns: [{ sessionId, turnId, startedAt }] }` |
-| 执行 | `turn.start` | `{ sessionId }` | `{ turnId, mode }` |
+| 执行 | `turn.start` | `{ sessionId, nodeId? }` | `{ turnId, mode }` |
 | 执行 | `turn.cancel` | `{ turnId }` | `{ cancelled }` |
 | 供应商 | `provider.list` | `{}` | `{ providers: ProviderInfo[] }` |
 | 消息队列 | `queue.enqueue` | `{ sessionId, entries }` | `{ ids }` |
@@ -754,7 +758,7 @@ interface Event<E = JsonValue> {
 | `selection.updated` | 声明选择状态变化 |
 | `client.launched` | 客户端进程启动 |
 
-`SessionMeta` 是会话的持久元数据，字段见 §6.5。运行状态不属于会话元数据：`turn.list` 返回当前活跃 turn，会话出现在其中即为热会话，否则为冷会话；`session.list` 只返回持久元数据，`session.read` 返回持久元数据、记录、待装配队列与选择状态，客户端按 `sessionId` 与 `turn.list` 合并，`session.read` 的 `meta` 为 `SessionMeta`。`session.configure` 修改会话级设置；若该会话存在活跃 turn，设置在下一次 turn 生效。模型能力（如上下文窗口）由 `provider.list` 的 `ModelInfo` 提供，不写入会话元数据。
+`SessionMeta` 是会话元数据，字段见 §6.5。服务层在 `session.create` 创建临时 `SessionMeta`，首次落盘前不写盘，也不出现在 `session.list`；`session.list` 只返回已落盘的 `SessionMeta`。`SessionMeta` 不含活动分支信息；默认活动分支为最新节点所在分支，由于会话记录只追加式写入，最新节点总能在会话记录末尾找到。运行状态不属于会话元数据：`turn.list` 返回当前活跃 turn，会话出现在其中即为热会话，否则为冷会话；`session.read` 返回 `meta`（临时或已落盘）、记录、待装配队列与选择状态，客户端按 `sessionId` 与 `turn.list` 合并，`session.read` 的 `meta` 为 `SessionMeta`。`session.configure` 修改会话级设置；若该会话存在活跃 turn，设置在下一次 turn 生效。模型能力（如上下文窗口）由 `provider.list` 的 `ModelInfo` 提供，不写入会话元数据。
 
 `session.read` 的 `SessionMeta`、`SessionNode` 定义在 §6.5，`QueueEntry` 定义见本节；协议按相同字段序列化。
 
@@ -765,12 +769,13 @@ interface Event<E = JsonValue> {
 - 版本协商：连接建立时客户端先发 `protocol.hello` 交换版本；主版本不同返回错误并关闭连接，次版本向下兼容。daemon 升级会断开连接，客户端重连后重新握手。
 - 传输：默认 Unix domain socket；连接建立时校验 peer 凭据，要求与 daemon 同用户。Windows 使用命名管道。
 - 中止：`turn.cancel` 按 `turnId` 立即中止当前供应商流；正在执行的工具不被强制终止，`ToolInvocationContext.signal` 置为中止，工具可自行提前返回。中止后不再发起新的 step，当前工具结果回填后活跃 turn 结束；已产生的智能体回复与控制消息写入会话并标记为中断。客户端连接断开或取消会话订阅不视为中止，活跃 turn 继续进行。CLI 的 `sessions cancel <id>` 先解析该会话的活跃 turn。
-- turn 与 steer：无活跃 turn 时，`turn.start` 启动新的 turn（`mode` 为 `new`）；已有活跃 turn 时，`turn.start` 只确认队列中新增条目，作为 steer 在下一个 step 边界装配，不启动第二个 turn（`mode` 为 `steer`）。并发 `turn.start` 由 `Concurrency` 串行处理，后到者按 steer 处理。
+- turn 与 steer：无活跃 turn 时，`turn.start` 启动新的 turn（`mode` 为 `new`）；`nodeId` 可选，仅对已落盘会话有效，用于选择新 turn 的分支起点；未指定时从节点记录最后节点继续。已有活跃 turn 时，`turn.start` 只确认队列中新增条目，作为 steer 在下一个 step 边界装配，不启动第二个 turn（`mode` 为 `steer`）；此时不得带 `nodeId`。并发 `turn.start` 由 `Concurrency` 串行处理，后到者按 steer 处理。
+- 会话创建：`session.create` 只由服务层创建临时 `SessionMeta` 与内存队列，不写盘；首次 `turn.start` 产生节点时，`SessionRepository.create` 原子写入 meta 与 nodes。`Sessions` 对所有节点统一分配 `id`/`parentId`，初始节点与后续追加没有区别。临时会话不进入 `session.list`；首次 turn 必须产生至少一个节点，否则报错且不落盘。
 - 运行时：`turn.list` 给出活跃 turn 快照，`turn.started` / `turn.ended` 维护该集合；会话是否在运行由成员资格表示，不设 `status` 字段。`session.subscribe` 按会话推送记录、队列、选择与 turn 事件，不另设订阅方法。
 - 队列：`session.read` 的 `queue` 返回待装配条目；`queue.enqueue` 只入队；`turn.start` 时确认。`queue.edit` 只作用于 `kind=agent` 的条目；声明变更、压缩记录、中止标记等控制消息只能整条 `queue.enqueue` 或 `queue.remove`；`queue.clear` 清空全部待装配条目。条目被装配取走后，不再接受 `queue.edit`/`queue.remove`。队列按入队顺序，不提供重排方法。
 - 队列事件：`queue.updated` 在入队、编辑、删除、清空与出队后推送当前完整 `QueueEntry[]`；客户端整体替换本地队列。`session.read` 用于首次加载和重连，订阅仍由 `session.subscribe` 承担，不新增 `queue.subscribe`。
 - 多客户端：队列写操作由 `Concurrency` 串行化；客户端以 `session.read` 的 `queue` 为初始快照、`queue.updated` 为增量，重连后重新 `session.read`；并发编辑按最后写入者获胜。
-- 会话视图：`session.read` 在同一会话锁内返回 `meta`、`records`、`queue` 与 `selection`；`nodeId` 只影响 `records`，`queue` 始终是当前待装配条目。
+- 会话视图：`session.read` 在同一会话锁内返回 `meta`、`records`、`queue` 与 `selection`。无 `nodeId` 时 `records` 为完整会话树（扁平 `SessionNode[]`，按追加顺序），`selection` 按活动分支的声明 delta 异或；有 `nodeId` 时 `records` 为该节点向上至根的线性分支，`selection` 按该分支的声明 delta 异或。`queue` 始终是当前待装配条目；临时会话没有节点，带 `nodeId` 报错；`session.read` 不改变活动分支，分支继续由 `turn.start` 的 `nodeId` 选择。
 - 事件：会话、队列与 turn 事件带 `sessionId` 与时间戳，客户端按 `sessionId` 路由多会话订阅。
 - 事件推送：引擎事件和协议事件的相互转换由 `Gateway` 完成。
 - CLI 与协议：`run`、`sessions`、`client`、`templates` 与只读的 `provider.list` 经协议方法完成；`providers check`、`extensions`、`auth`、`config` 仅 CLI。CLI 的管理命令直接读写本地配置、凭据与扩展目录，不经 daemon 协议；daemon 在创建会话或发起请求时读取，`config` 只影响此后创建的会话。协议不提供全局配置、凭据与扩展安装的写方法。
@@ -930,7 +935,6 @@ interface SessionMeta {
   model: string;
   provider: string;
   workspace: string;
-  headNodeId: string;     // 当前节点
   createdAt: string;      // 创建时间
   schemaVersion: number;  // 格式版本
 }
@@ -947,8 +951,10 @@ interface SessionNode {
 }
 
 interface SessionRepository {
-  append(sessionId: string, node: SessionNode): Promise<void>;
-  readBranch(sessionId: string, headNodeId: string): AsyncIterable<SessionNode>;
+  create(meta: SessionMeta, nodes: SessionNode[]): Promise<void>;
+  append(sessionId: string, nodes: SessionNode[]): Promise<void>;
+  readBranch(sessionId: string, nodeId?: string): AsyncIterable<SessionNode>;
+  readTree(sessionId: string): AsyncIterable<SessionNode>;
   list(): Promise<SessionMeta[]>;
 }
 
@@ -970,8 +976,9 @@ interface Exec {
 ```
 
 - `Sessions` 定义 `SessionNode` 形态与分支语义，存储经 `SessionRepository` 接口访问；具体后端由服务层 `SessionStore` 实现。
-- `SessionNode` 的 `parentId` 表达树结构，根节点指向自身；`readBranch` 从 `headNodeId` 沿父指针上溯到根，按根到 head 的顺序返回。`SessionMeta` 是 `list` 返回的会话元数据。
-- `Sessions` 在持久化时分配 `SessionNode.id` 与 `parentId`；队列条目的临时 `id` 不写入节点，出队后作废。`SessionRepository` 只写入已确定 `id`/`parentId` 的节点。
+- `SessionNode` 的 `parentId` 表达树结构，根节点指向自身；`readBranch` 从 `nodeId` 沿父指针上溯到根，按根到该节点的顺序返回；省略 `nodeId` 时以节点记录最后一个节点为分支末端；`readTree` 返回全部节点，按追加顺序返回。
+- 服务层在 `session.create` 创建临时 `SessionMeta`；`SessionRepository.create(meta, nodes)` 原子写入 meta 与 nodes，`append(sessionId, nodes)` 批量原子追加；两者都不改写 meta。`nodes` 由 `Sessions` 分配 id/parentId；`create`/`append` 要求 `nodes` 非空。
+- `Sessions` 对所有节点统一分配 `SessionNode.id` 与 `parentId`；队列条目的临时 `id` 不写入节点，出队后作废。`SessionRepository` 只写入已确定 `id`/`parentId` 的节点；`create`/`append` 批量原子，失败不留下部分节点。
 - `SessionRepository` 只承载持久记录与元数据；活跃 turn、锁与中止信号由服务层 `Concurrency` 维护，不进入该接口。
 - `Credentials` 与 `Exec` 同理：接口在核心层，实现在服务层。
 
@@ -1107,24 +1114,26 @@ interface ProjectRef {
 
 控制消息的子类型由 `role` 表示：
 
-- `declaration`：记录新增或删除的工具、技能条目。
+- `declaration`：记录新增或删除的工具、技能条目的 delta。
 - `compaction`：记录被压缩的消息范围与摘要内容。
 - `cancel`：记录活跃 turn 被中止的位置与原因。
 
-装配时以会话当前节点为起点，沿父指针上溯得到活动分支；`Context` 据此确定智能体可见消息序列。裁剪只影响本次装配的可见序列，不新增节点；压缩产生一条控制消息。装配时 `Sessions` 为节点分配 `id` 与 `parentId`，队列条目的临时 `id` 不写入节点、出队后作废；持久化与出队在同一临界区完成，失败时条目保留且不产生节点；崩溃丢失的队列条目不参与恢复。
+新会话由服务层创建临时 `SessionMeta` 与内存队列，首次装配前不写盘；首次 `turn.start` 产生节点后，`SessionRepository.create(meta, nodes)` 原子写入 meta 与 nodes。此前 `session.list` 不包含该会话，磁盘上不产生空会话目录；首次 turn 必须产生至少一个节点，否则报错且不落盘。`Sessions` 对所有节点统一分配 `id`/`parentId`，初始节点与后续追加没有区别；后续装配使用批量 `append`。会话默认活动分支由节点记录最后一个节点表示，`append` 只追加，不改写 meta。
+
+装配时以指定的 `nodeId` 为起点沿父指针上溯得到活动分支，在无 `nodeId` 时使用沿会话记录末行节点沿父指针上溯得到的默认活动分支；`Context` 据此确定智能体可见消息序列。`session.read` 无 `nodeId` 时读取完整会话树，有 `nodeId` 时读取根到该节点的分支；控制消息的 `content` 同样使用 `ContentBlock[]`，声明 delta 按异或计算 selection。裁剪只影响本次装配的可见序列，不新增节点；压缩产生一条控制消息。队列条目的临时 `id` 不写入节点、出队后作废；持久化与出队在同一临界区完成，失败时条目保留且不产生节点；崩溃丢失的队列条目不参与恢复；首次落盘前的临时 meta 与队列随 daemon 退出丢失。
 
 ### 7.2 存储布局
 
 | 位置 | 内容 |
 |---|---|
 | 软件配置目录 | `config.json`（扩展相关配置）、`credentials`（由 `CredentialStore` 管理）、`templates/`、`extensions/` |
-| 数据目录 | `projects.json`（模板衍生项目）、`sessions/<sessionId>/meta.json`（会话元数据）、`sessions/<sessionId>/events.jsonl`（`SessionNode` 日志） |
+| 数据目录 | `projects.json`（模板衍生项目）、`sessions/<sessionId>/meta.json`（会话元数据）、`sessions/<sessionId>/events.jsonl`（`SessionNode` 记录） |
 | 工作区 | `.pisces/config.json`（工作区级扩展配置）、扩展目录 |
 
-- 节点日志为 `SessionNode` 的 JSONL，按追加顺序写入；`meta.json` 保存 §6.5 的 `SessionMeta`（会话标识、创建时间、当前节点、模型、供应商、工作区与 schema 版本）。
-- 写入原子性由存储实现保证；fsync 与批量策略由详细设计决定。
+- 节点记录为 `SessionNode` 的 JSONL，按追加顺序写入；`meta.json` 只对已落盘会话存在，保存 §6.5 的 `SessionMeta`（会话标识、创建时间、模型、供应商、工作区与 schema 版本）。空会话没有 `meta.json`，也不产生会话目录；默认活动分支是节点记录的最后一行所在分支。
+- `SessionRepository.create` 原子写入 `meta.json` 与 nodes；`append` 批量原子追加 nodes；两者都不改写 `meta.json`。写入原子性由存储实现保证；fsync 与批量策略由详细设计决定。
 - 同一会话的写入由 `Concurrency` 串行化；客户端不持有全局锁。
-- 配置文件与节点日志不保存凭据明文，只保存 `credentialRef`。
+- 配置文件与节点记录不保存凭据明文，只保存 `credentialRef`。
 - 配置与凭据由 CLI 写入，daemon 按使用时机读取；`meta.json` 由 daemon 维护。
 
 ### 7.3 导出
@@ -1138,15 +1147,16 @@ interface ProjectRef {
 - daemon 以用户级单实例运行：启动时获取数据目录下的锁文件并绑定 socket；锁或 socket 已被占用则退出。
 - 传输默认使用 Unix domain socket，权限 `0600`，连接建立时校验 peer 凭据要求同用户；Windows 使用命名管道。
 - `start` 启动 daemon；`stop` 停止接收新请求、中止进行中的热会话、等待写盘完成并释放 socket；`status` 报告运行状态与会话数。
+- 临时会话在首次落盘前只存在于服务层内存；daemon 退出即丢失，磁盘不产生空会话。已落盘会话按正常流程恢复。
 - 热会话结束后成为冷会话；冷会话可从持久化记录恢复为新的热会话。
 - daemon 异常退出后，重启时恢复已持久化的冷会话；未完成的热会话标记为中断。
 
 ### 8.2 性能与可靠性
 
 - 供应商响应以流式事件处理，不等待完整响应。
-- 装配活动分支的复杂度与该分支长度成正比；不复制整棵会话树。
+- 装配活动分支的复杂度与该分支长度成正比；`session.read` 无 `nodeId` 读取完整树时与节点数成正比，有 `nodeId` 时与分支长度成正比；不复制整棵会话树。
 - 工具调用可并行，并发数由服务层限制；结果按原始调用顺序回填。
-- 会话节点只追加；写入原子完成，失败时不留下半条记录。
+- 会话节点只追加；`create`/`append` 批量原子完成，失败时不留下半条记录。
 - 队列在装配前驻留内存，装配时取走并写入会话；这是有意的取舍，daemon 崩溃会丢失未装配的队列条目。
 - 事件推送与请求处理不共享全局锁；同一会话的 turn 串行执行。
 
