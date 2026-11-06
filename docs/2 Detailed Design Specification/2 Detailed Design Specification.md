@@ -10,9 +10,10 @@
 
 - 第 2 章公共类型；
 - 第 3 章协议层；
-- 第 4 章核心层（`Sessions`、`Context`、`Tools`、`AgentLoopDriver`）。
+- 第 4 章核心层（`Sessions`、`Context`、`Tools`、`AgentLoopDriver`）；
+- 第 5 章服务层（daemon、`Transport`、`Concurrency`、`Gateway`、`SessionStore`、`Extensions`、`ProviderHost`、`WorkspaceAccess`、`ExecHost`、`TemplateStore`、`ClientRegistry`）。
 
-服务层模块、端到端流程、CLI 与错误恢复在后续批次编写。
+端到端流程、CLI、迁移与完整错误恢复在后续批次编写。
 
 ### 1.2 与 HLD 的关系
 
@@ -40,7 +41,7 @@ HLD 是架构与语义的唯一来源；本文档只补充 HLD 明确留给详�
 | 2 公共类型 | §1.6、§5.2、§6.1、§6.3、§6.4、§6.5、§7.1 |
 | 3 协议层 | §3.4、§5.2、§6.1、§6.7、§6.8、§6.9、§8.6 |
 | 4 核心层 | §4.1、§5.1、§5.2、§5.3、§6.2、§6.3、§6.4、§7.1 |
-| 后续服务层章节 | §4.2、§5.4、§5.5、§6.6、§8 |
+| 5 服务层 | §3.1、§3.2、§4.2、§5.4、§5.5、§6.6、§6.9、§7.2、§8.1 |
 
 ## 2 公共类型
 
@@ -1081,3 +1082,337 @@ idle -> running -> cancelling -> ended
 - 队列不持久化；`Context` 出队与持久化在同一临界区。
 - 选择只使用 `package#name`；`selection` 不包含 id、顺序或队列条目。
 - 包装器执行顺序无关；工具与包装器选择由声明类控制消息表达。
+
+## 5 服务层
+
+### 5.1 daemon 与 `Transport`
+
+daemon 是用户级单实例进程，负责监听、路由、持久化、扩展装载和供应商请求执行；核心层实例由 daemon 持有。
+
+#### 5.1.1 启动与停止
+
+- 启动时获取数据目录下的锁文件并绑定 socket；锁或 socket 已被占用时退出。
+- 启动顺序：
+  1. 读取软件配置与工作区配置；
+  2. 初始化 `SessionStore`；
+  3. 初始化 `Extensions`、`Tools`、`Skills`、`ProviderManagement`；
+  4. 初始化 `ProviderHost`、`CredentialStore`；
+  5. 初始化 `Gateway` 与 `Concurrency`；
+  6. 开始监听 `Transport`。
+- 停止时先停止接受新连接，再中止活跃 turn、等待写盘完成、关闭 socket 与锁。
+- daemon 崩溃后只恢复已落盘会话；临时会话与消息队列随进程退出丢失。
+- 未完成的热会话在恢复时标记为中断，由用户决定是否继续。
+
+#### 5.1.2 `Transport`
+
+```ts
+interface Connection {
+  id: string;
+  peerUid: number;
+  send(message: Response | Event): void;
+  close(): void;
+}
+
+interface Transport {
+  start(handler: (connection: Connection, request: Request) => Promise<void>): Promise<void>;
+  stop(): Promise<void>;
+}
+```
+
+- 默认 Unix domain socket，权限 `0600`；Windows 使用命名管道。
+- 连接建立时校验 peer 凭据，要求与 daemon 同用户；不监听网络地址。
+- 分帧按 §3.1 的 NDJSON 规则；超过 8 MiB 关闭连接。
+- `Transport` 只负责监听、连接、分帧、发送和关闭，不解释方法语义。
+- `Connection.send` 串行化同一连接上的写入，避免多请求响应交错破坏帧。
+- 连接关闭时通知 `Gateway` 清理订阅；不中止活跃 turn。
+
+### 5.2 `Concurrency`
+
+```ts
+interface Concurrency {
+  runExclusive<T>(sessionId: SessionId, task: () => Promise<T>): Promise<T>;
+  registerTurn(sessionId: SessionId, turnId: TurnId): void;
+  unregisterTurn(sessionId: SessionId, turnId: TurnId): void;
+  activeTurn(sessionId: SessionId): TurnId | undefined;
+  cancelAll(): Promise<void>;
+}
+```
+
+- 每个会话一把逻辑锁；会话内队列写、配置、turn 启动与持久化按锁串行化。
+- 不同会话可并行；事件发送与请求处理不共享全局锁。
+- `activeTurn` 只记录正在运行的 turn；`turn.list` 从该集合生成快照。
+- `runExclusive` 不跨会话持有锁；回调内不得等待其他会话的锁。
+- 停止时取消所有活跃 turn，并等待其收尾写入完成。
+- `Concurrency` 不持久化状态；daemon 重启后活跃 turn 集合为空。
+
+### 5.3 `Gateway`
+
+`Gateway` 把协议方法映射到 `Context`、`Sessions`、`AgentLoopDriver`、`Extensions` 与存储；本身不实现上下文组装或工具执行。
+
+#### 5.3.1 会话运行时
+
+```ts
+interface SessionRuntime {
+  meta: SessionMeta;
+  context: Context;
+  activeTurn?: TurnId;
+  subscribers: Set<string>;   // connection id
+}
+```
+
+- `Gateway` 维护 `sessionId -> SessionRuntime` 映射。
+- 已落盘会话按需加载：读取 `SessionMeta`，创建 `Context`（`persisted=true`）并调用 `initialize`。
+- `session.create` 创建临时 `SessionMeta`、`Context`（`persisted=false`）和空队列；不写盘。
+- 临时会话不出现在 `session.list`；daemon 退出即丢失。
+- 同一会话的运行时只创建一次；多个客户端共享。
+
+#### 5.3.2 方法路由
+
+- `session.create`：校验 provider/model、workspace 与 extensions；创建运行时；将 `systemPrompt` 和扩展选择物化为队列条目；返回临时 `SessionMeta`。
+- `session.list`：只查 `SessionStore`；不经过运行时。
+- `session.read`：在会话锁内读取 `meta`、`records`、`queue` 与 `selection`；无 `nodeId` 读全树，有 `nodeId` 读分支；临时会话没有节点。`selection` 由 `Context.selectionFor` 计算，只含已持久化记录。
+- `session.configure`：`model`/`provider` 校验后更新 meta；临时会话只改内存，已落盘会话调用 `SessionStore.updateMeta`；`systemPrompt` 只更新或新增 `role=system` 队列条目。
+- `session.subscribe` / `session.unsubscribe`：维护连接的订阅集合；重复订阅幂等；退订不发事件；断开清理。
+- `queue.enqueue` / `edit` / `remove` / `clear`：委托 `Context`；返回队列 id；推送 `queue.updated`。
+- `entries.snapshot`：从 `Extensions` 取得可用条目，从 `Context` 取得已持久化选择；不合并队列。
+- `turn.start`：无活跃 turn 时生成 `turnId`，注册到 `Concurrency`，异步调用 `AgentLoopDriver.run`，返回 `{turnId, mode:"new"}`；已有活跃 turn 时只确认队列并返回该 turn 的 `turnId` 与 `mode=steer`。
+- `turn.list`：从 `Concurrency` 返回活跃 turn 快照。
+- `turn.cancel`：调用 driver 的 cancel；找不到返回 `cancelled=false`。
+- `provider.list`：从 `ProviderManagement` 与 `CredentialStore` 生成；`ready` 由凭据状态计算。
+- `template.list` / `preview` / `apply`：委托 `TemplateStore`、`WorkspaceAccess`、`ExecHost`，并创建临时会话。
+- `client.list` / `start`：委托 `ClientRegistry`。
+
+#### 5.3.3 事件路由
+
+- `Context` 的 `queue.updated`、`selection.updated`、`session.updated`，以及 driver 的 turn 事件进入 `EventBus`。
+- `Gateway` 把引擎事件转换为协议事件，只发送给订阅该会话的连接。
+- 事件都带 `sessionId` 与时间戳；`queue.updated` 携带完整队列，`selection.updated` 携带完整名称集合。
+- `session.updated` 只携带本次追加节点；客户端按 `id`/`parentId` 合并。
+- `client.launched` 是连接级事件，不受会话订阅限制。
+- 事件不重放；重连后客户端重新 `session.read`。
+
+#### 5.3.4 多客户端与临时状态
+
+- 队列写操作通过 `Concurrency.runExclusive` 串行化，最后写入者获胜。
+- 客户端以 `session.read` 为初始快照、`queue.updated` 为增量。
+- 订阅与连接绑定，不持有全局锁。
+- 临时会话可读、可订阅、可队列操作；首次 turn 落盘后进入 `session.list`。
+- daemon 停止或崩溃时，未落盘的临时会话与队列不恢复。
+
+### 5.4 `SessionStore`
+
+`SessionStore` 实现 `SessionRepository`，负责会话目录、`meta.json`、`events.jsonl` 与项目记录。
+
+#### 5.4.1 布局
+
+| 路径 | 内容 |
+|---|---|
+| `<dataDir>/sessions/<sessionId>/meta.json` | `SessionMeta` |
+| `<dataDir>/sessions/<sessionId>/events.jsonl` | `SessionNode`，一行一个 |
+| `<dataDir>/projects.json` | 模板衍生项目 `ProjectRef[]` |
+
+- `sessionId` 只能使用受控字符集；不得包含路径分隔符、`..` 或绝对路径。
+- 空会话没有目录、没有 `meta.json`。
+- `meta.json` 与 `events.jsonl` 只由 daemon 维护；用户不手工编辑。
+
+#### 5.4.2 写入
+
+- `create`：
+  1. 确认会话目录不存在；
+  2. 写 `events.jsonl.tmp` 与 `meta.json.tmp`；
+  3. fsync 两个临时文件；
+  4. rename events，再 rename meta；
+  5. fsync 目录（POSIX；Windows 使用可用语义）。
+- `append`：
+  1. 取该会话写锁；
+  2. 若文件末尾存在不完整行，截断到最后一个完整换行；
+  3. 将本批节点写成完整 JSONL 行；
+  4. 一次批量写入并 fsync。
+- `updateMeta`：
+  1. 读取当前 meta；
+  2. 只替换 `model`、`provider`；
+  3. 写临时 meta，fsync 后 atomic rename。
+- `create`/`append`/`updateMeta` 失败时不留下半批节点；临时文件在启动时清理。
+- 写入不修改已有节点，不修改 `meta.json` 的不可变字段。
+
+#### 5.4.3 读取
+
+- `readTree` 按文件顺序返回全部节点；完整行 JSON 损坏返回 `storage.corrupt`。
+- `readBranch` 读取全部行，按 `id -> parentId` 上溯到根，按根到节点顺序返回。
+- 省略 `nodeId` 时以最后一个完整行为分支末端。
+- 末尾不完整行在读取时忽略，不修改文件；下一次 append 前截断。
+- 文件中间出现空白行忽略；非法行报错。
+- 节点 `parentId` 不存在、根指针异常或环返回 `storage.corrupt`。
+
+#### 5.4.4 列表与项目
+
+- `list` 扫描 `sessions/*/meta.json`，只返回已落盘会话；忽略临时文件与无 meta 的孤儿目录。
+- 返回顺序不构成契约。
+- `projects.json` 由 `TemplateStore` 维护，记录 `ProjectRef`。
+- 配置、凭据、扩展目录不进入会话记录。
+
+#### 5.4.5 并发与恢复
+
+- 同一会话的 `create`/`append`/`updateMeta` 由 `Concurrency` 串行化。
+- 不同会话可并行写。
+- daemon 重启时清理 `.tmp` 文件与无 meta 的孤儿目录。
+- 已落盘会话恢复为冷会话；未完成 turn 由 driver 标记中断。
+- `meta.json` 不可读或 schema 不支持时报告 `storage.corrupt`，不返回部分结果。
+
+### 5.5 `Extensions`
+
+`Extensions` 负责发现扩展、读取清单与配置、登记内容条目，并按需装载实现代码。
+
+#### 5.5.1 发现来源
+
+- 内置扩展：`extensions/builtin`。
+- 软件配置目录：`<configDir>/extensions/`。
+- 工作区：`<workspace>/.pisces/extensions/`。
+- 扩展是普通 npm 包或目录；以 `package.json` 的 `pisces` 字段或约定目录声明条目。
+
+#### 5.5.2 清单
+
+```ts
+interface ExtensionManifest {
+  tools?: string[];
+  wrappers?: string[];
+  skills?: string[];
+  context?: string[];
+  providers?: string[];
+  clients?: { id: string; entry: string }[];
+}
+```
+
+- 发现阶段只读取清单与资源文件，不执行扩展代码。
+- 条目名称统一为 `package#name`：`package` 取扩展包名，`name` 取条目声明的名称；未声明名称时取文件/目录基名。
+- 同一 `package#name` 重复出现时，该条目不可用并记录清点错误；不同包同名不冲突。
+- `providers` 解析为 `ProviderDescriptor`；`clients` 登记到 `ClientRegistry`。
+- `tools`、`wrappers`、`context` 的代码按需导入；`skills` 读取内容。
+
+#### 5.5.3 配置
+
+- 配置来源优先级：工作区 `.pisces/config.json` > 软件配置目录 > 内置默认。
+- `config` CLI 只影响此后创建的会话；不修改既有会话的 `SessionMeta`。
+- 新会话的默认扩展选择来自配置；`session.create.extensions` 显式列表替换默认选择。
+- 配置键不存在或类型错误返回 `config.invalid` / `config.unknown_key`。
+- 扩展代码不直接访问配置文件；由 `Extensions` 读取并注入。
+
+#### 5.5.4 装载
+
+- 使用内置 TypeScript 加载器（jiti 或等价实现）按需转译 `.ts`/`.tsx`。
+- 宿主包 `@pisces/*` 映射到 daemon 内的宿主实例，扩展不打包宿主包。
+- 扩展依赖从其自身目录的 `node_modules` 解析。
+- 装载器不因文件位于 `node_modules` 而拒绝加载；扩展无需预构建。
+- 工具、包装器、上下文来源、供应商、客户端按类型登记到对应注册表。
+- 一个扩展装载失败只标记该扩展不可用，不阻断 daemon 启动。
+- 包装器执行顺序无关；选择只决定是否加入工具流水线。
+
+#### 5.5.5 清点与选择
+
+- `entries.snapshot` 返回工具、包装器、技能、上下文来源；返回 `package#name`、类型、来源与描述。
+- 工具与包装器的声明只序列化 `id`、`name`、`description`、`parameters`；实现代码留在本地。
+- 技能内容作为系统消息进入装配；上下文来源片段按 `Context` 规则追加。
+- `providers`、`clients` 不参与选择。
+- 扩展的安装、更新与移除由 npm、git 完成，不在本软件生命周期内。
+
+### 5.6 `ProviderHost`
+
+`ProviderHost` 实现 `ExecuteProvider`，负责 HTTP、凭据注入、超时、重试与传输分帧。
+
+```ts
+interface ProviderHost {
+  execute(providerId: string): ExecuteProvider;
+  ready(providerId: string): Promise<boolean>;
+}
+```
+
+- `ProviderDescriptor` 提供 `baseUrl`、`auth`、`headers` 与模型清单；`ProviderHost` 以 `baseUrl + WireRequest.path` 组合请求。
+- `ExecuteProvider` 绑定到 provider；`AgentLoopDriver` 只接收注入的函数，不读配置。
+- 凭据由 `CredentialStore` 提供；API key 注入请求头，OAuth 按需刷新；错误消息不含凭据。
+- 请求体为 `WireRequest.body`，headers 合并描述符 headers 与适配器 headers。
+- 响应使用流式读取；SSE 的 `data:` 载荷作为字符串块交给 `LLMAdapter.parseChunk`；非 SSE 响应按单块处理。
+- 429 与 5xx 可重试并退避；4xx（除 429）不重试；中止不重试；流开始后不重试。
+- 超时、网络错误、状态码错误映射为 `provider.transport` / `provider.timeout` / `provider.invalid_response`。
+- 供应商业务错误体交给适配器解析；`ProviderHost` 不解释模型内容。
+- `ready` 由凭据有效性与模型清单共同决定；`provider.list` 使用该结果。
+
+### 5.7 `WorkspaceAccess` 与 `ExecHost`
+
+#### 5.7.1 `WorkspaceAccess`
+
+```ts
+interface WorkspaceAccess {
+  resolve(workspace: string, path: string): string;
+  ensureDirectory(path: string): Promise<void>;
+  writeFile(path: string, content: string): Promise<void>;
+  readFile(path: string): Promise<string>;
+  exists(path: string): Promise<boolean>;
+}
+```
+
+- `resolve` 将相对路径限制在工作区内；拒绝绝对路径、`..` 越界与非法路径字符。
+- 不跟随工作区外的符号链接；不提供沙箱。
+- 模板初始化与文件创建都经该接口，核心层不接触文件系统。
+- 写入失败返回 `storage.io`；已写文件由调用方处置。
+
+#### 5.7.2 `ExecHost`
+
+```ts
+interface ExecResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+interface ExecHost {
+  run(
+    command: string,
+    args: string[],
+    options?: ExecOptions
+  ): Promise<ExecResult>;
+}
+```
+
+`ExecOptions` 见 HLD §6.5。
+
+- 使用 `spawn` 直接执行 command/args，不经过 shell。
+- `cwd`、`env`、`timeoutMs`、`signal` 由调用方提供。
+- 超时或 abort 时终止子进程；已产生的 stdout/stderr 保留在结果中。
+- 结果包含退出码、stdout、stderr；非零退出不抛异常，由调用方判断。
+- 不继承 daemon 的敏感环境变量；只传递显式 `env` 与基础 PATH。
+- 不强制终止工具；工具通过 `ToolInvocationContext.signal` 协作中止。
+
+### 5.8 `TemplateStore` 与 `ClientRegistry`
+
+#### 5.8.1 `TemplateStore`
+
+- 从软件配置目录的 `templates/` 读取模板；模板是声明式目录/文件/脚本。
+- `list` 返回 `TemplateInfo`；`preview` 解析并返回 `TemplatePreview`，无副作用。
+- `apply` 校验模板、工作区与 `confirmed`；由 `WorkspaceAccess` 创建文件、`ExecHost` 执行脚本。
+- 成功后写入 `ProjectRef` 到 `projects.json`；失败不创建会话。
+- 已创建文件不自动回滚；由用户处置。
+- 模板提示词作为工作区文件，进入请求体前仍须经队列与确认。
+
+#### 5.8.2 `ClientRegistry`
+
+```ts
+interface ClientRegistry {
+  register(registration: ClientRegistration): void;
+  list(): ClientRegistration[];
+  start(id: ClientId): Promise<{ pid: number }>;
+}
+```
+
+- 客户端登记来自扩展清单的 `clients`。
+- `start` 校验 id，按 `entry` 启动子进程，传入 daemon socket 路径与客户端 id。
+- 启动失败返回 `client.launch_failed`；已启动进程不进入协议流。
+- 客户端 stdout/stderr 由 daemon 日志接收，不混入协议。
+
+### 5.9 服务层装配
+
+- `Gateway` 依赖 `SessionStore`、`Extensions`、`ProviderHost`、`TemplateStore`、`ClientRegistry` 与 `Concurrency`。
+- `Extensions` 依赖 `Tools`、`Skills`、`Context`、`ProviderManagement`、`ClientRegistry`。
+- `ProviderHost` 依赖 `CredentialStore` 与 `ProviderManagement`。
+- `TemplateStore` 依赖 `WorkspaceAccess`、`ExecHost`、`projects.json`。
+- 核心层不引用服务层；服务层通过接口注入。
+- 启动失败时关闭已打开的 socket、锁与子进程；不留下半初始化状态。
