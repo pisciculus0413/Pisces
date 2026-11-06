@@ -10,10 +10,12 @@
 
 - 第 2 章公共类型；
 - 第 3 章协议层；
-- 第 4 章核心层（`Sessions`、`Context`、`Tools`、`AgentLoopDriver`）；
-- 第 5 章服务层（daemon、`Transport`、`Concurrency`、`Gateway`、`SessionStore`、`Extensions`、`ProviderHost`、`WorkspaceAccess`、`ExecHost`、`TemplateStore`、`ClientRegistry`）。
+- 第 4 章核心层；
+- 第 5 章服务层；
+- 第 6 章端到端流程与恢复；
+- 第 7 章 CLI 与数据迁移。
 
-端到端流程、CLI、迁移与完整错误恢复在后续批次编写。
+非功能设计、完整测试策略与剩余错误路径在后续批次编写。
 
 ### 1.2 与 HLD 的关系
 
@@ -42,6 +44,8 @@ HLD 是架构与语义的唯一来源；本文档只补充 HLD 明确留给详�
 | 3 协议层 | §3.4、§5.2、§6.1、§6.7、§6.8、§6.9、§8.6 |
 | 4 核心层 | §4.1、§5.1、§5.2、§5.3、§6.2、§6.3、§6.4、§7.1 |
 | 5 服务层 | §3.1、§3.2、§4.2、§5.4、§5.5、§6.6、§6.9、§7.2、§8.1 |
+| 6 端到端流程 | §5.2、§5.3、§5.5、§5.6、§8.1、§8.4 |
+| 7 CLI 与迁移 | §6.7、§6.8、§7.3、§8.6 |
 
 ## 2 公共类型
 
@@ -1175,7 +1179,7 @@ interface SessionRuntime {
 - `session.subscribe` / `session.unsubscribe`：维护连接的订阅集合；重复订阅幂等；退订不发事件；断开清理。
 - `queue.enqueue` / `edit` / `remove` / `clear`：委托 `Context`；返回队列 id；推送 `queue.updated`。
 - `entries.snapshot`：从 `Extensions` 取得可用条目，从 `Context` 取得已持久化选择；不合并队列。
-- `turn.start`：无活跃 turn 时生成 `turnId`，注册到 `Concurrency`，异步调用 `AgentLoopDriver.run`，返回 `{turnId, mode:"new"}`；已有活跃 turn 时只确认队列并返回该 turn 的 `turnId` 与 `mode=steer`。
+- `turn.start`：无活跃 turn 时生成 `turnId`，已落盘会话先写入 `active-turn.json`，临时会话在首批节点落盘后补写；注册到 `Concurrency`，异步调用 `AgentLoopDriver.run`，返回 `{turnId, mode:"new"}`；turn 结束或失败时删除标记。已有活跃 turn 时只确认队列并返回该 turn 的 `turnId` 与 `mode=steer`。
 - `turn.list`：从 `Concurrency` 返回活跃 turn 快照。
 - `turn.cancel`：调用 driver 的 cancel；找不到返回 `cancelled=false`。
 - `provider.list`：从 `ProviderManagement` 与 `CredentialStore` 生成；`ready` 由凭据状态计算。
@@ -1209,11 +1213,13 @@ interface SessionRuntime {
 |---|---|
 | `<dataDir>/sessions/<sessionId>/meta.json` | `SessionMeta` |
 | `<dataDir>/sessions/<sessionId>/events.jsonl` | `SessionNode`，一行一个 |
+| `<dataDir>/sessions/<sessionId>/active-turn.json` | 活跃 turn 的恢复标记，不属于会话记录 |
 | `<dataDir>/projects.json` | 模板衍生项目 `ProjectRef[]` |
 
 - `sessionId` 只能使用受控字符集；不得包含路径分隔符、`..` 或绝对路径。
 - 空会话没有目录、没有 `meta.json`。
-- `meta.json` 与 `events.jsonl` 只由 daemon 维护；用户不手工编辑。
+- `active-turn.json` 是运行时恢复标记，不是 `SessionNode`，不参与列表、导出或选择。
+- `meta.json`、`events.jsonl` 与 `active-turn.json` 只由 daemon 维护；用户不手工编辑。
 
 #### 5.4.2 写入
 
@@ -1255,7 +1261,7 @@ interface SessionRuntime {
 
 - 同一会话的 `create`/`append`/`updateMeta` 由 `Concurrency` 串行化。
 - 不同会话可并行写。
-- daemon 重启时清理 `.tmp` 文件与无 meta 的孤儿目录。
+- daemon 重启时清理 `.tmp` 文件与无 meta 的孤儿目录；`active-turn.json` 由 `Gateway` 按 §6.5 恢复或删除。
 - 已落盘会话恢复为冷会话；未完成 turn 由 driver 标记中断。
 - `meta.json` 不可读或 schema 不支持时报告 `storage.corrupt`，不返回部分结果。
 
@@ -1416,3 +1422,184 @@ interface ClientRegistry {
 - `TemplateStore` 依赖 `WorkspaceAccess`、`ExecHost`、`projects.json`。
 - 核心层不引用服务层；服务层通过接口注入。
 - 启动失败时关闭已打开的 socket、锁与子进程；不留下半初始化状态。
+
+## 6 端到端流程
+
+### 6.1 新建会话与首次落盘
+
+1. 客户端发送 `session.create`，可带 `workspace`、`templateId`、`model`、`provider`、`systemPrompt`、`extensions`。
+2. `Gateway` 校验 provider/model 与扩展名称；创建临时 `SessionMeta`、`Context`（`persisted=false`）与空队列。
+3. `systemPrompt` 转成一条 `kind=agent`、`role=system` 的队列条目；`extensions` 与默认选择转成一条 `role=declaration` 的队列条目，`toggle` 为 `package#name`。
+4. 返回临时 `SessionMeta`；不写盘，不进入 `session.list`。
+5. 客户端直接用临时 `SessionMeta` 显示空会话；打开条目面板时调用 `entries.snapshot`，临时会话的 `selection` 为空，客户端按队列中的声明 delta 计算显示状态。
+6. 用户入队首条消息并发送 `turn.start`；`Gateway` 生成 `turnId`，注册活跃 turn，调用 `AgentLoopDriver.run`。
+7. `Context.assemble` 读取空分支、应用队列声明、物化队列节点、解析选中的上下文来源与技能；没有节点时返回 `turn.empty`。
+8. 首次持久化调用 `Sessions.create(meta, nodes)`；`SessionStore` 原子写入 `meta.json` 与 `events.jsonl`。
+9. 持久化成功后 `Context` 出队并更新选择；`session.updated` 推送首批节点；turn 开始请求供应商。
+10. 之后 assistant 回复、工具结果由 `AgentLoopDriver` 使用 `Sessions.append` 追加。
+11. 此时会话才出现在 `session.list`；临时会话与队列已转为已落盘记录/空队列。
+
+失败边界：
+
+- `Sessions.create` 失败：不写 meta/nodes，队列保留，临时会话仍在内存。
+- 首次 turn 没有产生节点：`turn.empty`，不落盘，队列保留。
+- 首次落盘后供应商请求失败：会话已落盘，turn 失败，队列已清空。
+- daemon 在首次落盘前退出：临时 meta 与队列丢失，磁盘无空会话。
+
+### 6.2 读取会话与选择条目
+
+1. 客户端发送 `session.read`。
+2. `Gateway` 在会话锁内加载或复用运行时；已落盘会话创建 `Context` 并 `initialize`。
+3. 无 `nodeId`：返回完整会话树与默认活动分支的选择；有 `nodeId`：返回根到该节点的分支与该分支的选择。
+4. `queue` 始终是当前队列；`selection` 只含已持久化记录，不含队列中的声明 delta。
+5. `session.read` 不改变活动分支；分支由后续 `turn.start.nodeId` 选择。
+6. 客户端用 `entries.snapshot` 取得可用条目与已持久化选择，再按队列中的声明 delta 计算界面显示状态。
+7. 客户端选择/取消条目时，通过 `queue.enqueue` 入队新的声明类控制消息；`queue.updated` 推送完整队列。
+8. 订阅后，`queue.updated`、`selection.updated`、`session.updated` 与 turn 事件按 `sessionId` 推送。
+
+临时会话：`records` 为空，`selection` 为空，`nodeId` 返回 `session.node_not_found`。
+
+### 6.3 turn 执行与工具调用
+
+1. `turn.start` 无活跃 turn：生成 `turnId`，`mode=new`；有活跃 turn：只确认队列，`mode=steer`，不启动第二个 turn。
+2. `AgentLoopDriver` 调用 `Context.assemble`；首次使用 `create`，之后使用 `append`。
+3. `LLMAdapter.buildRequest` 构建供应商请求；`ProviderHost` 执行 HTTP/SSE 流。
+4. `parseChunk` 产出文本、推理、工具调用、usage 与 stop reason；driver 累计并发布事件。
+5. 有工具调用时：
+   - assistant 文本与 `toolCall` 写入节点；
+   - `Tools.invoke` 执行工具；结果按 `ToolCall.id` 归属；
+   - 工具结果写入 `tool` 节点；
+   - `session.updated` 与 `turn.step` 推送；
+   - 进入下一个 step。
+6. 无工具调用时：assistant 回复写入节点；`session.updated` 与 `turn.step` 推送。
+7. 队列非空时，steer 条目在下一个 step 边界装配；队列为空且无工具调用时结束，`turn.ended` 推送。
+8. 供应商错误转为 `turn.ended.failed`；工具错误作为错误结果回填，不终止 turn。
+
+### 6.4 取消与 steer
+
+**取消**
+
+1. 客户端调用 `turn.cancel`，`Gateway` 定位活跃 turn。
+2. driver 置为 `cancelling`，abort 供应商流，置工具 signal。
+3. 不再发起新 step；当前工具允许协作中止并回填结果。
+4. 已产生的 assistant 回复写入节点；追加 `role=cancel` 控制消息，`at` 为当前最后节点。
+5. `turn.ended` 的 `reason` 为 `cancelled`；客户端连接与订阅不受影响。
+
+**steer**
+
+1. 活跃 turn 中客户端入队新消息；`queue.updated` 推送。
+2. `turn.start` 返回已有 `turnId` 与 `mode=steer`，不启动新 turn。
+3. driver 在当前 step 结束后检查队列；下个 step 装配新增条目。
+4. `nodeId` 在活跃 turn 中禁止；越界返回 `turn.node_id_forbidden`。
+
+### 6.5 daemon 崩溃恢复
+
+启动恢复顺序：
+
+1. 清理 `sessions/*/` 下的 `.tmp` 文件与无 `meta.json` 的孤儿目录。
+2. 扫描 `sessions/*/meta.json`，校验 schema 与节点记录。
+3. 清理 `events.jsonl` 末尾的不完整行；完整行损坏则报告 `storage.corrupt`。
+4. 读取活跃 turn 标记；对每个成功加载的会话，如果存在标记，追加 `role=cancel` 控制消息（`reason=daemon_restart`，`at=最后节点`），删除标记。
+5. 恢复为冷会话；`turn.list` 为空；客户端重新 `session.read`。
+
+活跃 turn 标记：
+
+- 路径：`<dataDir>/sessions/<sessionId>/active-turn.json`。
+- 内容：`{ turnId, startedAt }`；由 `Gateway` 在 `turn.start` 启动 driver 前写入，正常结束后删除。
+- 标记是服务层运行时状态，不进入 `SessionMeta`、不进入 `events.jsonl`、不参与选择。
+- 临时会话没有标记；首次落盘前崩溃不产生标记。临时会话在首批节点落盘后补写标记。
+- 已落盘会话的 turn 启动前必须写标记；临时会话补写失败时结束 turn，不继续请求。
+- 恢复时追加 `cancel` 失败则保留标记，下次启动重试；不重复追加同 turn 的 `cancel` 由 `turnId` 检查。
+
+未完成工具：
+
+- 工具执行不是崩溃恢复的事务边界；已写入的工具结果保留，未写入的调用丢弃。
+- 恢复后不自动重放工具；用户可继续会话或重新发起 turn。
+- 队列未持久化，崩溃时未出队条目不恢复。
+
+### 6.6 模板创建
+
+1. 用户选择模板并调用 `template.preview`；只解析与展示，不写文件。
+2. 用户确认后调用 `template.apply`，必须带 `confirmed=true`。
+3. `TemplateStore` 校验模板与工作区；`WorkspaceAccess` 创建目录与文件；`ExecHost` 执行初始化脚本。
+4. 成功后写入 `ProjectRef`；创建临时会话，将模板配置/提示词物化为队列条目。
+5. 返回 `{projectId, sessionId}`；首次 turn 仍按 §6.1 落盘。
+6. 脚本失败返回 `template.init_failed`，不创建会话；已创建文件不自动回滚。
+7. 模板提示词不直接写入请求体；仍须经队列与确认。
+
+### 6.7 扩展装载与条目刷新
+
+1. daemon 启动时发现扩展清单，不执行扩展代码。
+2. 读取配置，合并默认选择；条目名称统一为 `package#name`。
+3. 用户打开面板时调用 `entries.snapshot`；工具、包装器、技能、上下文来源进入结果。
+4. 用户选择条目时入队声明类控制消息；`Context` 在装配时更新选择。
+5. 工具/包装器/上下文代码在需要时由加载器导入；技能内容在装配时读取。
+6. 扩展安装或更新后，新会话使用新清点；既有会话记录不改写。
+7. 同一 `package#name` 重复出现时该条目不可用；不同包同名不冲突。
+
+## 7 CLI 与数据迁移
+
+### 7.1 CLI 与协议边界
+
+| 命令 | 路径 |
+|---|---|
+| `start` / `stop` / `status` | 本地 daemon 生命周期 |
+| `run` | 经协议创建/读取会话、入队、`turn.start` |
+| `sessions list` | 经协议 `session.list` |
+| `sessions export` | 经协议读取分支并输出 JSONL |
+| `sessions cancel` | 先解析活跃 turn，再 `turn.cancel` |
+| `client list/start` | 经协议 `client.list` / `client.start` |
+| `templates list/preview/apply` | 经协议模板方法 |
+| `provider.list` / `models list` | 经协议只读查询 |
+| `providers check` | 仅 CLI，直接检查本地凭据与配置 |
+| `extensions list` | 仅 CLI，读取扩展目录 |
+| `auth` | 仅 CLI，校验凭据 |
+| `config list/get/set/unset` | 仅 CLI，直接读写本地配置 |
+
+- 管理命令不经 daemon 协议；daemon 在使用时读取配置。
+- `config` 只影响此后创建的会话，不改写既有会话。
+- CLI 不直接访问 `events.jsonl`；会话读取与导出经协议/服务层。
+
+### 7.2 `run`
+
+- `--new`：创建新会话。
+- `--continue`：继续最近会话。
+- `--session <id>`：指定会话；不存在时按 `--create` 处理。
+- `--create`：与 `--session` 同用，不存在时新建。
+- `--enable` / `--disable`：解析为 `package#name` 列表，入队声明类控制消息。
+- `--system-prompt` / `--use-default-system-prompt`：设置/使用默认系统提示词；进入队列。
+- `--model` / `--provider`：设置会话模型与供应商。
+- `--print` / `--json`：非交互输出。
+- 交互模式：用户输入入队；发送 `turn.start`；流式展示事件；Ctrl-C 等同 `sessions cancel`。
+- `run` 不把提示词直接写入请求体；所有输入先入队。
+- 退出码：成功 0；协议/会话/供应商错误非 0；取消按 CLI 约定返回。
+
+### 7.3 数据迁移
+
+- 当前 `schemaVersion` 为 `1`；`SessionMeta` 与 `SessionNode` 都带版本。
+- `SessionStore` 在加载时校验版本：
+  - 等于当前版本：直接读取；
+  - 低于当前版本：按版本迁移函数升级；
+  - 高于当前版本：拒绝加载并报告 `storage.corrupt`。
+- 迁移函数按版本注册；迁移失败不返回部分结果，不写回损坏文件。
+- 迁移后的 meta/nodes 在成功加载后原子写回；写回失败保留旧文件并报告。
+- `events.jsonl` 逐行迁移；同一文件中的节点版本必须一致，混合版本报错。
+- 当前没有历史版本，第 1 版是初始格式；新增字段必须保持向后兼容或提升版本。
+- 协议版本与会话 schema 版本独立；协议次版本兼容不代表旧会话格式兼容。
+
+### 7.4 导出
+
+- `sessions export <id>` 输出 JSONL：首行为 `SessionMeta`，其后为默认活动分支节点，从根到当前。
+- 只导出默认分支，不导出其他分支、队列、临时状态或凭据。
+- 导出可能包含敏感内容；是否导出由用户决定。
+- 导出不修改会话记录，不改变活动分支。
+
+### 7.5 失败与恢复约定
+
+- 首次落盘失败：队列保留，无 meta/nodes；客户端可重试。
+- 上下文装配追加失败：队列保留，选择缓存不更新；不继续请求。
+- assistant/tool/cancel 追加失败：不继续请求；已写节点保留；队列已出队，不自动恢复。
+- 取消写入失败：turn 仍结束，但标记未落盘；重启时无法恢复该标记，用户可继续。
+- 恢复时 `meta.json` 损坏：会话不可加载，报告 `storage.corrupt`，不影响其他会话。
+- 恢复时节点损坏：不加载该会话，不返回部分记录。
+- 临时会话、队列、活跃 turn 标记在 daemon 退出时按各自规则清理或保留。
