@@ -507,7 +507,52 @@ skill、tool 等声明的变更使用控制消息表示，某条目状态变更�
 
 当请求上下文超出模型窗口时，按策略裁剪或压缩；压缩结果作为消息节点写入会话记录。窗口取当前模型描述符的 `contextWindow`；裁剪阈值、保留策略与压缩算法由详细设计定义，概设只约定裁剪不新增节点、压缩写入控制消息。
 
-#### 5.2.1 查看会话与选择条目
+#### 5.2.1 创建空会话
+
+```plantuml
+@startuml
+actor "用户" as User
+participant "客户端进程" as Client
+participant "Gateway" as Gateway
+participant "Context" as Context
+
+User -> Client : 创建空会话
+Client -> Gateway : session.create
+Gateway -> Gateway : 校验方法参数\n创建临时 SessionMeta
+Gateway -> Context : 创建新的 Context 实例
+Gateway --> Client : 临时 SessionMeta
+Client --> User : 显示空会话界面
+@enduml
+```
+
+#### 5.2.2 查看会话记录
+
+```plantuml
+@startuml
+actor "用户" as User
+participant "客户端进程" as Client
+participant "Gateway" as Gateway
+participant "Context" as Context
+participant "Sessions" as Sessions
+
+User -> Client : 选择会话
+Client -> Gateway : session.read
+Gateway -> Sessions : 读取会话记录
+Sessions --> Gateway : 会话记录
+alt 已有服务于该会话的 Context 实例
+  Gateway -> Context : 读取选择状态和消息队列
+  Context --> Gateway : 选择状态和消息队列
+else 无 Context 实例
+  Gateway -> Context : 创建 Context 示例\n发送会话记录\n请求计算选择状态
+  Context -> Context : 计算并缓存选择状态
+  Context --> Gateway : 选择状态
+end
+Gateway --> Client : 记录、选择状态和消息队列
+Client --> User : 渲染
+@enduml
+```
+
+#### 5.2.3 选择条目
 
 ```plantuml
 @startuml
@@ -519,22 +564,12 @@ participant "Context" as Context
 participant "Sessions" as Sessions
 participant "Driver" as Driver
 
-User -> Client : 选择会话
-Client -> Gateway : session.read
-Gateway -> Sessions : 读取会话记录
-Sessions --> Gateway : 会话记录
-alt 已有服务于该会话的 Context 实例
-  Gateway -> Context : 读取选择状态和消息队列
-  Context --> Gateway : 选择状态和消息队列
-else 无 Context 实例
-  Gateway -> Context : 发送会话记录\n请求计算选择状态
-  Context -> Context : 计算并缓存选择状态
-  Context --> Gateway : 选择状态
+alt 创建空会话
+  ref over User, Client, Gateway, Context : 执行空会话创建流程
+else 查看会话记录
+  ref over User, Client, Gateway, Context, Sessions : 执行会话记录查看流程
 end
-Gateway --> Client : 记录、选择状态\n消息队列、协议事件（如有）
-Client --> User : 渲染
 
-== 用户选择条目 ==
 User -> Client : 打开面板
 Client -> Gateway : entries.snapshot
 Gateway -> Registry : 读取可用条目与来源
@@ -550,7 +585,7 @@ Client --> User : 更新面板
 
 `session.read` 无 `nodeId` 返回完整会话树，有 `nodeId` 返回根到该节点的线性分支；临时会话只有空记录与当前队列，`selection` 返回全 false 。客户端根据需要，自行从消息队列计算 queue.enqueue 后的选择状态，`Context` 只在装配上下文时根据消息队列更新选择状态及缓存。
 
-#### 5.2.2 发送与执行
+#### 5.2.4 发送与执行
 
 ```plantuml
 @startuml
@@ -649,7 +684,7 @@ stop
 
 `Template` 负责模板类型与初始化计划的定义；`TemplateStore` 负责模板存储。
 
-初始化流程：用户选择模板 → 解析并展示将要创建的目录、文件与将执行的脚本 → 用户确认 → 服务层 `WorkspaceAccess` 创建目录与文件，`ExecHost` 执行初始化脚本（如有）→ 创建会话。
+初始化流程：用户选择模板 → 解析并展示将要创建的目录、文件与将执行的脚本 → 用户确认 → 服务层 `WorkspaceAccess` 创建目录与文件，`ExecHost` 执行初始化脚本（如有）。
 
 模板只引用可用的扩展条目与配置，不内嵌凭据。
 
@@ -732,6 +767,7 @@ interface Event<E = JsonValue> {
 | 会话 | `session.read` | `{ sessionId, nodeId? }` | `{ meta: SessionMeta, records: SessionNode[], queue: QueueEntry[], selection }` |
 | 会话 | `session.configure` | `{ sessionId, model?, provider?, systemPrompt? }` | `SessionMeta` |
 | 会话 | `session.subscribe` | `{ sessionId }` | 订阅确认，事件经推送 |
+| 会话 | `session.unsubscribe` | `{ sessionId }` | `{ sessionId }` |
 | 执行 | `turn.list` | `{}` | `{ turns: [{ sessionId, turnId, startedAt }] }` |
 | 执行 | `turn.start` | `{ sessionId, nodeId? }` | `{ turnId, mode }` |
 | 执行 | `turn.cancel` | `{ turnId }` | `{ cancelled }` |
@@ -768,10 +804,11 @@ interface Event<E = JsonValue> {
 
 - 版本协商：连接建立时客户端先发 `protocol.hello` 交换版本；主版本不同返回错误并关闭连接，次版本向下兼容。daemon 升级会断开连接，客户端重连后重新握手。
 - 传输：默认 Unix domain socket；连接建立时校验 peer 凭据，要求与 daemon 同用户。Windows 使用命名管道。
-- 中止：`turn.cancel` 按 `turnId` 立即中止当前供应商流；正在执行的工具不被强制终止，`ToolInvocationContext.signal` 置为中止，工具可自行提前返回。中止后不再发起新的 step，当前工具结果回填后活跃 turn 结束；已产生的智能体回复与控制消息写入会话并标记为中断。客户端连接断开或取消会话订阅不视为中止，活跃 turn 继续进行。CLI 的 `sessions cancel <id>` 先解析该会话的活跃 turn。
+- 中止：`turn.cancel` 按 `turnId` 立即中止当前供应商流；正在执行的工具不被强制终止，`ToolInvocationContext.signal` 置为中止，工具可自行提前返回。中止后不再发起新的 step，当前工具结果回填后活跃 turn 结束；已产生的智能体回复与控制消息写入会话并标记为中断。客户端连接断开或调用 `session.unsubscribe` 不视为中止，活跃 turn 继续进行。CLI 的 `sessions cancel <id>` 先解析该会话的活跃 turn。
 - turn 与 steer：无活跃 turn 时，`turn.start` 启动新的 turn（`mode` 为 `new`）；`nodeId` 可选，仅对已落盘会话有效，用于选择新 turn 的分支起点；未指定时从节点记录最后节点继续。已有活跃 turn 时，`turn.start` 只确认队列中新增条目，作为 steer 在下一个 step 边界装配，不启动第二个 turn（`mode` 为 `steer`）；此时不得带 `nodeId`。并发 `turn.start` 由 `Concurrency` 串行处理，后到者按 steer 处理。
 - 会话创建：`session.create` 只由服务层创建临时 `SessionMeta` 与内存队列，不写盘；首次 `turn.start` 产生节点时，`SessionRepository.create` 原子写入 meta 与 nodes。`Sessions` 对所有节点统一分配 `id`/`parentId`，初始节点与后续追加没有区别。临时会话不进入 `session.list`；首次 turn 必须产生至少一个节点，否则报错且不落盘。
-- 运行时：`turn.list` 给出活跃 turn 快照，`turn.started` / `turn.ended` 维护该集合；会话是否在运行由成员资格表示，不设 `status` 字段。`session.subscribe` 按会话推送记录、队列、选择与 turn 事件，不另设订阅方法。
+- 运行时：`turn.list` 给出活跃 turn 快照，`turn.started` / `turn.ended` 维护该集合；会话是否在运行由成员资格表示，不设 `status` 字段。
+- 订阅：`session.subscribe` 按连接订阅一个会话，推送记录、队列、选择与 turn 事件；`session.unsubscribe` 移除当前连接的该会话订阅。退订只影响当前连接，不影响其他客户端，也不中止活跃 turn；连接断开自动清除该连接的全部订阅；重复退订幂等；不设退订事件，不另设队列订阅方法。
 - 队列：`session.read` 的 `queue` 返回待装配条目；`queue.enqueue` 只入队；`turn.start` 时确认。`queue.edit` 只作用于 `kind=agent` 的条目；声明变更、压缩记录、中止标记等控制消息只能整条 `queue.enqueue` 或 `queue.remove`；`queue.clear` 清空全部待装配条目。条目被装配取走后，不再接受 `queue.edit`/`queue.remove`。队列按入队顺序，不提供重排方法。
 - 队列事件：`queue.updated` 在入队、编辑、删除、清空与出队后推送当前完整 `QueueEntry[]`；客户端整体替换本地队列。`session.read` 用于首次加载和重连，订阅仍由 `session.subscribe` 承担，不新增 `queue.subscribe`。
 - 多客户端：队列写操作由 `Concurrency` 串行化；客户端以 `session.read` 的 `queue` 为初始快照、`queue.updated` 为增量，重连后重新 `session.read`；并发编辑按最后写入者获胜。
