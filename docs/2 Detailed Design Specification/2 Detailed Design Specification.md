@@ -372,7 +372,8 @@ interface CreateSessionParams {
   - 空数组：不启用任何条目；
   - 显式列表：替换默认选择，不与默认值合并。
 - `extensions` 生成一条 `kind=control`、`role=declaration` 的队列条目，`toggle` 为所选名称；所选为空时不生成。
-- `workspace` 省略时使用 daemon 启动工作目录。`provider`/`model` 只能成对出现：两者均省略时取配置中的 `defaultProvider`/`defaultModel`；只提供一个，或默认值不完整，返回 `session.model_required`；显式组合或默认组合不在 `provider.list` 中，返回 `session.invalid_model`。
+- `workspace` 显式提供时直接使用；省略时读取全局配置中的 `defaultWorkspace`。两者都没有返回 `session.workspace_required`；路径不存在、不是目录或不可写返回 `session.invalid_workspace`。默认工作区必须是绝对路径，不自动创建；不读取 daemon 工作目录。工作区配置 `.pisces/config.json` 不参与默认工作区解析。
+- `provider`/`model` 只能成对出现：两者均省略时取配置中的 `defaultProvider`/`defaultModel`；只提供一个，或默认值不完整，返回 `session.model_required`；显式组合或默认组合不在 `provider.list` 中，返回 `session.invalid_model`。
 - `templateId` 只用于解析模板级初始配置；不创建目录、不写文件、不执行脚本。工作区初始化只能经 `template.preview`/`template.apply`。
 - 返回临时 `SessionMeta`，客户端通过 `session.read` 取得队列。
 
@@ -640,6 +641,8 @@ type ProtocolEvent =
 | 会话 | `session.not_found` | 会话不存在 |
 | 会话 | `session.model_required` | 未提供且无默认模型 |
 | 会话 | `session.invalid_model` | provider/model 不在清单中 |
+| 会话 | `session.workspace_required` | 未提供且未配置默认工作区 |
+| 会话 | `session.invalid_workspace` | 工作区不存在、不是目录或不可写 |
 | 会话 | `session.node_not_found` | `nodeId` 不属于该会话 |
 | 队列 | `queue.entry_not_found` | 队列条目不存在 |
 | 队列 | `queue.entry_locked` | 条目已出队，不能再编辑 |
@@ -1307,6 +1310,8 @@ interface ExtensionManifest {
 
 - 配置来源优先级：工作区 `.pisces/config.json` > 软件配置目录 > 内置默认。
 - 默认 `provider`/`model` 从配置读取，供 `session.create` 使用；工作区配置可覆盖软件配置。
+- `defaultWorkspace` 只来自全局配置，供 `session.create` 在省略 `workspace` 时使用；工作区配置需要先确定工作区才能读取，因此不提供 `defaultWorkspace`，也不参与默认工作区解析；若出现按未知配置键处理。
+- `defaultWorkspace` 必须是绝对路径；`config` 只校验格式，存在性与可写性在 `session.create` 时检查。
 - `config` CLI 只影响此后创建的会话；不修改既有会话的 `SessionMeta`。
 - 新会话的默认扩展选择来自配置；`session.create.extensions` 显式列表替换默认选择。
 - 配置键不存在或类型错误返回 `config.invalid` / `config.unknown_key`。
@@ -1437,7 +1442,7 @@ interface ClientRegistry {
 ### 6.1 新建会话与首次落盘
 
 1. 客户端发送 `session.create`，可带 `workspace`、`templateId`、`model`、`provider`、`systemPrompt`、`extensions`。
-2. `Gateway` 校验 provider/model 与扩展名称；创建临时 `SessionMeta`、`Context`（`persisted=false`）与空队列。
+2. `Gateway` 校验 provider/model 与扩展名称；`workspace` 省略时读取全局 `defaultWorkspace`，校验路径为绝对、存在且可写；失败则不创建临时会话。通过后创建临时 `SessionMeta`、`Context`（`persisted=false`）与空队列。
 3. `systemPrompt` 转成一条 `kind=agent`、`role=system` 的队列条目；`extensions` 与默认选择转成一条 `role=declaration` 的队列条目，`toggle` 为 `package#name`。
 4. 返回临时 `SessionMeta`；不写盘，不进入 `session.list`。
 5. 客户端直接用临时 `SessionMeta` 显示空会话；打开条目面板时调用 `entries.snapshot`，临时会话的 `selection` 为空，客户端按队列中的声明 delta 计算显示状态。
