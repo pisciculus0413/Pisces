@@ -13,9 +13,10 @@
 - 第 4 章核心层；
 - 第 5 章服务层；
 - 第 6 章端到端流程与恢复；
-- 第 7 章 CLI 与数据迁移。
+- 第 7 章 CLI 与数据迁移；
+- 第 8 章非功能设计、错误与可测试性。
 
-非功能设计、完整测试策略与剩余错误路径在后续批次编写。
+剩余待确认项在文末汇总。
 
 ### 1.2 与 HLD 的关系
 
@@ -46,6 +47,7 @@ HLD 是架构与语义的唯一来源；本文档只补充 HLD 明确留给详�
 | 5 服务层 | §3.1、§3.2、§4.2、§5.4、§5.5、§6.6、§6.9、§7.2、§8.1 |
 | 6 端到端流程 | §5.2、§5.3、§5.5、§5.6、§8.1、§8.4 |
 | 7 CLI 与迁移 | §6.7、§6.8、§7.3、§8.6 |
+| 8 非功能与质量 | §8.1、§8.2、§8.3、§8.4、§8.5、§8.6 |
 
 ## 2 公共类型
 
@@ -1243,9 +1245,10 @@ interface SessionRuntime {
 
 #### 5.4.3 读取
 
+- `SessionStore` 为每个已加载会话维护 `id -> (parentId, offset)` 的内存索引；首次加载扫描文件建立索引，`append` 成功后更新索引。
 - `readTree` 按文件顺序返回全部节点；完整行 JSON 损坏返回 `storage.corrupt`。
-- `readBranch` 读取全部行，按 `id -> parentId` 上溯到根，按根到节点顺序返回。
-- 省略 `nodeId` 时以最后一个完整行为分支末端。
+- `readBranch` 使用索引从 `nodeId` 沿父指针上溯，再按 offset 读取对应行，避免每次从文件头扫描；省略 `nodeId` 时以最后一个完整行为分支末端。
+- 索引不持久化；daemon 重启后首次读取重建。
 - 末尾不完整行在读取时忽略，不修改文件；下一次 append 前截断。
 - 文件中间出现空白行忽略；非法行报错。
 - 节点 `parentId` 不存在、根指针异常或环返回 `storage.corrupt`。
@@ -1603,3 +1606,113 @@ interface ClientRegistry {
 - 恢复时 `meta.json` 损坏：会话不可加载，报告 `storage.corrupt`，不影响其他会话。
 - 恢复时节点损坏：不加载该会话，不返回部分记录。
 - 临时会话、队列、活跃 turn 标记在 daemon 退出时按各自规则清理或保留。
+
+## 8 非功能设计、错误与可测试性
+
+### 8.1 性能
+
+- `SessionStore` 的 `readBranch` 使用内存索引，复杂度与分支长度成正比；`readTree` 与节点总数成正比；`append` 只写本批节点。
+- 首次加载会话需要扫描 `events.jsonl` 建立索引；索引不持久化，按会话常驻内存。
+- 装配活动分支不复制整棵会话树；只有当前分支的消息进入请求。
+- 供应商响应按流处理，不等待完整响应；文本、usage 与工具调用边解析边累计。
+- 工具调用可以并行，并发数由 `Concurrency`/服务层限制；结果按原始调用顺序或供应商要求回填。
+- 队列只在内存中驻留；装配时取走并写入会话，不为队列维护磁盘索引。
+- 扩展清单只读取元数据；实现代码按需加载并缓存，避免每个请求重复转译。
+- 单帧上限 8 MiB；`session.read` 全树可能很大，客户端应优先读取分支。
+- token 估算只用于裁剪，不追求与供应商 tokenizer 完全一致。
+
+### 8.2 可靠性
+
+- `create`/`append`/`updateMeta` 批量原子；失败不留半批节点。
+- `append` 前截断末尾不完整行；完整行损坏直接报错，不返回部分结果。
+- `create` 先 rename events 再 rename meta；中途崩溃只留下可清理的孤儿目录。
+- 队列不持久化；daemon 崩溃丢失未出队条目，这是有意的取舍，不做 WAL。
+- 活跃 turn 使用 `active-turn.json` 标记；重启时追加 `cancel` 并清理。
+- 供应商 429/5xx 可重试；流开始后不重试；取消不重试。
+- 工具失败回填为工具结果，不终止 turn；存储失败终止 turn，不继续请求。
+- `stop` 等待写盘完成；异常退出不保证未落盘数据。
+- 不自动重放未完成的工具调用；用户决定是否继续。
+
+### 8.3 安全边界
+
+- daemon 只监听本地 socket，要求同用户；不监听网络。
+- 不提供沙箱；扩展代码与工具以用户权限运行。
+- 凭据只由 `CredentialStore` 管理；不进入配置、会话记录、导出或日志。
+- `WorkspaceAccess` 限制路径在工作区内；不跟随工作区外符号链接。
+- 模板初始化脚本由 `ExecHost` 执行，属于用户显式确认的动作。
+- 会话导出可能包含敏感内容，由用户决定是否导出。
+- 不实现包的安装/安装脚本拦截；安装由 npm/git 负责。
+
+### 8.4 错误处理与日志
+
+```ts
+class PiscesError extends Error {
+  readonly code: string;
+  readonly data?: JsonValue;
+  readonly cause?: unknown;
+
+  constructor(
+    code: string,
+    message: string,
+    options?: { data?: JsonValue; cause?: unknown }
+  ) {
+    super(message);
+    this.name = "PiscesError";
+    this.code = code;
+    this.data = options?.data;
+    this.cause = options?.cause;
+  }
+}
+```
+
+- 领域错误使用稳定错误码；协议错误映射见 §3.9。
+- `ToolDeniedError` 单独表示工具拒绝，转为工具结果而非进程错误。
+- 请求级错误返回 `Response.error`；turn 内异步错误进入 `turn.ended.error`。
+- 日志为结构化记录，至少包含时间、级别、会话 id、turn id 与错误码。
+- 日志默认不记录提示词正文、工具参数、凭据或供应商密钥。
+- CLI 输出用户可读消息；`--json` 输出结构化结果；错误码保留。
+- 不吞掉存储错误；不把损坏记录静默跳过。
+
+### 8.5 可测试性
+
+- 核心层不依赖文件系统、网络与协议；`SessionRepository`、`Exec`、`Credentials`、`ExecuteProvider` 均可注入替身。
+- `Sessions`、`Context` 通过注入的 `now`、`newId` 与仓库实现测试，时间与 id 可确定。
+- `Tools` 用内存注册表与假工具测试包装、错误与并行；包装器顺序无关。
+- `AgentLoopDriver` 用假 `LLMAdapter`、假 `ExecuteProvider`、假 `Context` 测试 turn/step、取消与 steer。
+- 协议层用内存连接测试分帧、握手、响应/事件交错与错误码。
+- 服务层用临时目录、假 socket 与假 provider 测试 `SessionStore`、`Gateway`、恢复与迁移。
+- 不做真实供应商网络测试；供应商方言由适配器单测覆盖。
+- 测试不依赖具体时钟、随机 id 或执行顺序。
+
+### 8.6 构建与分发
+
+- pnpm 工作区；`tsc -b` 构建 `protocol`、`core`、`daemon`。
+- Node 版本遵循根 `package.json`；ESM。
+- 内置扩展随产品放在 `extensions/builtin`；外部扩展为普通 npm 包或目录。
+- TypeScript 加载器随宿主分发，负责 `.ts`/`.tsx` 转译与 `@pisces/*` 映射。
+- 客户端作为扩展包的一部分分发，经协议连接 daemon。
+- 扩展依赖安装在其自身目录；安装与更新由 npm/git 完成。
+- 版本号遵循 semver；协议版本与包版本独立。
+- daemon 升级会断开旧连接；客户端重连后重新握手。
+
+### 8.7 兼容性
+
+- 协议主版本不同拒绝连接；次版本向下兼容。
+- 会话 `schemaVersion` 与协议版本独立；旧会话迁移见 §7.3。
+- 扩展接口版本与宿主版本独立；不兼容扩展在发现阶段标记不可用。
+- 废弃字段与命令先标记、后移除；移除前至少保留一个次版本。
+- 不保证旧版本 daemon 能读取新版本写入的记录；新版本读取旧记录按迁移规则处理。
+
+### 8.8 与 HLD 的待对齐项
+
+以下不是实现细节，而是详细设计采用的处理与 HLD 现有文字尚未完全对齐的地方；在 HLD 更新前不应悄悄改变语义。
+
+| 项 | 详细设计 | HLD 现状 | 需要 |
+|---|---|---|---|
+| 活跃 turn 恢复标记 | 使用 `active-turn.json` 记录未完成 turn | §7.2 存储布局未列出该运行时文件，§8.1 要求标记未完成热会话 | 在 HLD §7.2/§8.1 补充运行时标记，或放弃崩溃标记能力 |
+| 工具声明的系统提示词 | 通过 `LlmRequest.tools` 提供结构化声明 | §5.4 写“声明写入系统提示词” | 明确“系统提示词”是否包含供应商工具参数；若要求文本声明，需补 `Tools` 的渲染接口 |
+| 上下文来源/技能的消息角色 | 使用 `role=system` 的智能体消息 | HLD 未规定来源片段/技能内容的消息角色 | 在 HLD 或本详细设计中明确角色 |
+| `session.create` 默认值 | 由服务层配置解析 workspace/provider/model | HLD 参数可选，但未定义默认值与配置键 | 明确默认值来源与错误码 |
+| `session.configure.systemPrompt` 的生效时机 | 只更新/新增 system 队列条目，按队列规则参与后续装配 | §6.1 写“活跃 turn 时设置下一次 turn 生效” | 明确 systemPrompt 是否受“下一次 turn”约束，还是按 steer 队列规则 |
+
+在这些项确认前，相关章节按本详细设计的处理实现；不把未确认的语义写死为 HLD 结论。
