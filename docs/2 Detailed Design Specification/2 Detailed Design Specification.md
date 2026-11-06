@@ -1715,7 +1715,6 @@ class PiscesError extends Error {
 | 项 | 详细设计 | HLD 现状 | 需要 |
 |---|---|---|---|
 | 活跃 turn 恢复标记 | 使用 `active-turn.json` 记录未完成 turn | §7.2 存储布局未列出该运行时文件，§8.1 要求标记未完成热会话 | 在 HLD §7.2/§8.1 补充运行时标记，或放弃崩溃标记能力 |
-| 工具声明的系统提示词 | 通过 `LlmRequest.tools` 提供结构化声明 | §5.4 写“声明写入系统提示词” | 明确“系统提示词”是否包含供应商工具参数；若要求文本声明，需补 `Tools` 的渲染接口 |
 | `session.create` 默认值 | 由服务层配置解析 workspace/provider/model | HLD 参数可选，但未定义默认值与配置键 | 明确默认值来源与错误码 |
 | `session.configure.systemPrompt` 的生效时机 | 只更新/新增 system 队列条目，按队列规则参与后续装配 | §6.1 写“活跃 turn 时设置下一次 turn 生效” | 明确 systemPrompt 是否受“下一次 turn”约束，还是按 steer 队列规则 |
 
