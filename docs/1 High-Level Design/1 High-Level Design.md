@@ -252,7 +252,7 @@ daemon --> core : 依赖
 - 客户端作为扩展包的一部分独立开发分发，经协议连接守护进程，由服务层的客户端发现与注册机制登记启动命令。
 - 扩展来源包括随产品发布的内置扩展，以及工作区与软件配置目录中的扩展包。
 - 扩展内容条目的发现与读取只发生在本地；被用户确认的条目，其内容或工具声明才进入请求的相应部分。
-- 配置与状态包括供应商配置、模型能力元数据、扩展清点与新会话的默认扩展选择；读取与写入由 `Extensions` 承担，`ProviderManagement` 只定义描述符 schema 并提供查询。
+- 配置与状态包括供应商配置、模型能力元数据、扩展清点、新会话的默认扩展选择，以及默认 provider/model；读取与写入由 `Extensions` 承担，`ProviderManagement` 只定义描述符 schema 并提供查询。
 
 ### 3.3 外部依赖与上下文
 
@@ -794,7 +794,7 @@ interface Event<E = JsonValue> {
 | `selection.updated` | 声明选择状态变化 |
 | `client.launched` | 客户端进程启动 |
 
-`SessionMeta` 是会话元数据，字段见 §6.5。服务层在 `session.create` 创建临时 `SessionMeta`，首次落盘前不写盘，也不出现在 `session.list`；`session.list` 只返回已落盘的 `SessionMeta`。`SessionMeta` 不含活动分支信息；默认活动分支为最新节点所在分支，由于会话记录只追加式写入，最新节点总能在会话记录末尾找到。运行状态不属于会话元数据：`turn.list` 返回当前活跃 turn，会话出现在其中即为热会话，否则为冷会话；`session.read` 返回 `meta`（临时或已落盘）、记录、待装配队列与选择状态，客户端按 `sessionId` 与 `turn.list` 合并，`session.read` 的 `meta` 为 `SessionMeta`。`session.configure` 的 `model`、`provider` 经校验后通过 `SessionRepository.updateMeta` 持久化，临时会话仅更新内存 meta；活跃 turn 使用启动时的模型与供应商快照，下一次 turn 生效。`systemPrompt` 只更新消息队列中已有的 `role=system` 条目，没有则新增；不写 meta，不修改会话记录。若该会话存在活跃 turn，携带 `systemPrompt` 的 `session.configure` 返回 `turn.active`，不修改队列、meta 或记录；仅携带 `model`/`provider` 的配置仍可更新并随 SessionMeta 在下一次 turn 生效。扩展选择不在该方法中修改。模型能力（如上下文窗口）由 `provider.list` 的 `ModelInfo` 提供，不写入会话元数据。
+`SessionMeta` 是会话元数据，字段见 §6.5。服务层在 `session.create` 创建临时 `SessionMeta`，首次落盘前不写盘，也不出现在 `session.list`；`session.list` 只返回已落盘的 `SessionMeta`。`session.create` 未提供 `workspace` 时使用 daemon 启动工作目录；`provider`/`model` 必须成对提供，或成对省略并取配置中的 `defaultProvider`/`defaultModel`；仍无法解析时返回 `session.model_required`，显式值或默认组合不在 `provider.list` 中返回 `session.invalid_model`。`SessionMeta` 不含活动分支信息；默认活动分支为最新节点所在分支，由于会话记录只追加式写入，最新节点总能在会话记录末尾找到。运行状态不属于会话元数据：`turn.list` 返回当前活跃 turn，会话出现在其中即为热会话，否则为冷会话；`session.read` 返回 `meta`（临时或已落盘）、记录、待装配队列与选择状态，客户端按 `sessionId` 与 `turn.list` 合并，`session.read` 的 `meta` 为 `SessionMeta`。`session.configure` 的 `model`、`provider` 经校验后通过 `SessionRepository.updateMeta` 持久化，临时会话仅更新内存 meta；活跃 turn 使用启动时的模型与供应商快照，下一次 turn 生效。`systemPrompt` 只更新消息队列中已有的 `role=system` 条目，没有则新增；不写 meta，不修改会话记录。若该会话存在活跃 turn，携带 `systemPrompt` 的 `session.configure` 返回 `turn.active`，不修改队列、meta 或记录；仅携带 `model`/`provider` 的配置仍可更新并随 SessionMeta 在下一次 turn 生效。扩展选择不在该方法中修改。模型能力（如上下文窗口）由 `provider.list` 的 `ModelInfo` 提供，不写入会话元数据。
 
 `session.read` 的 `SessionMeta`、`SessionNode` 定义在 §6.5，`QueueEntry` 定义见本节；协议按相同字段序列化。
 
@@ -1082,9 +1082,9 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
 - `models`：模型管理。
   - `list`：列出可用供应商及其模型；与协议 `provider.list` 同源。
 - `auth`：校验供应商凭证；默认不输出明文。
-- `config`：查看或修改扩展相关配置，只影响此后创建的会话。
+- `config`：查看或修改配置，只影响此后创建的会话。
   - `list`、`get <key>`、`set <key> <value>`、`unset <key>`
-  - 范围：新会话的默认扩展选择；provider 与扩展声明；扩展清点只读
+  - 范围：新会话的默认扩展选择；默认 `provider`/`model`；provider 与扩展声明；扩展清点只读
 - `run [prompt]`：无客户端时的基本交互入口。
   - `--new`：强制新建会话。
   - `--continue`：继续最近一个会话。
@@ -1165,11 +1165,12 @@ interface ProjectRef {
 
 | 位置 | 内容 |
 |---|---|
-| 软件配置目录 | `config.json`（扩展相关配置）、`credentials`（由 `CredentialStore` 管理）、`templates/`、`extensions/` |
-| 数据目录 | `projects.json`（模板衍生项目）、`sessions/<sessionId>/meta.json`（会话元数据）、`sessions/<sessionId>/events.jsonl`（`SessionNode` 记录） |
+| 软件配置目录 | `config.json`（扩展与默认模型配置）、`credentials`（由 `CredentialStore` 管理）、`templates/`、`extensions/` |
+| 数据目录 | `projects.json`（模板衍生项目）、`sessions/<sessionId>/meta.json`（会话元数据）、`sessions/<sessionId>/events.jsonl`（`SessionNode` 记录）、`sessions/<sessionId>/active-turn.json`（未完成 turn 的运行时标记） |
 | 工作区 | `.pisces/config.json`（工作区级扩展配置）、扩展目录 |
 
 - 节点记录为 `SessionNode` 的 JSONL，按追加顺序写入；`meta.json` 只对已落盘会话存在，保存 §6.5 的 `SessionMeta`（会话标识、创建时间、模型、供应商、工作区与 schema 版本）。空会话没有 `meta.json`，也不产生会话目录；默认活动分支是节点记录的最后一行所在分支。
+- `active-turn.json` 保存未完成 turn 的 `turnId` 与开始时间，是服务层运行时恢复标记；不进入 `SessionMeta`、不写入 `events.jsonl`、不参与选择或导出。
 - `SessionRepository.create` 原子写入 `meta.json` 与 nodes；`append` 批量原子追加 nodes；两者都不改写 `meta.json`。`updateMeta` 仅原子替换 `meta.json`，不写 nodes；其原子性与并发约束同 `create`/`append`。写入原子性由存储实现保证；fsync 与批量策略由详细设计决定。
 - 同一会话的写入由 `Concurrency` 串行化；客户端不持有全局锁。
 - 配置文件与节点记录不保存凭据明文，只保存 `credentialRef`。
@@ -1188,7 +1189,7 @@ interface ProjectRef {
 - `start` 启动 daemon；`stop` 停止接收新请求、中止进行中的热会话、等待写盘完成并释放 socket；`status` 报告运行状态与会话数。
 - 临时会话在首次落盘前只存在于服务层内存；daemon 退出即丢失，磁盘不产生空会话。已落盘会话按正常流程恢复。
 - 热会话结束后成为冷会话；冷会话可从持久化记录恢复为新的热会话。
-- daemon 异常退出后，重启时恢复已持久化的冷会话；未完成的热会话标记为中断。
+- daemon 异常退出后，重启时恢复已持久化的冷会话；未完成的热会话标记为中断。`turn.start` 对已落盘会话在启动时写入 `active-turn.json`，临时会话在首批节点落盘后补写；turn 正常结束或失败时删除。重启读取该标记，向对应会话追加 `role=cancel` 控制消息（原因为 daemon 重启）并删除标记。
 
 ### 8.2 性能与可靠性
 
@@ -1217,6 +1218,7 @@ interface ProjectRef {
 | 供应商传输 | `provider.transport`、`provider.timeout` | 按 429/5xx 重试并退避；4xx 除 429 外不重试；取消不重试 |
 | 供应商响应 | `provider.invalid_response`、`provider.refusal` | 转为错误事件，结束当前 step |
 | 工具 | `tool.failed`、`tool.denied` | 以 `isError` 工具结果回填，继续循环 |
+| 会话 | `session.model_required`、`session.invalid_model` | 拒绝创建；不写临时会话目录 |
 | turn | `turn.active` | 活跃 turn 中修改 `systemPrompt` 时整体拒绝，不部分更新 |
 | 存储 | `storage.io`、`storage.corrupt` | 立即失败，不返回部分结果；报告会话 id |
 | 配置 | `config.invalid`、`config.unknown_key` | 拒绝写入并返回校验错误 |

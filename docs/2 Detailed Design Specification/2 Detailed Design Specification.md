@@ -372,8 +372,7 @@ interface CreateSessionParams {
   - 空数组：不启用任何条目；
   - 显式列表：替换默认选择，不与默认值合并。
 - `extensions` 生成一条 `kind=control`、`role=declaration` 的队列条目，`toggle` 为所选名称；所选为空时不生成。
-- `workspace`、`model`、`provider` 省略时的默认值由服务层配置解析；未配置可用模型时返回 `session.model_required`。
-- 若提供 `provider`/`model`，必须来自 `provider.list`，否则返回 `session.invalid_model`。
+- `workspace` 省略时使用 daemon 启动工作目录。`provider`/`model` 只能成对出现：两者均省略时取配置中的 `defaultProvider`/`defaultModel`；只提供一个，或默认值不完整，返回 `session.model_required`；显式组合或默认组合不在 `provider.list` 中，返回 `session.invalid_model`。
 - `templateId` 只用于解析模板级初始配置；不创建目录、不写文件、不执行脚本。工作区初始化只能经 `template.preview`/`template.apply`。
 - 返回临时 `SessionMeta`，客户端通过 `session.read` 取得队列。
 
@@ -1307,6 +1306,7 @@ interface ExtensionManifest {
 #### 5.5.3 配置
 
 - 配置来源优先级：工作区 `.pisces/config.json` > 软件配置目录 > 内置默认。
+- 默认 `provider`/`model` 从配置读取，供 `session.create` 使用；工作区配置可覆盖软件配置。
 - `config` CLI 只影响此后创建的会话；不修改既有会话的 `SessionMeta`。
 - 新会话的默认扩展选择来自配置；`session.create.extensions` 显式列表替换默认选择。
 - 配置键不存在或类型错误返回 `config.invalid` / `config.unknown_key`。
@@ -1710,13 +1710,6 @@ class PiscesError extends Error {
 - 废弃字段与命令先标记、后移除；移除前至少保留一个次版本。
 - 不保证旧版本 daemon 能读取新版本写入的记录；新版本读取旧记录按迁移规则处理。
 
-### 8.8 与 HLD 的待对齐项
+### 8.8 与 HLD 的对齐
 
-以下不是实现细节，而是详细设计采用的处理与 HLD 现有文字尚未完全对齐的地方；在 HLD 更新前不应悄悄改变语义。
-
-| 项 | 详细设计 | HLD 现状 | 需要 |
-|---|---|---|---|
-| 活跃 turn 恢复标记 | 使用 `active-turn.json` 记录未完成 turn | §7.2 存储布局未列出该运行时文件，§8.1 要求标记未完成热会话 | 在 HLD §7.2/§8.1 补充运行时标记，或放弃崩溃标记能力 |
-| `session.create` 默认值 | 由服务层配置解析 workspace/provider/model | HLD 参数可选，但未定义默认值与配置键 | 明确默认值来源与错误码 |
-
-在这些项确认前，相关章节按本详细设计的处理实现；不把未确认的语义写死为 HLD 结论。
+当前详细设计与 HLD 无已知待对齐项。运行时标记与 `session.create` 默认值已写入 HLD §7.2、§8.1、§6.1、§6.8。
