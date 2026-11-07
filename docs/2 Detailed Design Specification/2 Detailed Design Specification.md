@@ -221,7 +221,7 @@ type SelectionState = EntryName[];
 - `kind` 与 `role` 必须匹配：
   - `agent`：`system`、`user`、`assistant`、`tool`；
   - `control`：`declaration`、`compaction`、`cancel`。
-- `SessionNode.entry` 只用于来源/技能内容节点；`system-prompt` 使用保留值 `entry=system-prompt`；普通系统提示词节点没有 `entry`。
+- `SessionNode.entry` 只用于来源/技能内容节点；`instruction` 是 `source` 的取值，用于用户创建的 `role=system` 消息。
 - `QueueEntry.id` 由 `Context` 在入队时分配，出队后作废；不写入 `SessionNode`。
 - `QueueEntry.confirmedAt` 由服务端 `turn.start` 写入，客户端不能提交。
 - `QueueEntry` 不包含 `parentId`、`schemaVersion`；入队时不能由客户端指定 `id`、`createdAt`、`confirmedAt`。
@@ -420,7 +420,7 @@ interface CreateSessionParams {
 ```
 
 - 服务层创建临时 `SessionMeta`、`Context` 与空消息队列；不写盘，不进入 `session.list`。
-- `systemPrompt` 生成一条 `kind=agent`、`role=system` 的队列条目；不写入 `SessionMeta`。
+- `systemPrompt` 生成一条 `kind=agent`、`role=system`、`source="create"` 的队列条目；不写入 `SessionMeta`。
 - `extensions` 是显式启用条目 `package#name` 列表：
   - 省略：使用配置中的默认选择；
   - 空数组：不启用任何条目；
@@ -480,8 +480,8 @@ interface ConfigureSessionParams {
 - 活跃 turn 使用启动时的模型与供应商快照；仅携带 `model`/`provider` 的新设置在下一次 turn 生效。
 - 若存在活跃 turn 且请求携带 `systemPrompt`，整个 `session.configure` 返回 `turn.active`，不更新 `model`/`provider`、队列或会话记录；不做部分更新。
 - `systemPrompt` 只操作消息队列：
-  - 已有 `role=system` 队列条目：更新该条目；
-  - 没有：新增一条 `kind=agent`、`role=system` 的队列条目；
+  - 已有 `source="instruction"` 队列条目：更新该条目；
+  - 没有：新增一条 `kind=agent`、`role=system`、`source="instruction"` 的队列条目；
   - 不写 `SessionMeta`，不修改会话记录。
 - `session.configure` 不接受扩展选择；扩展选择只能通过声明类控制消息改变。
 - 返回更新后的 `SessionMeta`。
@@ -937,9 +937,8 @@ interface Context {
 6. 对选择中尚未出现在分支里的技能，按名称升序追加为 `kind=agent`、`role=system`、`entry=技能名` 的节点；已存在复用。
 7. 将队列条目按顺序转成 `SessionNodeDraft`；控制消息的内容保持为单个 `text` 块 JSON。
 8. 组装可见序列：
-   - `entry=system-prompt` 的节点只取分支最新一条；
+   - 筛选出 `source="instruction"` 的节点，仅分支内最新的 instruction 参与装配；
    - 来源/技能节点只在其 `entry` 位于当前选择集时进入；
-   - 普通 system 节点不参与过滤；
    - `declaration` 不进入消息；`compaction` 按范围跳过并插入 summary；`cancel` 不进入消息。
 9. 选择中的工具/包装器必须能从最新 declaration 的 `definitions` 找到定义；缺失按 `storage.corrupt` 处理。`LlmRequest.tools` 从这些定义构造，不读实时注册表。
 10. 构造消息序列并执行压缩/裁剪（§4.2.6）。
@@ -993,13 +992,13 @@ interface Skills {
 - 来源/技能节点是内容，不是选择状态；每个 `entry` 在分支中最多追加一次。
 - 取消选择不删除已有节点，只从本次消息序列排除；再次选择复用已有节点。
 - 零片段来源不落节点，每 step 重新 resolve；这是允许的代价。
-- 上下文来源和技能内容都进入 `role=system` 消息；普通 system-prompt 节点由最新一条生效。
+- 上下文来源和技能内容都进入 `role=system` 消息；`instruction` 节点由最新一条生效。
 
 #### 4.2.6 裁剪与压缩
 
 - 预算 `B = max(1024, contextWindow - maxOutput - toolTokenReserve)`；token 估算使用 UTF-8 字节数除以 3 向上取整。
 - 先应用已有 compaction：跳过 `from`/`to` 范围，`summary` 作为一条 system 消息插入区间起点；范围必须属于当前分支且不重叠，否则跳过该 compaction。
-- 再裁剪：按消息组丢弃最旧的非 system 消息组；只有 `entry=system-prompt` 的节点不可裁剪，来源/技能节点可裁剪。
+- 再裁剪：按消息组丢弃最旧的非 system 消息组；只有 `source="instruction"` 的节点不可裁剪，来源/技能节点可裁剪。
 - 若本次丢弃的节点区间包含 ≥ 4 个节点或 ≥ 20% 预算，且未被已有 compaction 覆盖，`Context` 生成一条 compaction：`from/to` 为丢弃区间首末节点，`summary` 为固定模板（按角色前缀 + 每节点最多 200 字符，总长 ≤ 2048 字符），并插入区间起点。
 - compaction 与本批 drafts 同批 append，只引用本批之前已落盘的节点。
 - 若压缩后仍超过预算，返回 `context.window_exceeded`；`Context` 不调用模型生成摘要。
@@ -1304,7 +1303,7 @@ interface SessionRuntime {
 - `session.create`：校验 provider/model、workspace 与 extensions；创建运行时；将 `systemPrompt` 和扩展选择物化为队列条目；返回临时 `SessionMeta`。
 - `session.list`：只查 `SessionStore`；不经过运行时。
 - `session.read`：在会话锁内读取 `meta`、`records`、`queue`、`selection` 与 `seq`；无 `nodeId` 按字节预算分页读全树，有 `nodeId` 读分支；临时会话没有节点。`selection` 由 `Context.selectionFor` 计算，只含已持久化记录；`queue`/`selection` 仅首屏返回。
-- `session.configure`：带 `systemPrompt` 时先检查活跃 turn，存在则返回 `turn.active`，不修改队列/meta；仅 `model`/`provider` 时校验后先写 `SessionStore.updateMeta`，成功后调用 `Context.updateMeta`；`systemPrompt` 只更新或新增 `role=system` 队列条目。
+- `session.configure`：带 `systemPrompt` 时先检查活跃 turn，存在则返回 `turn.active`，不修改队列/meta；仅 `model`/`provider` 时校验后先写 `SessionStore.updateMeta`，成功后调用 `Context.updateMeta`；`systemPrompt` 只更新或新增 `source="instruction"` 队列条目。
 - `session.subscribe` / `session.unsubscribe`：维护连接的订阅集合；重复订阅幂等；退订不发事件；断开清理。
 - `queue.enqueue` / `edit` / `remove` / `clear`：委托 `Context`；返回队列 id；推送 `queue.updated`。
 - `entries.snapshot`：从 `Extensions` 取得当前清点，从 `Context` 取得已持久化选择与 effective 列表；不合并队列。
