@@ -24,6 +24,33 @@ interface MaterializeInput {
   sourceContext: ContextSourceContext;
 }
 
+/** Pure frozen-definition projection; safe to repeat during locked revalidation. */
+export function projectTools({
+  selection,
+  definitions,
+  entries,
+}: Pick<MaterializeInput, "selection" | "definitions" | "entries">): RequestToolDeclaration[] {
+  const tools: RequestToolDeclaration[] = [];
+  for (const name of [...new Set(selection)].sort()) {
+    const kind = entries.kind(name);
+    if (kind === "context" || kind === "skill") continue;
+    if (kind !== "tool" && kind !== "wrapper")
+      throw new PiscesError("storage.corrupt", "Unknown selected entry", { data: { name } });
+    const definition = definitions.get(name);
+    if (!validDefinition(definition) || definition.name !== name || definition.kind !== kind)
+      throw new PiscesError("storage.corrupt", "Missing or invalid frozen definition", {
+        data: { name },
+      });
+    if (kind === "tool")
+      tools.push({
+        name,
+        description: definition.description,
+        parameters: structuredClone(definition.parameters),
+      });
+  }
+  return tools;
+}
+
 export async function materialize({
   branch,
   queue,
@@ -36,7 +63,7 @@ export async function materialize({
 }: MaterializeInput): Promise<{ drafts: SessionNodeDraft[]; tools: RequestToolDeclaration[] }> {
   sourceContext.signal?.throwIfAborted();
   const drafts: SessionNodeDraft[] = [];
-  const tools: RequestToolDeclaration[] = [];
+  const tools = projectTools({ selection, definitions, entries });
   const contexts: EntryName[] = [];
   const selectedSkills: EntryName[] = [];
   const existing = new Set(
@@ -48,19 +75,7 @@ export async function materialize({
       if (!existing.has(name)) contexts.push(name);
     } else if (kind === "skill") {
       if (!existing.has(name)) selectedSkills.push(name);
-    } else if (kind === "tool" || kind === "wrapper") {
-      const definition = definitions.get(name);
-      if (!validDefinition(definition) || definition.name !== name || definition.kind !== kind)
-        throw new PiscesError("storage.corrupt", "Missing or invalid frozen definition", {
-          data: { name },
-        });
-      if (kind === "tool")
-        tools.push({
-          name,
-          description: definition.description,
-          parameters: structuredClone(definition.parameters),
-        });
-    } else throw new PiscesError("storage.corrupt", "Unknown selected entry", { data: { name } });
+    }
   }
   function append(name: EntryName, content: SessionNodeDraft["content"]) {
     drafts.push({ kind: "agent", role: "system", source: name, content: sourceContent(content) });

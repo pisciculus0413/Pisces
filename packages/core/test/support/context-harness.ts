@@ -131,6 +131,7 @@ export function createContextHarness(overrides: Partial<ContextDeps> = {}) {
     events,
     eventClock,
     runExclusive,
+    isLocked: () => ownership.getStore() === true,
     failNextRead(error: Error) {
       readFailure = error;
     },

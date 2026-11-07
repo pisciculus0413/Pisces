@@ -13,6 +13,8 @@ interface QueueDeps {
 type Queue = Pick<Context, "enqueue" | "edit" | "remove" | "clear" | "confirm" | "unconfirm"> & {
   snapshot(): QueueEntry[];
   consume(ids: ReadonlySet<QueueEntryId>): boolean;
+  confirmedWindow(): ReadonlyMap<QueueEntryId, number>;
+  survivors(window: ReadonlyMap<QueueEntryId, number>): QueueEntry[];
 };
 
 function invalidControl(): never {
@@ -46,6 +48,8 @@ function validateSize(entries: QueueEntry[]): void {
 
 export function createQueue({ newId, now, onChange }: QueueDeps): Queue {
   let entries: QueueEntry[] = [];
+  let generation = 0;
+  const confirmations = new Map<QueueEntryId, number>();
 
   function find(id: QueueEntryId): QueueEntry {
     const entry = entries.find((entry) => entry.id === id);
@@ -56,11 +60,34 @@ export function createQueue({ newId, now, onChange }: QueueDeps): Queue {
   function replace(candidate: QueueEntry[]): void {
     validateSize(candidate);
     entries = candidate;
+    const confirmed = new Set(
+      candidate.filter((entry) => entry.confirmedAt !== undefined).map((entry) => entry.id),
+    );
+    for (const id of confirmations.keys()) if (!confirmed.has(id)) confirmations.delete(id);
+    for (const id of confirmed) if (!confirmations.has(id)) confirmations.set(id, ++generation);
     onChange();
   }
 
   return {
     snapshot: () => structuredClone(entries),
+    confirmedWindow() {
+      const window = new Map<QueueEntryId, number>();
+      for (const entry of entries) {
+        if (entry.confirmedAt === undefined) break;
+        window.set(entry.id, confirmations.get(entry.id) as number);
+      }
+      return window;
+    },
+    survivors(window) {
+      return structuredClone(
+        entries.filter(
+          (entry) =>
+            entry.confirmedAt !== undefined &&
+            window.has(entry.id) &&
+            window.get(entry.id) === confirmations.get(entry.id),
+        ),
+      );
+    },
     enqueue(inputs) {
       if (!inputs.length) return [];
       for (const input of inputs) validateInput(input);
@@ -122,6 +149,7 @@ export function createQueue({ newId, now, onChange }: QueueDeps): Queue {
       const remaining = entries.filter((entry) => !ids.has(entry.id));
       if (remaining.length === entries.length) return false;
       entries = remaining;
+      for (const id of ids) confirmations.delete(id);
       return true;
     },
   };

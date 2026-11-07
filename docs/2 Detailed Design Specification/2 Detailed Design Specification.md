@@ -957,6 +957,7 @@ interface SessionEventClock {
 
 - `enqueue` 为每个输入分配 `QueueEntryId` 与 `createdAt`，按输入顺序追加到队尾；不设置 `confirmedAt`。
 - `confirm()` 在同一会话锁内把当前未确认条目置为已确认；确认须先通过完整候选队列的大小校验再原子替换。`unconfirm()` 清除所有尚未装配条目的 `confirmedAt`，仅实际变化发布 `queue.updated`；`updateMeta` 只在 Store 写入成功后更新内存 meta。
+- 队列内部为每次确认分配代际标记；`unconfirm` 后重新确认必须使用新代际，即使 `confirmedAt` 与上次处于同一毫秒。标记只存在内存，不增加公共 `QueueEntry` 字段或持久化字段；删除、清空及出队同步清理标记。
 - `queue` 只存在内存；`Context` 不持久化队列，也不做 WAL。
 - `edit` 只允许未确认的 `kind=agent` 条目；已确认条目返回 `queue.entry_locked`。
 - `remove` 可删除任意尚未装配的条目（含已确认未装配）；`clear` 清空全部尚未装配条目并返回完整 id 列表；Gateway 在活跃 turn 时整体拒绝 `clear`。
@@ -984,7 +985,7 @@ interface SessionEventClock {
 1. 调用 `signal?.throwIfAborted()`，保留原始 reason，不新增取消协议码；确保初始化。确定分支起点：`nodeId` 指定时使用该节点；否则使用记录最后一个节点。临时会话没有节点，指定 `nodeId` 返回 `session.node_not_found`。
 2. 读取分支节点（临时会话为空）；计算分支选择。
 3. 取队列快照，只保留连续已确认前缀；把其中的声明类控制消息异或到选择上。
-4. 记录本次分支端点 `headId`（指定节点或默认分支末端）与队列条目 id 集合。显式旧分支端点不等于文件默认末端；后续提交以本次选择的端点为父节点。
+4. 记录本次分支端点 `headId`（指定节点或默认分支末端）、已确认前缀的条目 id 集合及确认代际。重跑时窗口仍为第一次 A 段记录的集合及代际，只保留仍存在、仍确认且代际相同的条目；后续确认的条目及原 id 重新确认的条目均不进入本次装配。显式旧分支端点不等于文件默认末端；后续提交以本次选择的端点为父节点。
 
 **B. 锁外构造**
 
@@ -996,11 +997,11 @@ interface SessionEventClock {
    - 来源/技能节点只在其 `source` 位于当前选择集时进入；
    - `declaration` 不进入消息；`compaction` 按范围跳过并插入 summary；`cancel` 不进入消息。
 9. 选择中的工具/包装器必须能从该名称最近一次携带 `definitions` 的 declaration 找到定义；缺失按 `storage.corrupt` 处理。`LlmRequest.tools` 从这些定义构造，不读实时注册表。
-10. 构造消息序列并执行压缩/裁剪（§4.2.6）。
+10. B 段只解析来源与技能，不以其暂存消息或预算提前返回 `context.window_exceeded`；最终消息投影、工具定义、预算与压缩/裁剪在 C 段按幸存批次执行（§4.2.6）。
 
 **C. 锁内提交**
 
-11. 重校验：若已确认队列条目在锁外被删除，从本批剔除；不新增本次窗口之后确认的条目。消息、工具、来源、预算及 compaction 均按最终幸存批次重新计算。若声明选择或省略 nodeId 时的默认 head 变化，丢弃本次 resolve 结果并从 A 重跑一次；仍变化返回 `context.changed`，`data.retryable=true`。
+11. 重校验：若已确认队列条目在锁外被删除、取消确认或确认代际变化，从本批剔除；不新增本次窗口之后确认的条目。消息、工具、来源、预算及 compaction 均按最终幸存批次重新计算。若声明选择或省略 nodeId 时的默认 head 变化，丢弃本次 resolve 结果并从 A 重跑一次；仍变化返回 `context.changed`，`data.retryable=true`。仅 definitions 变化时也按最终分支与幸存声明重新投影工具；此纯投影不得在锁内触发来源解析。来源结果只保留最终选择中且当前分支尚无对应 source 的内容。
 12. B 段每次 await 返回后、C 段写入前均调用 `signal?.throwIfAborted()`；即使来源忽略 signal 并返回也必须拦住取消。取消不持久化、不出队、不增加 `seq`、不写 `session.updated`，本次未发送草稿丢弃。
 13. 计算最终可见消息；若没有任何可见 `kind=agent` 消息，返回 `turn.empty`，不调用 `Sessions.create`；仅 user 消息也有效，不要求 system。
 14. 首次持久化使用 `Sessions.create(meta, drafts)`；已有节点时使用 `Sessions.append(sessionId, drafts, parentId=headId)`；`drafts` 为空时跳过 append。
