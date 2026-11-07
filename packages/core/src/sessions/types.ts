@@ -42,12 +42,22 @@ export interface SessionsDeps {
   now: () => string;
 }
 
+/** Runs after node generation, before any repository write; receives an isolated copy. */
+export interface SessionWriteOptions {
+  validate?: (nodes: readonly SessionNode[]) => void;
+}
+
 export interface Sessions {
-  create(meta: SessionMeta, drafts: SessionNodeDraft[]): Promise<SessionNode[]>;
+  create(
+    meta: SessionMeta,
+    drafts: SessionNodeDraft[],
+    options?: SessionWriteOptions,
+  ): Promise<SessionNode[]>;
   append(
     sessionId: SessionId,
     drafts: SessionNodeDraft[],
     parentId?: NodeId,
+    options?: SessionWriteOptions,
   ): Promise<SessionNode[]>;
   readBranch(sessionId: SessionId, nodeId?: NodeId): AsyncIterable<SessionNode>;
   readTree(sessionId: SessionId): AsyncIterable<SessionNode>;

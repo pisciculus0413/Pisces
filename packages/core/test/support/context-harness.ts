@@ -52,6 +52,15 @@ export function createContextHarness(overrides: Partial<ContextDeps> = {}) {
   const repository = new MemorySessionRepository();
   let readFailure: Error | undefined;
   let writeFailure: Error | undefined;
+  let postcommitFailure: Error | undefined;
+  let treeReadFailure: Error | undefined;
+  function checkPostcommit() {
+    if (postcommitFailure) {
+      const error = postcommitFailure;
+      postcommitFailure = undefined;
+      throw error;
+    }
+  }
   function checkWrite() {
     if (writeFailure) {
       const error = writeFailure;
@@ -71,17 +80,26 @@ export function createContextHarness(overrides: Partial<ContextDeps> = {}) {
     create: async (meta, nodes) => {
       checkWrite();
       await repository.create(meta, nodes);
+      checkPostcommit();
     },
     append: async (id, nodes) => {
       checkWrite();
       await repository.append(id, nodes);
+      checkPostcommit();
     },
     updateMeta: async (id, meta) => {
       checkWrite();
       await repository.updateMeta(id, meta);
     },
     readBranch: (id, nodeId) => read(repository.readBranch(id, nodeId)),
-    readTree: (id) => read(repository.readTree(id)),
+    readTree: async function* (id) {
+      if (treeReadFailure) {
+        const error = treeReadFailure;
+        treeReadFailure = undefined;
+        throw error;
+      }
+      yield* read(repository.readTree(id));
+    },
     list: () => repository.list(),
   };
   let nodeId = 0;
@@ -132,6 +150,12 @@ export function createContextHarness(overrides: Partial<ContextDeps> = {}) {
     eventClock,
     runExclusive,
     isLocked: () => ownership.getStore() === true,
+    failNextWriteAfterCommit(error: Error) {
+      postcommitFailure = error;
+    },
+    failNextTreeRead(error: Error) {
+      treeReadFailure = error;
+    },
     failNextRead(error: Error) {
       readFailure = error;
     },

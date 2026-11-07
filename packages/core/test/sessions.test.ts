@@ -168,3 +168,66 @@ test("an existing session with an empty branch is corrupt", async () => {
     code: "storage.corrupt",
   });
 });
+
+// Validator must see real generated fields and run before the repository write.
+test.each([false, true])(
+  "write validation rejects atomically with actual nodes (append=%s)",
+  async (append) => {
+    const { sessions, repository } = fixture();
+    if (append) await sessions.create(meta, [draft]);
+    const error = new Error("rejected");
+    let checked = false;
+    const options = {
+      validate(nodes: readonly import("../src/index.js").SessionNode[]) {
+        checked = true;
+        expect(nodes.map((node) => [node.id, node.parentId])).toEqual(
+          append
+            ? [
+                ["n2", "n1"],
+                ["n3", "n2"],
+              ]
+            : [
+                ["n1", "n1"],
+                ["n2", "n1"],
+              ],
+        );
+        expect(nodes[0]?.createdAt).toBe(meta.createdAt);
+        throw error;
+      },
+    };
+    await expect(
+      append
+        ? sessions.append(meta.id, [draft, draft], undefined, options)
+        : sessions.create(meta, [draft, draft], options),
+    ).rejects.toBe(error);
+    expect(checked).toBe(true);
+    expect(
+      append ? await collect(repository.readTree(meta.id)) : await sessions.list(),
+    ).toHaveLength(append ? 1 : 0);
+  },
+);
+
+test.each([false, true])(
+  "write validator receives an isolated copy (append=%s)",
+  async (append) => {
+    const { sessions } = fixture();
+    if (append) await sessions.create(meta, [draft]);
+    let checked = false;
+    const options = {
+      validate(nodes: readonly import("../src/index.js").SessionNode[]) {
+        checked = true;
+        if (nodes[0]) {
+          nodes[0].content.length = 0;
+          nodes[0].id = "changed" as NodeId;
+        }
+      },
+    };
+    const nodes = await (append
+      ? sessions.append(meta.id, [draft], undefined, options)
+      : sessions.create(meta, [draft], options));
+    expect(checked).toBe(true);
+    expect(nodes[0]?.content).toEqual(draft.content);
+    expect(nodes[0]?.id).toBe(append ? "n2" : "n1");
+    expect(await collect(sessions.readTree(meta.id))).toContainEqual(nodes[0]);
+  },
+);

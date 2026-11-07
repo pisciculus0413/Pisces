@@ -803,9 +803,13 @@ interface SessionsDeps {
   now: () => string;
 }
 
+interface SessionWriteOptions {
+  validate?: (nodes: readonly SessionNode[]) => void;
+}
+
 interface Sessions {
-  create(meta: SessionMeta, drafts: SessionNodeDraft[]): Promise<SessionNode[]>;
-  append(sessionId: SessionId, drafts: SessionNodeDraft[], parentId?: NodeId): Promise<SessionNode[]>;
+  create(meta: SessionMeta, drafts: SessionNodeDraft[], options?: SessionWriteOptions): Promise<SessionNode[]>;
+  append(sessionId: SessionId, drafts: SessionNodeDraft[], parentId?: NodeId, options?: SessionWriteOptions): Promise<SessionNode[]>;
   readBranch(sessionId: SessionId, nodeId?: NodeId): AsyncIterable<SessionNode>;
   readTree(sessionId: SessionId): AsyncIterable<SessionNode>;
   list(): Promise<SessionMeta[]>;
@@ -827,6 +831,7 @@ interface Sessions {
 
 - `create` 只调用 `SessionRepository.create(meta, nodes)`；不预先写 meta，不写入空会话。
 - `append` 只调用 `SessionRepository.append(sessionId, nodes)`；节点已在内存中完成编号与父指针分配。
+- 可选 `options.validate` 在完整节点生成（真实 id、parentId、createdAt、schemaVersion 已确定）后、仓库写入前同步执行；只收到结构化副本，不能修改待写节点；拒绝时原样抛错且不写仓库。不提供其他写入钩子。
 - 写入失败时，`Sessions` 不返回部分节点；由 `SessionRepository` 保证批量原子性。提交点前失败时新批不可见；提交点后目录同步失败返回 `storage.io`，整批可能已存在，调用方须重读确认，不能盲目重试。
 - `readBranch` 直接转发 `SessionRepository.readBranch`；省略 `nodeId` 时以记录最后一个节点为分支末端。
 - `readTree` 返回全部节点，按追加顺序。
@@ -936,7 +941,7 @@ interface SessionEventClock {
 }
 ```
 
-`Context` 创建后由服务层调用 `initialize`：每次调用都重读默认分支并计算已持久化选择，不使用永久 resolved promise，也不丢失现有内存队列；临时会话不读取记录，选择为空。`initialize`、`selectionFor` 及所有同步方法由调用方在会话锁内调用；`assemble` 自持 A/C 锁，调用方不得持锁调用，并在 A 段确保初始化。
+`Context` 创建后由服务层调用 `initialize`：每次调用都重读默认分支并计算已持久化选择，不使用永久 resolved promise，也不丢失现有内存队列；临时会话不读取记录，选择为空。`initialize`、`selectionFor` 及所有同步方法由调用方在会话锁内调用；`assemble` 自持 A/C 锁，调用方不得持锁调用，并在 A 段确保初始化。若已有 pending，`initialize` 及 `assemble` 的 A/C 段先在锁内协调；在协调完成前不解析来源或再次写入。
 
 `snapshot` 返回当前队列、选择与 `eventClock.current()`；`selectionFor` 按指定节点或默认分支计算，不改变缓存。所有输入内容在接收时复制，返回的队列、内容、选择及发布的事件与内部状态隔离，调用者修改它们不得影响后续选择或持久化。`entries` 是冻结 inventory 的分类投影，不提供实时工具正文；请求工具只有 name/description/parameters，不携带 execute、运行时 id/source。未来完整 `ToolDeclaration` 可结构化赋值给 `RequestToolDeclaration`，构造请求时仍显式提取这三个字段。
 
@@ -947,11 +952,11 @@ interface SessionEventClock {
 - `selection`：已持久化记录的声明选择缓存；
 - `meta`：当前会话元数据。
 
-提交结果无法读清时，额外保留仅含本批 drafts、队列 ids、父节点/水位、first、最终 selection 和原错误的内存 pending 状态（§4.2.7），不保存整树，恢复后清除。
+提交结果无法读清时，额外保留仅含本批不可变 drafts 副本、队列 ids、父节点/水位、first、最终 selection 和原 `storage.io` 对象的内存 pending 状态（§4.2.7），不保存整树，恢复后清除。这是常态状态限制的受限例外；不写磁盘、不设计 WAL，进程重启后队列仍丢失，只依赖 Store 的真实提交事实。pending 期间 `snapshot` 可读旧缓存；enqueue/edit/remove/clear/confirm/unconfirm/updateMeta 在改变任何状态前拒绝 `context.pending_commit`，`data.retryable=true`。
 
-事件序号仅由同会话 Context、未来 driver 与 Gateway 共享的 `SessionEventClock` 维护；发布每个事件时在会话锁内调用 `next()`，快照取 `current()`，Context 不维护第二份计数。只注入事件发布端，不依赖 EventBus 订阅或实现。
+事件序号仅由同会话 Context、未来 driver 与 Gateway 共享的 `SessionEventClock` 维护；发布每个事件时在会话锁内调用 `next()`，快照取 `current()`，Context 不维护第二份计数。clock 返回非负安全整数且分配值单调增加；`ContextDeps.now` 返回恰为 24 ASCII 字节的 RFC3339 UTC 毫秒时间戳。只注入事件发布端，不依赖 EventBus 订阅或实现。
 
-不保存“活动分支”“已装配标记”、已装配 id 墓碑或完整选择快照。
+常态不保存“活动分支”“已装配标记”、已装配 id 墓碑或完整选择快照；pending 仅临时保留本批最终选择。
 
 #### 4.2.2 队列操作
 
@@ -1004,8 +1009,8 @@ interface SessionEventClock {
 11. 重校验：若已确认队列条目在锁外被删除、取消确认或确认代际变化，从本批剔除；不新增本次窗口之后确认的条目。消息、工具、来源、预算及 compaction 均按最终幸存批次重新计算。若声明选择或省略 nodeId 时的默认 head 变化，丢弃本次 resolve 结果并从 A 重跑一次；仍变化返回 `context.changed`，`data.retryable=true`。仅 definitions 变化时也按最终分支与幸存声明重新投影工具；此纯投影不得在锁内触发来源解析。来源结果只保留最终选择中且当前分支尚无对应 source 的内容。
 12. B 段每次 await 返回后、C 段写入前均调用 `signal?.throwIfAborted()`；即使来源忽略 signal 并返回也必须拦住取消。取消不持久化、不出队、不增加 `seq`、不写 `session.updated`，本次未发送草稿丢弃。
 13. 计算最终可见消息；若没有任何可见 `kind=agent` 消息，返回 `turn.empty`，不调用 `Sessions.create`；仅 user 消息也有效，不要求 system。
-14. 首次持久化使用 `Sessions.create(meta, drafts)`；已有节点时使用 `Sessions.append(sessionId, drafts, parentId=headId)`；`drafts` 为空时跳过 append。
-15. 持久化成功后，从队列移除本次已装配的条目，更新 `selection` 与 `persisted`；通过共享 clock 为每个事件分配 `seq`，发布 `session.updated`/`selection.updated`/`queue.updated`。队列与选择按最终状态各通知一次，session.updated 按完整事件 4 MiB 预算拆帧。发布回调抛错不能触发持久化失败补偿或恢复已出队条目。
+14. 写前读取默认分支末端作为追加顺序水位（可复用 C 段刚读出的默认分支），显式旧 `headId` 仅作 parent，不能作水位；临时会话无水位。首次持久化使用 `Sessions.create(meta, drafts, options)`；已有节点时使用 `Sessions.append(sessionId, drafts, headId, options)`；`drafts` 为空时跳过写入。options.validate 预检完整节点事件（§4.2.7），正常成功路径不调用 readTree。
+15. 持久化成功或失败后重读确认完整已提交时，先从队列移除本批条目，更新 `selection`、`persisted` 并清除 pending；再依次发布 session.updated 各帧、selection.updated（仅变化）及 queue.updated（仅消费非空队列）。同一临界区内每帧分配 seq，空批无变化无通知；每个通知回调独立尝试，失败继续后续通知，最终抛首个通知错误。原 storage.io 若存在则优先原样抛出。回调错误不得进入存储 catch、触发重读/重写或恢复已出队条目。
 16. 若本批写入节点非空，将 `headId` 推进为本批最后一个节点的 id；否则保留原端点。返回 `LlmRequest`、选择、写入节点、提交后的 `headId` 与 `first`。
 
 追加的 `parentId` 为提交前的 `headId`；首次创建由 `Sessions.create` 生成根节点。
@@ -1065,11 +1070,16 @@ interface Skills {
 
 #### 4.2.7 持久化与出队
 
-- 首次 `assemble` 使用 `Sessions.create`；后续使用 `Sessions.append`，父节点为 `headId`。
-- 出队、持久化、`selection` 更新与共享 clock 的事件序号分配在同一临界区完成；提交点前失败时队列保留、选择缓存不更新，不产生半批节点。提交点后失败先重读核对本批，不能把旧兄弟节点误认成本批或重复写入；结果仍不清时保留待确认状态，其他修改返回 `context.pending_commit`、`data.retryable=true`，恢复确认后清除 pending。
-- `Context` 不直接写文件；只调用 `Sessions`。
-- 临时会话首次落盘后 `persisted=true`；`SessionMeta` 由服务层提供，不由 `Context` 创建。
-- `Context.updateMeta` 由 Gateway 在 `SessionStore.updateMeta` 成功后调用；`assemble` 使用最新 `meta.model`。
+- 首次 `assemble` 使用 `Sessions.create`；后续使用 `Sessions.append`，父节点为本次分支的 `headId`。调用锁要求统一为 §4.2.1：同步方法、initialize/selectionFor 由宿主持锁，assemble 自持 A/C 锁。
+- 写入前保存不可变 drafts、队列 ids、parent、水位、first 及最终 selection；只有 Sessions.create/append 的 await 位于存储 catch 中，预算、复制与通知在 catch 外。正常写入成功不 readTree，只有 storage.io 才在锁内协调。
+- 协调读取追加顺序全树，取默认末端水位后的完整 suffix；忽略生成 id/时间，逐节点比较所有 draft 字段，数量必须精确等于本批，首 parent 必须是本次指定 parent（首次根自指），其后父指针连续。不能拿显式旧 parent 作水位，也不能把水位前相同正文的兄弟链误认为本批。
+- 首次会话在尚未读出节点前 session.not_found，或水位存在且 suffix 为空，判 absent；队列、选择及 persisted/seq 保持本次提交前状态，清除 pending，首调用仍抛原 storage.io，下一次装配才可安全重写。部分读取后报错不能判 absent。
+- 完整匹配判 committed，按真实提交事实完成出队与状态更新，再通知；首调用仍抛原 storage.io，后续装配不得重复持久化本批或来源。部分批次、不匹配、链断裂或水位消失判 storage.corrupt，保持 pending，绝不盲重试；首次失败仍优先返回原 storage.io，后续协调返回当前读错误或 storage.corrupt。
+- 协调读取本身失败也保留 pending。initialize 或 assemble 必须先重读协调：absent 释放阻塞再继续，committed 先完成内部状态并清 pending 再通知。重复 initialize 不重复出队/通知；恢复通知失败仍以保存的原 storage.io 优先，通知正常则不重新抛已报告的旧错误。
+- 事件 `data` 只携带领域 payload，不重复 sessionId/seq/at；首次 session.updated 含 meta。同时满足完整 EngineEvent 与 Gateway 对应协议 `{event,data:{sessionId,seq,at,...payload}}` 的 JSON UTF-8 大小各不超过 4194304 字节，再拆整节点帧，每帧独立 seq，不分片节点。对应协议把顶层字段移入 data，标点字节数相同；type 键改为 event 精确增加 1 字节，故核心按 EngineEvent 最大 4194303 字节计量，无需依赖协议模块。必要时先发含 meta、nodes=[] 的独立帧，再发节点。
+- `Sessions` 的写前 validate 使用真实完整节点预检单节点帧及 meta 独立帧，按上述双封装预算，超限以 context.source_failed 拒绝、不写库、不分配 seq；预检 seq 使用 Number.MAX_SAFE_INTEGER 的最坏宽度，at 使用契约规定的 24 字节时间戳。实际分帧仍计当前分配的 seq/at 等完整封装，不能只计 content。来源/技能的 256 KiB 内容限制仍独立生效。
+- 所有内部提交状态先完成后才调用发布端；即使某帧失败，其余 session 帧及选择/队列通知仍各自尝试。事件不是可靠日志，已分配 seq 允许间隙，重连通过 read 恢复。事件抛 storage.io 也不是存储失败，不重读、不重写、不回滚。
+- `Context` 不直接写文件；只调用 `Sessions`。临时会话首次落盘后 persisted=true；SessionMeta 由服务层提供。updateMeta 由 Gateway 在 SessionStore.updateMeta 成功后调用；assemble 使用最新 meta.model。
 
 ### 4.3 `Tools`
 
@@ -1657,7 +1667,7 @@ interface ClientRegistry {
 
 失败边界：
 
-- `Sessions.create` 失败：不写 meta/nodes，队列保留，临时会话仍在内存。
+- `Sessions.create` 提交点前失败：不写 meta/nodes，队列保留，临时会话仍在内存。提交点后 storage.io 按 §4.2.7 协调：整批已提交则按事实完成状态并仍抛原错误，读不清则保留 pending。
 - 首次 turn 没有产生节点：`turn.empty`，不落盘，队列保留。
 - 首次落盘后供应商请求失败：会话已落盘，turn 失败，队列已清空。
 - daemon 在首次落盘前退出：临时 meta 与队列丢失，磁盘无空会话。
@@ -1814,10 +1824,10 @@ interface ClientRegistry {
 
 ### 7.5 失败与恢复约定
 
-- 首次落盘在提交点前失败：队列保留，无 meta/nodes；客户端可重试。提交点后 I/O 失败可能已整批落盘，须重读确认；不能仅凭 `storage.io` 盲目重试。
-- 上下文装配追加在提交点前失败：队列保留，选择缓存不更新；不继续请求。提交点后失败须按本批父节点/水位及内容重读核对，不能把旧兄弟节点误认成本批或重复写入；结果仍不清时其他修改返回 `context.pending_commit`、`data.retryable=true`，确认恢复后清除 pending。
+- 首次落盘在提交点前失败：重读确认 absent 后队列保留，无 meta/nodes；客户端可重试。提交点后 I/O 失败可能已整批落盘，按 §4.2.7 重读完整 suffix 确认；确认 committed 则完成内部状态与通知，仍原样抛首个 storage.io，不能仅凭 storage.io 盲目重试。
+- 上下文装配追加在提交点前失败：确认 absent 后队列保留，选择缓存不更新；不继续请求。提交点后失败须按默认追加水位后的完整 suffix、本次父节点及 draft 字段核对；确认 committed 则出队并更新选择/persisted，仍抛原 storage.io。结果读不清或不匹配时保留内存 pending，snapshot 可读旧缓存，其他修改返回 context.pending_commit、data.retryable=true；initialize/assemble 锁内先协调，持续失败不写入，恢复后先清 pending 再通知。pending 不落盘、不作为 WAL。
 - 声明选择或默认 head 在一次重跑后仍变化，返回 `context.changed`、`data.retryable=true`；未来 Gateway 原样映射上述内部错误，本轮不新增协议实现。
-- 装配取消通过 AbortSignal 的原始 reason 传播，不新增取消协议码；持久化后的事件回调异常不得触发持久化失败补偿。
+- 装配取消通过 AbortSignal 的原始 reason 传播，不新增取消协议码；持久化后的事件回调异常不得触发持久化失败补偿。内部状态先完成，再独立尝试全部通知；原 storage.io 优先于通知错误，否则抛首个通知错误。通知序号允许间隙，重连 read 恢复。
 - assistant/tool/cancel 追加失败：不继续请求；已写节点保留；队列已出队，不自动恢复。
 - 取消写入失败：turn 仍结束，但标记未落盘；重启时无法恢复该标记，用户可继续。
 - 恢复时 `meta.json` 损坏或有 meta 但 commit 缺失/非法：保留会话原始文件，收集 `RecoveryIssue`；该会话不可加载，不影响直接读取其他健康会话，`list` 整体拒绝。

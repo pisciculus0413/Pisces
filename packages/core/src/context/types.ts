@@ -81,6 +81,7 @@ export interface ContextEvents {
 
 /** Shared by Context, driver, and Gateway for one session. */
 export interface SessionEventClock {
+  /** Nonnegative safe integer; shared allocations increase monotonically. */
   current(): number;
   /** Allocate only while holding the session lock. */
   next(): number;
@@ -98,6 +99,7 @@ export interface ContextDeps {
   eventClock: SessionEventClock;
   runExclusive<T>(task: () => Promise<T>): Promise<T>;
   newId: () => QueueEntryId;
+  /** RFC3339 UTC timestamp with milliseconds, exactly 24 ASCII bytes. */
   now: () => string;
 }
 

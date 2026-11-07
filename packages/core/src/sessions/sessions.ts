@@ -10,18 +10,20 @@ export function createSessions({ repository, newId, now }: SessionsDeps): Sessio
     });
   }
   return {
-    async create(meta, drafts) {
+    async create(meta, drafts, options) {
       if (!drafts.length) throw new TypeError("Empty drafts");
       const nodes = build(drafts);
+      options?.validate?.(structuredClone(nodes));
       await repository.create(meta, nodes);
       return nodes;
     },
-    async append(id, drafts, parentId) {
+    async append(id, drafts, parentId, options) {
       if (!drafts.length) throw new TypeError("Empty drafts");
       let parent: NodeId | undefined;
       for await (const node of repository.readBranch(id, parentId)) parent = node.id;
       if (parent === undefined) throw new PiscesError("storage.corrupt", "Empty session branch");
       const nodes = build(drafts, parent);
+      options?.validate?.(structuredClone(nodes));
       await repository.append(id, nodes);
       return nodes;
     },
