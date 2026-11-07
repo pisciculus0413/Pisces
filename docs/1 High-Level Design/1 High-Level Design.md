@@ -793,7 +793,7 @@ interface Event<E = JsonValue> {
 | `selection.updated` | 声明选择状态变化 |
 | `client.launched` | 客户端进程启动 |
 
-`SessionMeta` 是会话元数据，字段见 §6.5。服务层在 `session.create` 创建临时 `SessionMeta`，首次落盘前不写盘，也不出现在 `session.list`；`session.list` 只返回已落盘的 `SessionMeta`。`session.create` 未提供 `workspace` 时读取全局配置中的 `defaultWorkspace`；两者都没有时返回 `session.workspace_required`，路径不存在、不是目录或不可写时返回 `session.invalid_workspace`。`defaultWorkspace` 只来自全局配置；工作区配置 `.pisces/config.json` 需要先确定工作区才能读取，因此不参与默认工作区解析，也不提供该键。默认工作区必须是绝对路径，不自动创建。`provider`/`model` 必须成对提供，或成对省略并取配置中的 `defaultProvider`/`defaultModel`；仍无法解析时返回 `session.model_required`，显式值或默认组合不在 `provider.list` 中返回 `session.invalid_model`。`SessionMeta` 不含活动分支信息；默认活动分支为最新节点所在分支，由于会话记录只追加式写入，最新节点总能在会话记录末尾找到。运行状态不属于会话元数据：`turn.list` 返回当前活跃 turn，会话出现在其中即为热会话，否则为冷会话；`session.read` 返回 `meta`（临时或已落盘）、记录、待装配队列与选择状态，客户端按 `sessionId` 与 `turn.list` 合并，`session.read` 的 `meta` 为 `SessionMeta`。`session.configure` 的 `model`、`provider` 经校验后通过 `SessionRepository.updateMeta` 持久化，临时会话仅更新内存 meta；活跃 turn 使用启动时的模型与供应商快照，下一次 turn 生效。`systemPrompt` 只更新 `source="instruction"` 的队列条目，没有则新增；不写 meta，不修改会话记录。若该会话存在活跃 turn，携带 `systemPrompt` 的 `session.configure` 返回 `turn.active`，不修改队列、meta 或记录；仅携带 `model`/`provider` 的配置仍可更新并随 SessionMeta 在下一次 turn 生效。扩展选择不在该方法中修改。模型能力（如上下文窗口）由 `provider.list` 的 `ModelInfo` 提供，不写入会话元数据。
+`SessionMeta` 是会话元数据，字段见 §6.5。服务层在 `session.create` 创建临时 `SessionMeta`，首次落盘前不写盘，也不出现在 `session.list`；`session.list` 只返回已落盘的 `SessionMeta`。`session.create` 未提供 `workspace` 时读取全局配置中的 `defaultWorkspace`；两者都没有时返回 `session.workspace_required`，路径不存在、不是目录或不可写时返回 `session.invalid_workspace`。`defaultWorkspace` 只来自全局配置；工作区配置 `.pisces/config.json` 需要先确定工作区才能读取，因此不参与默认工作区解析，也不提供该键。默认工作区必须是绝对路径，不自动创建。`provider`/`model` 必须成对提供，或成对省略并取配置中的 `defaultProvider`/`defaultModel`；仍无法解析时返回 `session.model_required`，显式值或默认组合不在 `provider.list` 中返回 `session.invalid_model`。`SessionMeta` 不含活动分支信息；默认活动分支为最新节点所在分支，由于会话记录只追加式写入，最新节点总能在会话记录末尾找到。运行状态不属于会话元数据：`turn.list` 返回当前活跃 turn，会话出现在其中即为热会话，否则为冷会话；`session.read` 返回 `meta`（临时或已落盘）、记录、待装配队列与选择状态，客户端按 `sessionId` 与 `turn.list` 合并，`session.read` 的 `meta` 为 `SessionMeta`。`session.configure` 的 `model`、`provider` 经校验后通过 `SessionRepository.updateMeta` 持久化，临时会话仅更新内存 meta；活跃 turn 使用启动时的模型与供应商，运行期间不允许 `session.configure`。`systemPrompt` 只更新 `source="instruction"` 的队列条目，没有则新增；不写 meta，不修改会话记录。若该会话存在活跃 turn，`session.configure` 返回 `turn.active`，不修改队列、meta 或记录；所有配置修改均须等待 turn 结束。扩展选择不在该方法中修改。模型能力（如上下文窗口）由 `provider.list` 的 `ModelInfo` 提供，不写入会话元数据。
 
 `session.read` 的 `SessionMeta`、`SessionNode` 定义在 §6.5，`QueueEntry` 定义见本节；协议按相同字段序列化。
 
@@ -1220,7 +1220,7 @@ interface ProjectRef {
 | 供应商响应 | `provider.invalid_response`、`provider.refusal` | 转为错误事件，结束当前 step |
 | 工具 | `tool.failed`、`tool.denied` | 以 `isError` 工具结果回填，继续循环 |
 | 会话 | `session.model_required`、`session.invalid_model`、`session.workspace_required`、`session.invalid_workspace` | 拒绝创建；不写临时会话目录 |
-| turn | `turn.active` | 活跃 turn 中修改 `systemPrompt` 时整体拒绝，不部分更新 |
+| turn | `turn.active` | 活跃 turn 中调用 `session.configure` 时整体拒绝，不部分更新 |
 | 存储 | `storage.io`、`storage.corrupt` | 立即失败，不返回部分结果；报告会话 id |
 | 配置 | `config.invalid`、`config.unknown_key` | 拒绝写入并返回校验错误 |
 

@@ -459,7 +459,7 @@ interface SessionReadResult {
 - 无 `nodeId`：`records` 为完整会话树，按追加顺序扁平返回；有 `nodeId`：`records` 为该节点到根的线性分支，按根到该节点排列。
 - `limit` 按序列化字节计，至少返回 1 条；`cursor` 是上一页最后一个节点 id；`nextCursor` 缺省表示结束。
 - `queue`/`selection` 只在首屏返回；后续页为空，避免分页响应超帧。
-- `seq` 是读取时刻的会话事件序号，客户端丢弃小于该值的旧事件。
+- `seq` 是本页读取时刻的会话事件序号。只有首屏 `seq` 用作初始状态水位；后续页不得推进事件去重水位。客户端先缓存订阅事件，取得首屏后按序应用高于首屏水位的事件；后续页仅按节点 id 合并 records，不覆盖首屏或事件更新后的 meta/queue/selection。分页期间新增节点由事件与分页结果按 id 去重。
 - 临时会话没有节点：`records` 为空、`selection` 为空数组；带 `nodeId` 返回 `session.node_not_found`。
 - `session.read` 不改变活动分支，不是 turn 启动；读取在同一会话锁内完成。
 
@@ -476,8 +476,8 @@ interface ConfigureSessionParams {
 
 - `model`/`provider` 必须成对校验；校验通过后通过 `SessionRepository.updateMeta` 写入已落盘会话的 `meta.json`。
 - 临时会话只更新内存 `SessionMeta`；不调用持久化。
-- 活跃 turn 使用启动时的模型与供应商快照；仅携带 `model`/`provider` 的新设置在下一次 turn 生效。
-- 若存在活跃 turn 且请求携带 `systemPrompt`，整个 `session.configure` 返回 `turn.active`，不更新 `model`/`provider`、队列或会话记录；不做部分更新。
+- 活跃 turn 使用启动时的模型与供应商；运行期间不允许 `session.configure`。
+- 若存在活跃 turn，整个 `session.configure` 返回 `turn.active`，不更新 `model`/`provider`、队列或会话记录；不做部分更新。
 - `systemPrompt` 只操作消息队列：
   - 已有 `source="instruction"` 队列条目：更新该条目；
   - 没有：新增一条 `kind=agent`、`role=system`、`source="instruction"` 的队列条目；
@@ -500,7 +500,7 @@ interface SessionSubscribeResult {
 
 - 一个连接可订阅多个会话；每次调用订阅一个会话。
 - 同一连接重复订阅同一会话幂等，只保留一个订阅。
-- 订阅成功后，该连接接收该会话的 `session.updated`、`queue.updated`、`selection.updated` 与 turn 事件。
+- 订阅成功后，该连接接收该会话的 `session.updated`、`queue.updated`、`selection.updated` 与 turn 事件（含 `turn.delta`）。
 - `session.unsubscribe` 只移除当前连接的该会话订阅，重复调用幂等，不发送事件。
 - 连接断开自动清除该连接的全部订阅。
 - 退订或断开连接不中止活跃 turn，不影响其他客户端。
@@ -634,6 +634,16 @@ interface TurnStartedEvent {
   startedAt: string;
 }
 
+interface TurnDeltaEvent {
+  sessionId: SessionId;
+  seq: number;
+  at: string;
+  turnId: TurnId;
+  step: number;
+  kind: "text" | "reasoning";
+  delta: string;
+}
+
 interface TurnStepEvent {
   sessionId: SessionId;
   seq: number;
@@ -677,6 +687,7 @@ interface ClientLaunchedEvent {
 type ProtocolEvent =
   | Event<SessionUpdatedEvent> & { event: "session.updated" }
   | Event<TurnStartedEvent> & { event: "turn.started" }
+  | Event<TurnDeltaEvent> & { event: "turn.delta" }
   | Event<TurnStepEvent> & { event: "turn.step" }
   | Event<TurnEndedEvent> & { event: "turn.ended" }
   | Event<QueueUpdatedEvent> & { event: "queue.updated" }
@@ -686,7 +697,10 @@ type ProtocolEvent =
 
 事件规则：
 
-- 每会话单调 `seq` 在同一会话锁内分配；`session.read` 与所有会话事件携带 `seq`，客户端丢弃小于已应用值的旧载荷。
+- `turn.delta` 在 parser 产生 text/reasoning 增量时发布，step 从 1 开始；每帧仅包含本次新增文本，按解析顺序发送，按事件字节预算拆分且不截断 UTF-8 字符。不发送未解析完成的工具参数。
+- 增量仅供临时展示，不表示已持久化，不重放；客户端按 turnId/step/kind 累积。对应 `session.updated` 的 assistant 节点为最终记录，应替换临时展示，避免重复；失败或取消时仅已成功落盘内容作为最终记录，turn.ended 后清除剩余临时展示。
+
+- 每会话单调 `seq` 在同一会话锁内分配；`session.read` 与所有会话事件携带 `seq`，客户端丢弃小于已应用值的旧事件；分页响应仅首屏建立水位，后续页不提升水位（§3.4.3）。
 - `session.updated` 携带本批追加节点；超过事件字节预算时拆分为多个事件；`meta` 变化时 `nodes` 可为空。
 - `queue.updated` 携带当前完整队列；客户端整体替换本地队列。
 - `selection.updated` 携带已持久化记录的完整名称集合；队列声明 delta 通过 `queue.updated` 传递，客户端自行叠加。
@@ -721,7 +735,7 @@ type ProtocolEvent =
 | 队列 | `queue.too_large` | 队列总量超过 `MAX_QUEUE_BYTES` |
 | turn | `turn.not_found` | 活跃 turn 不存在 |
 | turn | `turn.node_id_forbidden` | 活跃 turn 的 `turn.start` 带 `nodeId` |
-| turn | `turn.active` | 活跃 turn 中修改 `systemPrompt` |
+| turn | `turn.active` | 活跃 turn 中调用 `session.configure` |
 | turn | `turn.empty` | 首次 turn 未产生 agent/system 节点；通过 turn.ended.error 表达 |
 | 上下文 | `context.source_failed` | 上下文来源解析失败 |
 | 上下文 | `context.window_exceeded` | 裁剪后仍超出模型窗口 |
@@ -950,9 +964,9 @@ interface Context {
 13. 计算最终可见消息；若没有任何 agent/system 消息，返回 `turn.empty`，不调用 `Sessions.create`。
 14. 首次持久化使用 `Sessions.create(meta, drafts)`；已有节点时使用 `Sessions.append(sessionId, drafts, parentId=headId)`；`drafts` 为空时跳过 append。
 15. 持久化成功后，从队列移除本次已装配的条目，更新 `selection` 与 `persisted`，`seq++`，发布 `session.updated`/`selection.updated`。
-16. 返回 `LlmRequest`、选择、写入节点、`headId` 与 `first`。
+16. 若本批写入节点非空，将 `headId` 推进为本批最后一个节点的 id；否则保留原端点。返回 `LlmRequest`、选择、写入节点、提交后的 `headId` 与 `first`。
 
-`parentId` 始终为 `headId`；首次创建由 `Sessions.create` 生成根节点。
+追加的 `parentId` 为提交前的 `headId`；首次创建由 `Sessions.create` 生成根节点。
 
 #### 4.2.5 上下文来源与技能
 
@@ -1093,7 +1107,7 @@ interface Tools {
 `invoke` 的步骤：
 
 1. 按 `call.name` 查找已选中的工具；找不到返回 `tool.failed`。
-2. 从注册表取被选中的包装器，按注册顺序应用；包装器自身必须与顺序无关。
+2. 从注册表取被选中的包装器，按完整条目名称（`package#name`）的字典序升序应用；包装器自身必须与顺序无关。
 3. 确认包装后的工具具有 `execute`。
 4. 调用 `execute(call.arguments, context)`。
 5. `ToolDeniedError` 转为 `isError` 的工具结果，`code="tool.denied"`。
@@ -1158,7 +1172,7 @@ idle -> running -> cancelling -> ended
 1. 调用 `Context.assemble`；首次使用 `Sessions.create`，之后使用上次返回的 `headId` 作为 `nodeId`。
 2. 记录本次 `headId`；发布 `session.updated`（首批装配写入的节点）。
 3. 用 `adapter.buildRequest` 构建供应商请求；每个 step 使用独立的流式 parser。
-4. 通过 `execute` 获取流，逐块解析；累计文本、工具调用、usage 与 stop reason；wireName 在落盘前转回 EntryName。
+4. 通过 `execute` 获取流，逐块解析；累计文本、工具调用、usage 与 stop reason，并按 §3.8 发布 `turn.delta`；wireName 在落盘前转回 EntryName。
 5. 若返回包含工具调用：
    - 将 assistant 文本与工具调用写入 `SessionNode`；
    - 按调用顺序/并发限制执行 `Tools.invoke`；
@@ -1179,7 +1193,7 @@ idle -> running -> cancelling -> ended
 #### 4.4.4 持久化与事件
 
 - `Context` 负责装配节点与 compaction 的持久化；`AgentLoopDriver` 负责 assistant 回复、工具结果与 cancel 控制消息的追加。
-- 每批写入使用 `Sessions.append`，父节点为当前 `headId`；失败不继续循环。
+- 每批写入使用 `Sessions.append`，父节点为当前 `headId`；成功后立即将 `headId` 推进到本批末节点，后续 assistant、tool、cancel 批次及下一次 assemble 均使用新端点；失败不继续循环。
 - 写入成功后发布 `session.updated`，只携带本批节点；超过事件字节预算时拆分为多个事件。
 - `turn.step` 在一个 step 完成后发布；`turn.ended` 在 turn 结束后发布；被取消的 step 使用 `stopReason="cancelled"`。
 - 取消时若已有部分回复，先写入部分回复；未发送的草稿不落盘。随后写入 `role=cancel` 控制消息，`at` 为当前最后节点，并清除未装配条目的 `confirmedAt`。
@@ -1303,7 +1317,7 @@ interface SessionRuntime {
 - `session.create`：校验 provider/model、workspace 与 extensions；创建运行时；将 `systemPrompt` 和扩展选择物化为队列条目；返回临时 `SessionMeta`。
 - `session.list`：只查 `SessionStore`；不经过运行时。
 - `session.read`：在会话锁内读取 `meta`、`records`、`queue`、`selection` 与 `seq`；无 `nodeId` 按字节预算分页读全树，有 `nodeId` 读分支；临时会话没有节点。`selection` 由 `Context.selectionFor` 计算，只含已持久化记录；`queue`/`selection` 仅首屏返回。
-- `session.configure`：带 `systemPrompt` 时先检查活跃 turn，存在则返回 `turn.active`，不修改队列/meta；仅 `model`/`provider` 时校验后先写 `SessionStore.updateMeta`，成功后调用 `Context.updateMeta`；`systemPrompt` 只更新或新增 `source="instruction"` 队列条目。
+- `session.configure`：先检查活跃 turn，存在则整体返回 `turn.active`，不修改队列/meta；无活跃 turn 时校验后先写 `SessionStore.updateMeta`，成功后调用 `Context.updateMeta`；`systemPrompt` 只更新或新增 `source="instruction"` 队列条目。
 - `session.subscribe` / `session.unsubscribe`：维护连接的订阅集合；重复订阅幂等；退订不发事件；断开清理。
 - `queue.enqueue` / `edit` / `remove` / `clear`：委托 `Context`；返回队列 id；推送 `queue.updated`。
 - `entries.snapshot`：从 `Extensions` 取得当前清点，从 `Context` 取得已持久化选择与 effective 列表；不合并队列。
@@ -1654,13 +1668,13 @@ interface ClientRegistry {
 1. 清理 `.tmp`、无 `meta.json` 或无 `events.commit` 的孤儿目录。
 2. 扫描 `sessions/*/meta.json`，校验 schema、commit 偏移与节点记录。
 3. 只读取 commit 之前的记录；未提交尾部截断；完整行损坏则报告 `storage.corrupt`。
-4. 从活动分支尾向前跳过控制节点，取最后 assistant 节点；对缺少对应 toolResult 的 toolCall 合成 `synthetic="interrupted"` 的 toolResult（内容为“结果未知，可能已部分生效，请核验”），再追加 `role=cancel` 控制消息（`reason=daemon_restart`，`at=最后节点`），删除标记。
+4. 仅对存在 active-turn 标记的会话恢复：从标记的 `startNodeId` 开始，只扫描偏移不小于标记 `startOffset` 的已提交节点，按提交顺序沿子节点推进到本 turn 已提交端点（同会话仅一个活跃 turn）；没有后续节点时使用起点。临时会话首次落盘后从根沿追加链确定端点。只在该分支查找最后 assistant 节点；对缺少对应 toolResult 的 toolCall 合成 `synthetic="interrupted"` 的 toolResult（内容为“结果未知，可能已部分生效，请核验”），再以该分支端点为父节点追加 `role=cancel` 控制消息（`reason=daemon_restart`，`at=最后节点`），删除标记。
 5. 恢复为冷会话；`turn.list` 为空；客户端重新 `session.read`。
 
 活跃 turn 标记：
 
 - 路径：`<dataDir>/sessions/<sessionId>/active-turn.json`。
-- 内容：`{ turnId, startedAt }`；由 `Gateway` 在 `turn.start` 启动 driver 前写入，正常结束后删除。
+- 内容：`{ turnId, startedAt, startOffset, startNodeId? }`；`startNodeId` 固化本次 turn 实际起点（显式 nodeId 或启动时默认末节点），临时会话省略；`startOffset` 为启动时 events.commit 的字节偏移，临时会话为 0，用于排除起点已有的历史子分支。起点与偏移在同一会话锁内确定，标记原子写入成功后才启动 driver；由 `Gateway` 在 `turn.start` 启动 driver 前写入，正常结束后删除。
 - 标记是服务层运行时状态，不进入 `SessionMeta`、不进入 `events.jsonl`、不参与选择。
 - 临时会话没有标记；首次落盘前崩溃不产生标记。临时会话在首批节点落盘后补写标记。
 - 已落盘会话的 turn 启动前必须写标记；临时会话补写失败时结束 turn，不继续请求。
@@ -1834,6 +1848,7 @@ class PiscesError extends Error {
 - `AgentLoopDriver` 用假 `LLMAdapter`、假 `ExecuteProvider`、假 `Context` 测试 turn/step、取消与 steer。
 - 协议层用内存连接测试分帧、握手、响应/事件交错与错误码。
 - 服务层用临时目录、假 socket 与假 provider 测试 `SessionStore`、`Gateway`、恢复与迁移。
+- 验收覆盖：多 step 的父指针连续性；分页期间队列更新不丢失；活跃 turn configure 整体拒绝；非默认分支在无新增节点时崩溃恢复；增量展示与最终节点替换、失败及取消清理；包装器注册顺序变化不影响按名称应用。
 - 不做真实供应商网络测试；供应商方言由适配器单测覆盖。
 - 测试不依赖具体时钟、随机 id 或执行顺序。
 
