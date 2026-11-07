@@ -1,5 +1,7 @@
 import type { ContentBlock } from "../messages.js";
 import { PiscesError } from "../types.js";
+import { validateContent, validateJson } from "./content.js";
+import { parseDeclaration } from "./declarations.js";
 import type { Context, QueueEntry, QueueEntryId, QueueEntryInput } from "./types.js";
 
 interface QueueDeps {
@@ -17,89 +19,21 @@ function invalidControl(): never {
   throw new PiscesError("queue.invalid_control", "Invalid queue entry");
 }
 
-function validateJson(value: unknown, ancestors = new Set<object>()): void {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return;
-  if (typeof value === "number" && Number.isFinite(value)) return;
-  if (typeof value !== "object" || ancestors.has(value)) invalidControl();
-  const prototype = Object.getPrototypeOf(value);
-  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null)
-    invalidControl();
-  if (Object.getOwnPropertySymbols(value).length) invalidControl();
-  ancestors.add(value);
-  if (Array.isArray(value)) {
-    if (Object.keys(value).length !== value.length) invalidControl();
-    for (let index = 0; index < value.length; index++) {
-      if (!Object.hasOwn(value, index)) invalidControl();
-      validateJson(value[index], ancestors);
-    }
-  } else {
-    for (const item of Object.values(value)) validateJson(item, ancestors);
-  }
-  ancestors.delete(value);
-}
-
-function validateContent(content: ContentBlock[]): void {
-  if (!Array.isArray(content)) invalidControl();
-  for (const block of content) {
-    if (!block || typeof block !== "object") invalidControl();
-    switch (block.type) {
-      case "text":
-      case "reasoning":
-        if (typeof block.text !== "string") invalidControl();
-        break;
-      case "toolCall":
-        if (
-          typeof block.id !== "string" ||
-          block.id.length === 0 ||
-          typeof block.name !== "string" ||
-          block.name.length === 0 ||
-          !("arguments" in block)
-        )
-          invalidControl();
-        break;
-      case "toolResult":
-        if (
-          typeof block.toolCallId !== "string" ||
-          block.toolCallId.length === 0 ||
-          (block.isError !== undefined && typeof block.isError !== "boolean") ||
-          (block.code !== undefined && typeof block.code !== "string") ||
-          (block.synthetic !== undefined && block.synthetic !== "interrupted")
-        )
-          invalidControl();
-        validateContent(block.content);
-        break;
-      default:
-        invalidControl();
-    }
-  }
-}
-
 function validateInput(entry: QueueEntryInput): void {
   if (!entry || typeof entry !== "object") invalidControl();
-  validateJson(entry.content);
-  validateContent(entry.content);
+  try {
+    validateJson(entry.content);
+    validateContent(entry.content);
+  } catch {
+    invalidControl();
+  }
   if (!Array.isArray(entry.content) || typeof entry.source !== "string") invalidControl();
   if (entry.kind === "agent") {
     if (!["system", "user", "assistant", "tool"].includes(entry.role)) invalidControl();
     return;
   }
   if (entry.kind !== "control" || entry.role !== "declaration") invalidControl();
-  const block = entry.content[0];
-  if (entry.content.length !== 1 || block?.type !== "text") invalidControl();
-  let payload: unknown;
-  try {
-    payload = JSON.parse(block.text);
-  } catch {
-    invalidControl();
-  }
-  // Task 3 replaces this basic check with the shared declaration parser.
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) invalidControl();
-  const toggle = (payload as { toggle?: unknown }).toggle;
-  if (
-    !Array.isArray(toggle) ||
-    toggle.some((name) => typeof name !== "string" || !/^[^#\s]+#[^#\s]+$/u.test(name))
-  )
-    invalidControl();
+  parseDeclaration(entry.content, "queue");
 }
 
 function validateSize(entries: QueueEntry[]): void {

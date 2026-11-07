@@ -1,5 +1,6 @@
-import type { NodeId } from "../sessions/types.js";
+import type { NodeId, SessionNodeDraft } from "../sessions/types.js";
 import type { JsonValue } from "../types.js";
+import { replayDeclarations } from "./declarations.js";
 import { createQueue } from "./queue.js";
 import type { Context, ContextDeps, SelectionState } from "./types.js";
 
@@ -22,9 +23,9 @@ export function createContext(deps: ContextDeps): Context {
 
   async function readSelection(nodeId?: NodeId): Promise<SelectionState> {
     if (!state.persisted) return [];
-    // Task 3 replays declarations from this branch.
-    for await (const node of deps.sessions.readBranch(deps.sessionId, nodeId)) void node;
-    return [];
+    const branch: SessionNodeDraft[] = [];
+    for await (const node of deps.sessions.readBranch(deps.sessionId, nodeId)) branch.push(node);
+    return replayDeclarations(branch).selection;
   }
 
   return {

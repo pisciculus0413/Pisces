@@ -4,8 +4,10 @@ import {
   type ContextEvent,
   createContext,
   createSessions,
+  type DeclarationPayload,
   type NodeId,
   type QueueEntryId,
+  type QueueEntryInput,
   type SessionId,
   type SessionMeta,
   type SessionRepository,
@@ -21,6 +23,16 @@ export const META: SessionMeta = {
   createdAt: NOW,
   schemaVersion: 1,
 };
+
+/** Queue-compatible declaration fixture, also accepted by Sessions draft methods. */
+export function declaration(payload: DeclarationPayload): QueueEntryInput {
+  return {
+    kind: "control",
+    role: "declaration",
+    source: "user",
+    content: [{ type: "text", text: JSON.stringify(payload) }],
+  };
+}
 
 export function gate() {
   let release!: () => void;
