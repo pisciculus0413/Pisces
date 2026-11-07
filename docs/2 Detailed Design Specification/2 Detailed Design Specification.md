@@ -824,7 +824,7 @@ interface Sessions {
 
 - `create` 只调用 `SessionRepository.create(meta, nodes)`；不预先写 meta，不写入空会话。
 - `append` 只调用 `SessionRepository.append(sessionId, nodes)`；节点已在内存中完成编号与父指针分配。
-- 写入失败时，`Sessions` 不返回部分节点；由 `SessionRepository` 保证批量原子性。
+- 写入失败时，`Sessions` 不返回部分节点；由 `SessionRepository` 保证批量原子性。提交点前失败时新批不可见；提交点后目录同步失败返回 `storage.io`，整批可能已存在，调用方须重读确认，不能盲目重试。
 - `readBranch` 直接转发 `SessionRepository.readBranch`；省略 `nodeId` 时以记录最后一个节点为分支末端。
 - `readTree` 返回全部节点，按追加顺序。
 - `list` 只返回已落盘会话的 `SessionMeta`。
@@ -1359,7 +1359,7 @@ interface SessionRuntime {
 | `<dataDir>/sessions/<sessionId>/active-turn.json` | 活跃 turn 的恢复标记，不属于会话记录 |
 | `<dataDir>/projects.json` | 模板衍生项目 `ProjectRef[]` |
 
-- `sessionId` 只能使用受控字符集；不得包含路径分隔符、`..` 或绝对路径。
+- `sessionId` 必须匹配 `/^[A-Za-z0-9_-]+$/`；非法 id 在访问路径前拒绝。sessions 根目录、会话目录和已知文件不跟随符号链接；根目录符号链接使初始化整体拒绝，不扫描或清理链接目标。
 - 空会话没有目录、没有 `meta.json`。
 - `active-turn.json` 是运行时恢复标记，不是 `SessionNode`，不参与列表、导出或选择。
 - `meta.json`、`events.jsonl` 与 `active-turn.json` 只由 daemon 维护；用户不手工编辑。
@@ -1367,28 +1367,28 @@ interface SessionRuntime {
 #### 5.4.2 写入
 
 - `create`：
-  1. 确认会话目录不存在；
+  1. 非 recursive mkdir 独占创建会话目录；已有目录拒绝且不清理；
   2. 写 `events.jsonl.tmp`、`events.commit.tmp` 与 `meta.json.tmp`；
   3. fsync 三个临时文件；
-  4. rename events → commit → meta（meta 最后）；
-  5. fsync 目录（POSIX；Windows 使用可用语义）。
+  4. rename events → commit → meta，meta rename 为可见提交点；
+  5. fsync 会话目录与 sessions 父目录（POSIX；Windows 对已知不支持的目录同步错误使用可用语义，一般 I/O 错误仍上抛）。
 - `append`：
   1. 取该会话写锁；
   2. 读取 commit 偏移 C，校验 `0 ≤ C ≤ 文件长度` 且 C 在换行边界；否则 `storage.corrupt`；
   3. 将物理文件截断到 C，丢弃未提交尾部；
   4. 将本批节点写成完整 JSONL 行并 fsync；
-  5. 原子更新 `events.commit` 为新偏移（tmp + rename）。
+  5. 写并 fsync commit.tmp，再 rename 为 `events.commit`（提交点），随后 fsync 会话目录。
 - `updateMeta`：
   1. 读取当前 meta；
   2. 只替换 `model`、`provider`；
-  3. 写临时 meta，fsync 后 atomic rename。
-- `create`/`append`/`updateMeta` 失败时不留下半批节点；临时文件在启动时清理。
-- 读取只看 commit 偏移之前的内容；commit 缺失或非法视为孤儿。
+  3. 写临时 meta，fsync 后 atomic rename（提交点），随后 fsync 会话目录。
+- `create`/`append`/`updateMeta` 不留下半批节点；提交点前失败保留旧值，create 仅清理本次独占创建的未提交目录。提交点后目录同步失败返回 `storage.io`，整批可能已提交；失效缓存并重读，不删除目录或回滚已提交数据。
+- 读取只看 commit 偏移之前的内容；有 meta 但 commit 缺失或非法属于 `storage.corrupt`，保留原始数据并报告，不作为孤儿删除。
 - 写入不修改已有节点，不修改 `meta.json` 的不可变字段。
 
 #### 5.4.3 读取
 
-- `SessionStore` 为每个已加载会话维护 `id -> (parentId, offset)` 的内存索引；首次加载扫描文件建立索引，`append` 成功后更新索引。
+- `SessionStore` 为每个已加载会话维护 `id -> (parentId, offset, length)` 的内存索引，偏移/长度均为 UTF-8 字节数；首次加载完整校验已提交前缀后才返回节点，提交后更新索引。单次迭代使用稳定快照。
 - `readTree` 只读取 commit 偏移之前的完整行；完整行 JSON 损坏返回 `storage.corrupt`。
 - `readBranch` 使用索引从 `nodeId` 沿父指针上溯，再按 offset 读取对应行；省略 `nodeId` 时以最后一个已提交行为分支末端。
 - 索引不持久化；daemon 重启后首次读取重建。
@@ -1398,17 +1398,18 @@ interface SessionRuntime {
 
 #### 5.4.4 列表与项目
 
-- `list` 扫描 `sessions/*/meta.json` 且存在 `events.commit`，只返回已落盘会话；忽略临时文件、无 meta 或无 commit 的孤儿目录。
+- `list` 只返回已落盘的有效会话 meta；忽略临时文件和无 meta 的未提交目录。遇有 meta 但 commit 缺失或其他损坏时整体拒绝，不返回部分列表；健康会话仍可直接读取。
 - 返回顺序不构成契约。
 - `projects.json` 由 `TemplateStore` 维护，记录 `ProjectRef`。
 - 配置、凭据、扩展目录不进入会话记录。
 
 #### 5.4.5 并发与恢复
 
-- 同一会话的 `create`/`append`/`updateMeta` 由 `Concurrency` 串行化。
+- `SessionStore` 用每会话 promise 队列串行化 `create`/`append`/`updateMeta`，失败不阻塞后续写；`Concurrency` 仍须覆盖 `Sessions.append` 从读父节点到提交的整个操作。不支持多进程/多实例同时写同一目录。
 - 不同会话可并行写。
-- daemon 重启时清理 `.tmp` 文件、无 meta 或无 commit 的孤儿目录；`active-turn.json` 由 `Gateway` 按 §6.5 恢复或删除。
-- 恢复在开始监听前完成；未提交尾部按 commit 截断。
+- 工厂显式接收 `dataDir` 且不访问磁盘；仓库方法须等待 `initialize(): Promise<RecoveryIssue[]>`，其中 `RecoveryIssue` 为 `{ sessionId, error: PiscesError }`。并发初始化共享一次 promise，成功后的重复调用返回原报告。根目录 I/O 故障拒绝初始化并返回 `storage.io`；逐会话故障收集到报告，其余会话仍可用。
+- 初始化只删除无 meta 的普通会话孤儿目录；有 meta 时先验证 meta、commit 和已提交记录，再截断未提交尾部并同步，最后清理健康会话的三个受控 `.tmp` 文件；损坏会话保留证据，后续读写返回报告中的错误。
+- 文件恢复在开始监听前完成；`SessionStore` 不处理 `active-turn.json`、`projects.json` 或其他无关文件。活跃 turn 仍由 `Gateway` 按 §6.5 恢复或删除，初始化报告不代表 turn 恢复完成。
 - 已落盘会话恢复为冷会话；未完成 turn 由 driver 标记中断。
 - `meta.json` 不可读或 schema 不支持时报告 `storage.corrupt`，不返回部分结果。
 
@@ -1665,9 +1666,9 @@ interface ClientRegistry {
 
 启动恢复顺序：
 
-1. 清理 `.tmp`、无 `meta.json` 或无 `events.commit` 的孤儿目录。
-2. 扫描 `sessions/*/meta.json`，校验 schema、commit 偏移与节点记录。
-3. 只读取 commit 之前的记录；未提交尾部截断；完整行损坏则报告 `storage.corrupt`。
+1. `SessionStore.initialize` 只清理无 `meta.json` 的普通会话孤儿目录；有 meta 但 commit 缺失或非法须保留并报告 `storage.corrupt`。
+2. 逐会话校验 meta、schema、commit 偏移与已提交节点记录，故障收集为初始化报告，隔离损坏会话。
+3. 对健康会话截断 commit 后的未提交尾部并同步，清理三个受控 `.tmp`；损坏会话不截尾、不清理，不返回部分记录。
 4. 仅对存在 active-turn 标记的会话恢复：从标记的 `startNodeId` 开始，只扫描偏移不小于标记 `startOffset` 的已提交节点，按提交顺序沿子节点推进到本 turn 已提交端点（同会话仅一个活跃 turn）；没有后续节点时使用起点。临时会话首次落盘后从根沿追加链确定端点。只在该分支查找最后 assistant 节点；对缺少对应 toolResult 的 toolCall 合成 `synthetic="interrupted"` 的 toolResult（内容为“结果未知，可能已部分生效，请核验”），再以该分支端点为父节点追加 `role=cancel` 控制消息（`reason=daemon_restart`，`at=最后节点`），删除标记。
 5. 恢复为冷会话；`turn.list` 为空；客户端重新 `session.read`。
 
@@ -1766,11 +1767,11 @@ interface ClientRegistry {
 
 ### 7.5 失败与恢复约定
 
-- 首次落盘失败：队列保留，无 meta/nodes；客户端可重试。
+- 首次落盘在提交点前失败：队列保留，无 meta/nodes；客户端可重试。提交点后 I/O 失败可能已整批落盘，须重读确认；不能仅凭 `storage.io` 盲目重试。
 - 上下文装配追加失败：队列保留，选择缓存不更新；不继续请求。
 - assistant/tool/cancel 追加失败：不继续请求；已写节点保留；队列已出队，不自动恢复。
 - 取消写入失败：turn 仍结束，但标记未落盘；重启时无法恢复该标记，用户可继续。
-- 恢复时 `meta.json` 损坏：会话不可加载，报告 `storage.corrupt`，不影响其他会话。
+- 恢复时 `meta.json` 损坏或有 meta 但 commit 缺失/非法：保留会话原始文件，收集 `RecoveryIssue`；该会话不可加载，不影响直接读取其他健康会话，`list` 整体拒绝。
 - 恢复时节点损坏：不加载该会话，不返回部分记录。
 - 临时会话、队列、活跃 turn 标记在 daemon 退出时按各自规则清理或保留。
 

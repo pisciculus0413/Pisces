@@ -181,7 +181,11 @@ importers:
 
   packages/core: {}
 
-  packages/daemon: {}
+  packages/daemon:
+    dependencies:
+      '@pisces/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/protocol: {}
 

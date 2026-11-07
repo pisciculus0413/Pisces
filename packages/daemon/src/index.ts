@@ -3,4 +3,9 @@
  *
  * 见 docs/0-module.md。
  */
-export {};
+export {
+  createSessionStore,
+  type RecoveryIssue,
+  type SessionStore,
+  type SessionStoreOptions,
+} from "./session-store/session-store.js";

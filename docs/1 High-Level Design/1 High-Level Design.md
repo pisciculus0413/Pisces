@@ -624,7 +624,7 @@ Client --> User : 展示
 
 `execute` 由服务层实现并注入，见 §6.2。
 
-首次 turn 由 `SessionRepository.create` 原子写入 `SessionMeta` 与初始节点；后续 turn 使用批量 `append`。全部成功后才出队；失败时队列保留、不产生节点。
+首次 turn 由 `SessionRepository.create` 原子写入 `SessionMeta` 与初始节点；后续 turn 使用批量 `append`。全部成功后才出队；提交点前失败时队列保留、不产生节点；提交点后 I/O 失败可能已整批落盘，须重读确认，不能盲目重试。
 
 ### 5.3 会话持久化与读取
 
@@ -1016,7 +1016,7 @@ interface Exec {
 - `Sessions` 定义 `SessionNode` 形态与分支语义，存储经 `SessionRepository` 接口访问；具体后端由服务层 `SessionStore` 实现。
 - `SessionNode` 的 `parentId` 表达树结构，根节点指向自身；`readBranch` 从 `nodeId` 沿父指针上溯到根，按根到该节点的顺序返回；省略 `nodeId` 时以节点记录最后一个节点为分支末端；`readTree` 返回全部节点，按追加顺序返回。
 - 服务层在 `session.create` 创建临时 `SessionMeta`；`SessionRepository.create(meta, nodes)` 原子写入 meta 与 nodes，`append(sessionId, nodes)` 批量原子追加；两者都不改写 meta。`updateMeta(sessionId, meta)` 仅用于已落盘会话，原子替换 meta，只允许 `model`、`provider` 变化，`id`、`workspace`、`createdAt`、`schemaVersion` 不变；临时会话只改内存 meta。`nodes` 由 `Sessions` 分配 id/parentId；`create`/`append` 要求 `nodes` 非空。
-- `Sessions` 对所有节点统一分配 `SessionNode.id` 与 `parentId`；队列条目的临时 `id` 不写入节点，出队后作废。`SessionRepository` 只写入已确定 `id`/`parentId` 的节点；`create`/`append` 批量原子，失败不留下部分节点。
+- `Sessions` 对所有节点统一分配 `SessionNode.id` 与 `parentId`；队列条目的临时 `id` 不写入节点，出队后作废。`SessionRepository` 只写入已确定 `id`/`parentId` 的节点；`create`/`append` 批量原子，不留下部分节点；提交点前失败时新批不可见，提交点后目录同步失败可能返回存储错误且整批已存在，调用方须重读确认。
 - `SessionRepository` 只承载持久记录与元数据；活跃 turn、锁与中止信号由服务层 `Concurrency` 维护，不进入该接口。
 - `Credentials` 与 `Exec` 同理：接口在核心层，实现在服务层。
 
