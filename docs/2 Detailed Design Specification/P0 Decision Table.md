@@ -44,7 +44,7 @@
 | P0-11 | 确认状态与队列编辑/清空 | `QueueEntry.confirmedAt` 由 turn.start 服务端写入；装配只消费已确认前缀；未确认可 edit/remove，已确认可 remove/clear 但不可 edit；turn.cancel 清除未装配确认；结束条件为“无可装配已确认条目” | 实现“确认后才发送”；避免 steer 绕过 |
 | P0-12 | 工具身份三层 | `EntryName=package#name` 用于选择/记录；`wireName` 由 adapter 确定性编码，仅 WireRequest/parseChunk；记录中 `ToolCall.name` 始终 EntryName；编码碰撞拒绝 | 解决 provider 函数名字符集限制，且保持记录稳定 |
 | P0-13 | compaction 与 cancel 的写入者 | compaction 仅 Context 自动生成，cancel 仅 driver 写入；queue.enqueue 拒绝二者；压缩范围只引用已持久化节点 | 防止客户端伪造摘要/中止标记 |
-| P0-14 | 来源/技能节点身份 | `SessionNode.entry` 标识来源/技能；`source` 仅描述；过滤/去重按 entry；零片段来源每 step 重试 | 解决 source 多义与过滤失配 |
+| P0-14 | 来源/技能节点身份 | `SessionNode.source` 取条目名（`package#name`）；过滤/去重按 `source`；`SessionNode` 不携带 `entry`；零片段来源每 step 重试 | 解决 source 多义与过滤失配 |
 
 以上决策中，P0-04、P0-05 只确定“队列条目的具体形态”，不改变 HLD 的“先入队”原则；P0-02、P0-06、P0-10 对应的 HLD 改动已写入第 4 节。
 

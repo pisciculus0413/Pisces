@@ -169,7 +169,7 @@ type ControlPayload = DeclarationPayload | CompactionPayload | CancelPayload;
 约束：
 
 - `declaration.toggle` 中名称不得重复；每个名称出现一次表示状态翻转一次，选择按异或计算。
-- 任何把条目从关闭变为启用的 declaration 必须携带该条目的 definition；缺失按 `storage.corrupt` 处理。
+- 任何把 tool/wrapper 条目从关闭变为启用的 declaration 必须携带该条目的 definition；缺失按 `storage.corrupt` 处理。
 - definition 由 daemon 从当前清点附加；客户端只提交 `toggle` 名称，内联 definition 被拒绝。
 - `declaration` 只表达选择状态与定义快照，不表达包装器或条目的执行顺序。
 - `compaction.from`、`compaction.to` 是同一活动分支中的节点 id，范围包含两端；`summary` 是确定性摘要，不通过额外模型调用生成。
@@ -195,8 +195,7 @@ interface SessionNode {
   kind: "agent" | "control";
   role: "system" | "user" | "assistant" | "tool" | "declaration" | "compaction" | "cancel";
   content: ContentBlock[];
-  source: string;          // 来源描述，不用于选择过滤
-  entry?: EntryName;       // 来源/技能内容节点使用
+  source: string;          // 来源标识：条目名、instruction、create 等
   synthetic?: "interrupted";
   createdAt: string;
   schemaVersion: number;
@@ -212,7 +211,7 @@ interface QueueEntry {
   createdAt: string;
 }
 
-type QueueEntryInput = Omit<QueueEntry, "id" | "createdAt" | "confirmedAt" | "entry">;
+type QueueEntryInput = Omit<QueueEntry, "id" | "createdAt" | "confirmedAt">;
 type SelectionState = EntryName[];
 ```
 
@@ -221,7 +220,7 @@ type SelectionState = EntryName[];
 - `kind` 与 `role` 必须匹配：
   - `agent`：`system`、`user`、`assistant`、`tool`；
   - `control`：`declaration`、`compaction`、`cancel`。
-- `SessionNode.entry` 只用于来源/技能内容节点；`instruction` 是 `source` 的取值，用于用户创建的 `role=system` 消息。
+- `instruction` 是 `source` 的取值，用于用户创建的 `role=system` 消息。
 - `QueueEntry.id` 由 `Context` 在入队时分配，出队后作废；不写入 `SessionNode`。
 - `QueueEntry.confirmedAt` 由服务端 `turn.start` 写入，客户端不能提交。
 - `QueueEntry` 不包含 `parentId`、`schemaVersion`；入队时不能由客户端指定 `id`、`createdAt`、`confirmedAt`。
@@ -414,13 +413,13 @@ interface CreateSessionParams {
   templateId?: string;
   model?: string;
   provider?: string;
-  systemPrompt?: string;
+  systemPrompt?: string[];
   extensions?: EntryName[];
 }
 ```
 
 - 服务层创建临时 `SessionMeta`、`Context` 与空消息队列；不写盘，不进入 `session.list`。
-- `systemPrompt` 生成一条 `kind=agent`、`role=system`、`source="create"` 的队列条目；不写入 `SessionMeta`。
+- `systemPrompt` 的每个元素生成一条 `kind=agent`、`role=system`、`source="create"` 的队列条目；不写入 `SessionMeta`。
 - `extensions` 是显式启用条目 `package#name` 列表：
   - 省略：使用配置中的默认选择；
   - 空数组：不启用任何条目；
@@ -840,6 +839,7 @@ interface ContextDeps {
   skills: Skills;
   sources: ContextSourceRegistry;
   events: EventBus;
+  runExclusive<T>(task: () => Promise<T>): Promise<T>;
   newId: () => QueueEntryId;
   now: () => string;
 }
@@ -922,7 +922,7 @@ interface Context {
 
 #### 4.2.4 装配流程
 
-`assemble` 分为三段，锁的边界由 Gateway/Driver 的 `Concurrency.runExclusive` 提供；`Context` 自身不再嵌套加锁。
+`assemble` 分为三段：A、C 两段由 `Context` 通过注入的 `runExclusive` 获取会话锁，B 段释放；调用方不得在调用 `assemble` 时持锁。
 
 **A. 锁内快照**
 
@@ -933,14 +933,14 @@ interface Context {
 
 **B. 锁外构造**
 
-5. 对选择中尚未出现在分支里的上下文来源，按名称升序调用 `resolve`；每个 `ContextFragment` 追加为 `kind=agent`、`role=system`、`entry=当前条目名` 的节点；`source` 仅保存来源描述。已存在该 `entry` 节点的来源复用；未选中的不解析。零片段来源不落节点，后续 step 重试。
-6. 对选择中尚未出现在分支里的技能，按名称升序追加为 `kind=agent`、`role=system`、`entry=技能名` 的节点；已存在复用。
+5. 对选择中尚未出现在分支里的上下文来源，按名称升序调用 `resolve`；每个 `ContextFragment` 追加为 `kind=agent`、`role=system`、`source=当前条目名` 的节点。已存在该 `source` 节点的来源复用；未选中的不解析。零片段来源不落节点，后续 step 重试。
+6. 对选择中尚未出现在分支里的技能，按名称升序追加为 `kind=agent`、`role=system`、`source=技能名` 的节点；已存在复用。
 7. 将队列条目按顺序转成 `SessionNodeDraft`；控制消息的内容保持为单个 `text` 块 JSON。
 8. 组装可见序列：
    - 筛选出 `source="instruction"` 的节点，仅分支内最新的 instruction 参与装配；
-   - 来源/技能节点只在其 `entry` 位于当前选择集时进入；
+   - 来源/技能节点只在其 `source` 位于当前选择集时进入；
    - `declaration` 不进入消息；`compaction` 按范围跳过并插入 summary；`cancel` 不进入消息。
-9. 选择中的工具/包装器必须能从最新 declaration 的 `definitions` 找到定义；缺失按 `storage.corrupt` 处理。`LlmRequest.tools` 从这些定义构造，不读实时注册表。
+9. 选择中的工具/包装器必须能从该名称最近一次携带 `definitions` 的 declaration 找到定义；缺失按 `storage.corrupt` 处理。`LlmRequest.tools` 从这些定义构造，不读实时注册表。
 10. 构造消息序列并执行压缩/裁剪（§4.2.6）。
 
 **C. 锁内提交**
@@ -988,8 +988,8 @@ interface Skills {
 }
 ```
 
-- 过滤与去重只看 `SessionNode.entry`，不看 `source`；`source` 只用于展示。
-- 来源/技能节点是内容，不是选择状态；每个 `entry` 在分支中最多追加一次。
+- 过滤与去重只看 `SessionNode.source`。
+- 来源/技能节点是内容，不是选择状态；每个 `source` 在分支中最多追加一次。
 - 取消选择不删除已有节点，只从本次消息序列排除；再次选择复用已有节点。
 - 零片段来源不落节点，每 step 重新 resolve；这是允许的代价。
 - 上下文来源和技能内容都进入 `role=system` 消息；`instruction` 节点由最新一条生效。
@@ -1252,7 +1252,7 @@ interface Concurrency {
 ```
 
 - 每个会话一把非重入逻辑锁；会话内队列写、配置、turn 启动、装配提交、持久化与 `seq` 自增按锁串行化。
-- `Context`/`Sessions` 自身不加锁；调用方在每个临界区只 acquire 一次，锁外执行 resolve/loader/provider/tool。
+- `Context.assemble` 自持会话锁；队列读写方法由调用方在锁内调用；锁外执行 resolve/loader/provider/tool。
 - 不同会话可并行；事件发送与请求处理不共享全局锁。
 - `activeTurn` 只记录正在运行的 turn；`turn.list` 从该集合生成快照，允许无锁快照偏差。
 - `runExclusive` 不跨会话持有锁；回调内不得 acquire 同一会话锁。
@@ -1583,7 +1583,7 @@ interface ClientRegistry {
 
 1. 客户端发送 `session.create`，可带 `workspace`、`templateId`、`model`、`provider`、`systemPrompt`、`extensions`。
 2. `Gateway` 校验 provider/model 与扩展名称；`workspace` 省略时读取全局 `defaultWorkspace`，校验路径为绝对、存在且可写；失败则不创建临时会话。通过后创建临时 `SessionMeta`、`Context`（`persisted=false`）与空队列。
-3. `systemPrompt` 转成一条 `kind=agent`、`role=system` 的队列条目；`extensions` 与默认选择转成一条 `role=declaration` 的队列条目，`toggle` 为 `package#name`。
+3. `systemPrompt` 的每个元素转成一条 `kind=agent`、`role=system`、`source="create"` 的队列条目；`extensions` 与默认选择转成一条 `role=declaration` 的队列条目，`toggle` 为 `package#name`。
 4. 返回临时 `SessionMeta`；不写盘，不进入 `session.list`。
 5. 客户端直接用临时 `SessionMeta` 显示空会话；打开条目面板时调用 `entries.snapshot`，临时会话的 `selection` 为空，客户端按队列中的声明 delta 计算显示状态。
 6. 用户入队首条消息并发送 `turn.start`；`Gateway` 生成 `turnId`，注册活跃 turn，调用 `AgentLoopDriver.run`。
