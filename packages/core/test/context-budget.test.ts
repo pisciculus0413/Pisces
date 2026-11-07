@@ -454,13 +454,16 @@ test("protects a visible call whose result was removed by source selection", () 
   );
 });
 
-test("validates projected pairing after a valid whole-group compaction has been applied", () => {
+test("validates projected pairing after a selected whole-group compaction has been applied", () => {
   const nodes = history([
     { ...call("a"), source: "missing#old" },
     result("a"),
     compact("n0", "n1"),
   ]);
-  expect(run(nodes).messages).toEqual([{ role: "system", content: text("stored") }]);
+  expect(run(nodes, [], { selection: ["missing#old" as EntryName] }).messages).toEqual([
+    { role: "system", content: text("stored") },
+  ]);
+  expect(() => run(nodes)).toThrowError(expect.objectContaining({ code: "storage.corrupt" }));
 });
 
 test("retains a generated summary when it fits and replays it byte for byte", () => {
@@ -518,4 +521,42 @@ test("counts reasoning and tool arguments in actual budget decisions", () => {
   expect(() => run([], [largeCall])).toThrowError(
     expect.objectContaining({ code: "context.window_exceeded" }),
   );
+});
+
+test("replayed generated source summaries disappear on deselection and return on reselection", () => {
+  const source = "pkg#skill" as EntryName;
+  const branch = history([draft(`CANCELLED_SKILL_SECRET${"x".repeat(1200)}`, "system", source)]);
+  const pending = draft("y".repeat(2400));
+  const first = run(branch, [pending], { selection: [source] });
+  expect(first.compactions).toHaveLength(1);
+  const summary = `[compaction]\nsystem: CANCELLED_SKILL_SECRET${"x".repeat(178)}`;
+  expect(first.messages).toEqual([{ role: "system", content: text(summary) }, message(pending)]);
+  // Replay the persisted original nodes and generated control records with their real IDs.
+  const persisted = history([...branch, ...first.compactions]);
+  expect(run(persisted, [pending], { selection: [source] }).messages).toEqual(first.messages);
+  const deselected = run(persisted, [pending]);
+  expect(deselected).toEqual({ messages: [message(pending)], compactions: [] });
+  expect(run(persisted, [pending], { selection: [source] }).messages).toEqual(first.messages);
+});
+
+test("ignores mixed source and ordinary summaries when any source in the range is deselected", () => {
+  const selected = "pkg#selected" as EntryName;
+  const deselected = "missing#old" as EntryName;
+  const nodes = [
+    draft("ordinary"),
+    draft("keep", "system", selected),
+    draft("CANCELLED_SKILL_SECRET", "system", deselected),
+  ];
+  const branch = history([...nodes, compact("n0", "n2", "SUMMARY_WITH_CANCELLED_SKILL_SECRET")]);
+  expect(run(branch, [], { selection: [selected] })).toEqual({
+    messages: nodes.slice(0, 2).map(message),
+    compactions: [],
+  });
+  expect(run(branch)).toEqual({
+    messages: [message(nodes[0] as SessionNodeDraft)],
+    compactions: [],
+  });
+  expect(run(branch, [], { selection: [selected, deselected] }).messages).toEqual([
+    { role: "system", content: text("SUMMARY_WITH_CANCELLED_SKILL_SECRET") },
+  ]);
 });

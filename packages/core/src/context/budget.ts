@@ -117,6 +117,7 @@ function coversToolGroups(range: Range, groups: readonly ToolGroup[]): boolean {
 function existingSummaries(
   branch: readonly SessionNode[],
   groups: readonly ToolGroup[],
+  sourceVisible: (node: SessionNodeDraft) => boolean,
 ): Summary[] {
   const indices = new Map(branch.map((node, index) => [node.id, index]));
   const accepted: Summary[] = [];
@@ -138,7 +139,9 @@ function existingSummaries(
     const range = { start, end };
     if (
       accepted.some((other) => intersects(range, other)) ||
-      branch.slice(start, end + 1).some(instruction) ||
+      branch
+        .slice(start, end + 1)
+        .some((node) => instruction(node) || (node.kind === "agent" && !sourceVisible(node))) ||
       !coversToolGroups(range, groups)
     )
       continue;
@@ -265,11 +268,12 @@ export function budgetContext({
   const budget = Math.max(1024, contextWindow - maxOutput - reserve);
   const nodes = [...branch, ...drafts];
   const groups = toolGroups(nodes);
-  const summaries = existingSummaries(branch, groups);
   const selected = new Set(selection);
+  const sourceVisible = (node: SessionNodeDraft): boolean =>
+    !isEntryName(node.source) || selected.has(node.source);
+  const summaries = existingSummaries(branch, groups, sourceVisible);
   const visible = (node: SessionNodeDraft, index: number): boolean =>
-    !summaries.some((summary) => contains(summary, index)) &&
-    (!isEntryName(node.source) || selected.has(node.source));
+    !summaries.some((summary) => contains(summary, index)) && sourceVisible(node);
   const projectedGroups = toolGroups(nodes, visible);
   const units = projectUnits(nodes, projectedGroups, summaries, visible);
   const removed = new Set<number>();
