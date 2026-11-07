@@ -221,7 +221,7 @@ type SelectionState = EntryName[];
   - `agent`：`system`、`user`、`assistant`、`tool`；
   - `control`：`declaration`、`compaction`、`cancel`。
 - `instruction` 是 `source` 的取值，用于用户创建的 `role=system` 消息。
-- `QueueEntry.id` 由 `Context` 在入队时分配，出队后作废；不写入 `SessionNode`。
+- `QueueEntry.id` 由 `Context` 在入队时分配，出队后作废；不写入 `SessionNode`，不保存已装配 id 墓碑。所有不在当前队列中的 id（含已出队、已删除）统一返回 `queue.entry_not_found`。
 - `QueueEntry.confirmedAt` 由服务端 `turn.start` 写入，客户端不能提交。
 - `QueueEntry` 不包含 `parentId`、`schemaVersion`；入队时不能由客户端指定 `id`、`createdAt`、`confirmedAt`。
 - `SelectionState` 是已启用条目名称的集合表示，去重后按字典序排列；名称为 `package#name`，不使用动态 id。
@@ -349,9 +349,9 @@ interface Event<E = JsonValue> {
   - `MAX_FRAME_BYTES = 8 MiB`
 - 关系为 `MAX_ENTRY_BYTES ≤ MAX_NODE_CONTENT_BYTES < MAX_QUEUE_BYTES < MAX_RESPONSE_BYTES = MAX_EVENT_BYTES < MAX_FRAME_BYTES`。
 - 请求帧、响应帧、事件帧分别受 `MAX_FRAME_BYTES` 限制；发送侧保证响应不超过 `MAX_RESPONSE_BYTES`、事件不超过 `MAX_EVENT_BYTES`。
-- 单条入队条目的序列化大小超过 `MAX_ENTRY_BYTES` 返回 `queue.entry_too_large`；队列总量超过 `MAX_QUEUE_BYTES` 返回 `queue.too_large`，从而保证 `queue.updated` 可整帧发送。
-- `session.updated` 若超过 `MAX_EVENT_BYTES`，按批内序列化字节预算拆为多个事件；客户端按 `id`/`parentId` 合并。
-- 单节点内容超过 `MAX_NODE_CONTENT_BYTES` 时，只截断 `text`/`reasoning`/`toolResult` 的文本内容，并追加可见的截断标记；`toolCall.arguments` 永不截断。若单节点仍超过 `MAX_EVENT_BYTES`，该 step 以 `provider.invalid_response` 失败，不写入半截节点。
+- 队列大小按完整 `QueueEntry` JSON 的 UTF-8 字节计：单条上限 262144，完整队列数组（含数组标点）上限 1048576；分别返回 `queue.entry_too_large`、`queue.too_large`。入队、编辑及确认均先计算完整候选队列，再原子替换；队列和声明不静默截断。
+- `Context` 的 `session.updated` 按完整 `EngineEvent` JSON 的 UTF-8 字节预算 4194304 拆为多个事件，每帧独立分配 `seq`；客户端按 `id`/`parentId` 合并。队列与选择通知各按最终状态发布一次。
+- 来源/技能单节点内容以 262144 字节为裁剪目标：仅截断 `text`/`reasoning`（包括 `toolResult` 内文本），保留 Unicode code point 边界，末尾追加可见标记 `\n[truncated]`；`toolCall.arguments` 永不截断。不可裁字段使节点内容仍处于 256 KiB 至 4 MiB 时允许原样保留；仍超过 4194304 字节以 `context.source_failed` 失败。供应商产生的超大不可截断节点以 `provider.invalid_response` 失败，均不写入半截节点。
 - 不支持在 JSON 对象内嵌裸换行；字符串内的换行必须转义。
 - 客户端可以在同一连接上并发发送多个请求；响应通过 `id` 关联。
 - 事件可以与响应交错；客户端不得依赖事件与某个响应的固定先后顺序。
@@ -523,14 +523,14 @@ interface QueueEditParams {
 
 - `queue.enqueue` 只入队，不确认，不写会话记录；条目超过 `MAX_ENTRY_BYTES` 返回 `queue.entry_too_large`，队列超过 `MAX_QUEUE_BYTES` 返回 `queue.too_large`。
 - `queue.enqueue` 只接受 agent/system/user/assistant/tool 与 `role=declaration`；`compaction`、`cancel` 由运行框架写入，客户端提交返回 `queue.invalid_control`。
-- `declaration` 必须由 daemon 附加 definition；客户端内联 definition 被拒绝。
+- `declaration` 必须由 daemon 附加 definition；客户端内联 definition 被拒绝。`Context.enqueue` 是内部可信边界，接受已附完整 definitions 并校验结构，不从实时 Tools 重新获取定义。
 - 队列按入队顺序排列；不提供重排方法。
 - `queue.edit` 只允许未确认的 `kind=agent` 条目；已确认条目返回 `queue.entry_locked`，`data.reason=confirmed`。
 - `queue.remove` 可删除任意尚未装配的条目，包括已确认未装配条目。
 - `queue.clear` 清除全部尚未装配条目并返回完整 ids；有活跃 turn 时整个请求返回 `queue.entry_locked`，不部分清除。
-- 已被装配取走的条目不再接受 `edit`/`remove`，返回 `queue.entry_locked`，`data.reason=assembled`。
+- 所有不在当前队列中的 id（包括已装配、已删除）在 `edit`/`remove` 时返回 `queue.entry_not_found`；不保留已装配 id 墓碑。
 - 控制消息入队时校验 `role` 与载荷：
-  - `declaration`：`toggle` 为名称数组，名称去重；definition 完整；
+  - `declaration`：`toggle` 为名称数组，名称重复以 `queue.duplicate_name` 拒绝；definition 完整；
   - `compaction`、`cancel` 不由客户端入队。
 - 每次队列变化后推送 `queue.updated`，载荷为当前完整 `QueueEntry[]`，包含 `confirmedAt`；队列总量受 `MAX_QUEUE_BYTES` 限制，保证整帧发送。
 - 多客户端并发写由服务层按会话串行化，最后写入者获胜。
@@ -566,7 +566,7 @@ interface TurnStartResult {
   - `nodeId` 仅对已落盘会话有效，用于选择新 turn 的分支起点；
   - 省略 `nodeId` 时从默认分支继续；
   - 临时会话带 `nodeId` 返回 `session.node_not_found`；
-  - 首次 turn 必须产生至少一个 agent/system 节点，否则以 `turn.ended.error` 返回 `turn.empty`，不落盘。
+  - 首次 turn 必须产生至少一个最终可见的 `kind=agent` 消息（仅 user 也有效，无需 system），否则以 `turn.ended.error` 返回 `turn.empty`，不落盘。
 - 已有活跃 turn：
   - `turn.start` 只确认当前未确认条目，作为 steer 在下一个 step 边界装配；
   - 不启动第二个 turn，`mode` 为 `steer`；
@@ -727,8 +727,8 @@ type ProtocolEvent =
 | 会话 | `session.workspace_required` | 未提供且未配置默认工作区 |
 | 会话 | `session.invalid_workspace` | 工作区不存在、不是目录或不可写 |
 | 会话 | `session.node_not_found` | `nodeId` 不属于该会话 |
-| 队列 | `queue.entry_not_found` | 队列条目不存在 |
-| 队列 | `queue.entry_locked` | 已确认或已装配，不能再编辑；`data.reason` 为 confirmed/assembled |
+| 队列 | `queue.entry_not_found` | id 不在当前队列中，包括已出队或已删除 |
+| 队列 | `queue.entry_locked` | 已确认条目不能编辑（`data.reason=confirmed`）；活跃 turn 时不能 clear |
 | 队列 | `queue.invalid_control` | 控制消息载荷不合法或客户端提交 compaction/cancel |
 | 队列 | `queue.duplicate_name` | `toggle` 中名称重复 |
 | 队列 | `queue.entry_too_large` | 单条队列入队内容超过 `MAX_ENTRY_BYTES` |
@@ -736,8 +736,10 @@ type ProtocolEvent =
 | turn | `turn.not_found` | 活跃 turn 不存在 |
 | turn | `turn.node_id_forbidden` | 活跃 turn 的 `turn.start` 带 `nodeId` |
 | turn | `turn.active` | 活跃 turn 中调用 `session.configure` |
-| turn | `turn.empty` | 首次 turn 未产生 agent/system 节点；通过 turn.ended.error 表达 |
-| 上下文 | `context.source_failed` | 上下文来源解析失败 |
+| turn | `turn.empty` | 最终无任何可见 kind=agent 消息；通过 turn.ended.error 表达 |
+| 上下文 | `context.source_failed` | 上下文来源/技能解析失败或不可裁内容超过 4 MiB |
+| 上下文 | `context.changed` | 声明选择或默认 head 在一次重跑后仍变化；data.retryable=true |
+| 上下文 | `context.pending_commit` | 提交结果仍无法读清时尝试其他修改；data.retryable=true |
 | 上下文 | `context.window_exceeded` | 裁剪后仍超出模型窗口 |
 | 存储 | `storage.io` | 持久化 I/O 失败 |
 | 存储 | `storage.corrupt` | 记录、meta 或 definition 损坏 |
@@ -849,10 +851,11 @@ interface ContextDeps {
   meta: SessionMeta;
   persisted: boolean;
   sessions: Sessions;
-  tools: Tools;
+  entries: ContextEntries;
   skills: Skills;
   sources: ContextSourceRegistry;
-  events: EventBus;
+  events: ContextEvents;
+  eventClock: SessionEventClock;
   runExclusive<T>(task: () => Promise<T>): Promise<T>;
   newId: () => QueueEntryId;
   now: () => string;
@@ -874,15 +877,21 @@ interface AssembleOptions {
 interface AssembledContext {
   request: LlmRequest;
   selection: SelectionState;
-  nodes: SessionNode[];
+  nodes: SessionNode[];  // 仅本批持久化节点，不返回历史副本
   headId: NodeId;
-  first: boolean;
+  first: boolean;        // 此次调用开始时尚未落盘
+}
+
+interface RequestToolDeclaration {
+  name: EntryName;
+  description: string;
+  parameters: JsonObject;
 }
 
 interface LlmRequest {
   model: string;
   messages: Message[];
-  tools?: ToolDeclaration[];
+  tools?: RequestToolDeclaration[];
   parameters?: JsonObject;
 }
 
@@ -895,31 +904,62 @@ interface Context {
   remove(id: QueueEntryId): void;
   clear(): QueueEntryId[];
   confirm(): void;
+  unconfirm(): void;
   updateMeta(meta: SessionMeta): void;
   assemble(options: AssembleOptions): Promise<AssembledContext>;
 }
+
+type ContextFactory = (deps: ContextDeps) => Context;
+declare function createContext(deps: ContextDeps): Context;
+
+type ContextEntryKind = "tool" | "wrapper" | "skill" | "context";
+interface ContextEntries {
+  kind(name: EntryName): ContextEntryKind | undefined;
+}
+
+interface ContextEvent {
+  type: "queue.updated" | "selection.updated" | "session.updated";
+  sessionId: SessionId;
+  seq: number;
+  at: string;
+  data: JsonValue;
+}
+
+interface ContextEvents {
+  publish(event: ContextEvent): void;
+}
+
+interface SessionEventClock {
+  current(): number;
+  next(): number;
+}
 ```
 
-`Context` 创建后由服务层调用 `initialize`：读取默认分支并计算已持久化的选择；临时会话不读取记录，选择为空。`snapshot` 返回当前队列、选择与 `seq`；`selectionFor` 按指定节点或默认分支计算，不改变缓存；`assemble` 可重复调用，内部保证已初始化。
+`Context` 创建后由服务层调用 `initialize`：每次调用都重读默认分支并计算已持久化选择，不使用永久 resolved promise，也不丢失现有内存队列；临时会话不读取记录，选择为空。`initialize`、`selectionFor` 及所有同步方法由调用方在会话锁内调用；`assemble` 自持 A/C 锁，调用方不得持锁调用，并在 A 段确保初始化。
 
-`Context` 的可变状态只有：
+`snapshot` 返回当前队列、选择与 `eventClock.current()`；`selectionFor` 按指定节点或默认分支计算，不改变缓存。所有输入内容在接收时复制，返回的队列、内容、选择及发布的事件与内部状态隔离，调用者修改它们不得影响后续选择或持久化。`entries` 是冻结 inventory 的分类投影，不提供实时工具正文；请求工具只有 name/description/parameters，不携带 execute、运行时 id/source。未来完整 `ToolDeclaration` 可结构化赋值给 `RequestToolDeclaration`，构造请求时仍显式提取这三个字段。
+
+`Context` 的常态可变状态为：
 
 - `queue`：尚未出队的 `QueueEntry[]`；
 - `persisted`：是否已有至少一个已写入节点；
 - `selection`：已持久化记录的声明选择缓存；
-- `meta`：当前会话元数据；
-- `seq`：本会话事件序号，锁内自增。
+- `meta`：当前会话元数据。
 
-不保存“活动分支”“已装配标记”或完整选择快照。
+提交结果无法读清时，额外保留仅含本批 drafts、队列 ids、父节点/水位、first、最终 selection 和原错误的内存 pending 状态（§4.2.7），不保存整树，恢复后清除。
+
+事件序号仅由同会话 Context、未来 driver 与 Gateway 共享的 `SessionEventClock` 维护；发布每个事件时在会话锁内调用 `next()`，快照取 `current()`，Context 不维护第二份计数。只注入事件发布端，不依赖 EventBus 订阅或实现。
+
+不保存“活动分支”“已装配标记”、已装配 id 墓碑或完整选择快照。
 
 #### 4.2.2 队列操作
 
 - `enqueue` 为每个输入分配 `QueueEntryId` 与 `createdAt`，按输入顺序追加到队尾；不设置 `confirmedAt`。
-- `confirm()` 在同一会话锁内把当前未确认条目置为已确认；`updateMeta` 只在 Store 写入成功后更新内存 meta。
+- `confirm()` 在同一会话锁内把当前未确认条目置为已确认；确认须先通过完整候选队列的大小校验再原子替换。`unconfirm()` 清除所有尚未装配条目的 `confirmedAt`，仅实际变化发布 `queue.updated`；`updateMeta` 只在 Store 写入成功后更新内存 meta。
 - `queue` 只存在内存；`Context` 不持久化队列，也不做 WAL。
 - `edit` 只允许未确认的 `kind=agent` 条目；已确认条目返回 `queue.entry_locked`。
 - `remove` 可删除任意尚未装配的条目（含已确认未装配）；`clear` 清空全部尚未装配条目并返回完整 id 列表；Gateway 在活跃 turn 时整体拒绝 `clear`。
-- `turn.cancel` 由 Gateway 调用 `Context` 清除未装配条目的 `confirmedAt`。
+- `turn.cancel` 的取消由 AbortSignal 表示，Gateway/driver 在会话锁内调用 `Context.unconfirm()` 清除未装配条目的 `confirmedAt`。
 - 队列操作按会话串行化；每次变化后发布 `queue.updated`。
 - 队列条目的 id 只在队列阶段有效；装配出队后作废。
 
@@ -940,10 +980,10 @@ interface Context {
 
 **A. 锁内快照**
 
-1. 确定分支起点：`nodeId` 指定时使用该节点；否则使用记录最后一个节点。临时会话没有节点，指定 `nodeId` 返回 `session.node_not_found`。
+1. 调用 `signal?.throwIfAborted()`，保留原始 reason，不新增取消协议码；确保初始化。确定分支起点：`nodeId` 指定时使用该节点；否则使用记录最后一个节点。临时会话没有节点，指定 `nodeId` 返回 `session.node_not_found`。
 2. 读取分支节点（临时会话为空）；计算分支选择。
 3. 取队列快照，只保留连续已确认前缀；把其中的声明类控制消息异或到选择上。
-4. 记录本次分支端点 `headId`（指定节点或默认分支末端）与队列条目 id 集合。
+4. 记录本次分支端点 `headId`（指定节点或默认分支末端）与队列条目 id 集合。显式旧分支端点不等于文件默认末端；后续提交以本次选择的端点为父节点。
 
 **B. 锁外构造**
 
@@ -959,11 +999,11 @@ interface Context {
 
 **C. 锁内提交**
 
-11. 重校验：若已确认队列条目在锁外被删除，从本批剔除；不新增窗口内新确认的条目。若声明选择变化，丢弃本次 resolve 结果并从 A 重跑一次；仍不一致则以可重试错误结束。
-12. 若 turn 正在 `cancelling`，不持久化、不出队、不增加 `seq`、不写 `session.updated`；本次未发送草稿丢弃。
-13. 计算最终可见消息；若没有任何 agent/system 消息，返回 `turn.empty`，不调用 `Sessions.create`。
+11. 重校验：若已确认队列条目在锁外被删除，从本批剔除；不新增本次窗口之后确认的条目。消息、工具、来源、预算及 compaction 均按最终幸存批次重新计算。若声明选择或省略 nodeId 时的默认 head 变化，丢弃本次 resolve 结果并从 A 重跑一次；仍变化返回 `context.changed`，`data.retryable=true`。
+12. B 段每次 await 返回后、C 段写入前均调用 `signal?.throwIfAborted()`；即使来源忽略 signal 并返回也必须拦住取消。取消不持久化、不出队、不增加 `seq`、不写 `session.updated`，本次未发送草稿丢弃。
+13. 计算最终可见消息；若没有任何可见 `kind=agent` 消息，返回 `turn.empty`，不调用 `Sessions.create`；仅 user 消息也有效，不要求 system。
 14. 首次持久化使用 `Sessions.create(meta, drafts)`；已有节点时使用 `Sessions.append(sessionId, drafts, parentId=headId)`；`drafts` 为空时跳过 append。
-15. 持久化成功后，从队列移除本次已装配的条目，更新 `selection` 与 `persisted`，`seq++`，发布 `session.updated`/`selection.updated`。
+15. 持久化成功后，从队列移除本次已装配的条目，更新 `selection` 与 `persisted`；通过共享 clock 为每个事件分配 `seq`，发布 `session.updated`/`selection.updated`/`queue.updated`。队列与选择按最终状态各通知一次，session.updated 按完整事件 4 MiB 预算拆帧。发布回调抛错不能触发持久化失败补偿或恢复已出队条目。
 16. 若本批写入节点非空，将 `headId` 推进为本批最后一个节点的 id；否则保留原端点。返回 `LlmRequest`、选择、写入节点、提交后的 `headId` 与 `first`。
 
 追加的 `parentId` 为提交前的 `headId`；首次创建由 `Sessions.create` 生成根节点。
@@ -1010,18 +1050,20 @@ interface Skills {
 
 #### 4.2.6 裁剪与压缩
 
-- 预算 `B = max(1024, contextWindow - maxOutput - toolTokenReserve)`；token 估算使用 UTF-8 字节数除以 3 向上取整。
-- 先应用已有 compaction：跳过 `from`/`to` 范围，`summary` 作为一条 system 消息插入区间起点；范围必须属于当前分支且不重叠，否则跳过该 compaction。
-- 再裁剪：按消息组丢弃最旧的非 system 消息组；只有 `source="instruction"` 的节点不可裁剪，来源/技能节点可裁剪。
-- 若本次丢弃的节点区间包含 ≥ 4 个节点或 ≥ 20% 预算，且未被已有 compaction 覆盖，`Context` 生成一条 compaction：`from/to` 为丢弃区间首末节点，`summary` 为固定模板（按角色前缀 + 每节点最多 200 字符，总长 ≤ 2048 字符），并插入区间起点。
-- compaction 与本批 drafts 同批 append，只引用本批之前已落盘的节点。
-- 若压缩后仍超过预算，返回 `context.window_exceeded`；`Context` 不调用模型生成摘要。
+- `contextWindow`、`maxOutput` 必须是有限非负整数，且 `contextWindow > 0`；否则抛内部 `TypeError`。
+- `estimateTokens(value) = ceil(new TextEncoder().encode(JSON.stringify(value)).length / 3)`；消息总量为每条 `Message` 估算值之和。`toolTokenReserve = estimateTokens(request.tools ?? [])`，空工具特例为 0；工具仅序列化 name/description/parameters。预算 `B = max(1024, contextWindow - maxOutput - toolTokenReserve)`。请求参数不隐式增加，model 使用 C 段最新 `meta.model`。
+- 普通 agent 节点为一组；含 toolCall 的 assistant 至对应全部 toolResult 的最小连续区间为一组，交叠区间合并。一个 assistant 的多个调用一起保护，组内可含其他消息；尚缺结果的调用组整体保留。仅外层 toolResult 参与配对，结果 content 中嵌套 toolResult 仅作内容。同分支重复 call id、重复 result 或孤立 toolResult 均为 `storage.corrupt`，不发送孤立结果、不伪造结果；cancel/control 不变成请求消息。
+- 只有 `kind=agent`、`role=system`、`source="instruction"` 的节点不可裁剪，全部按分支/队列顺序原样保留；含任一 instruction 的整个工具组不可裁剪。system/create、来源/技能及其他普通消息均可裁剪；受保护组超预算时失败。
+- 先应用已有 compaction：跳过 from/to 范围，summary 作为一条 system 消息插入区间起点；范围须属于当前分支且不重叠，不能跨 instruction，否则忽略该 compaction。
+- 按最旧允许消息组裁剪后，分别计算连续历史节点区间；区间不能跨 instruction、已有压缩或 declaration 控制节点，不引用本批新 drafts。每区间独立满足 `节点数 >= 4 || 被丢弃消息估算 tokens >= ceil(B / 5)` 才生成 compaction，from/to 为区间首末节点。
+- 摘要固定为 `"[compaction]\n" + lines.join("\n")`。每行是 `role + ": " + snippet`；snippet 按节点 content 顺序取 text/reasoning.text、toolCall 的 `name + " " + JSON.stringify(arguments)`、toolResult 的递归文本，以 `"\n"` 拼接后取前 200 个 Unicode code points；整个摘要再取前 2048 个 code points，不加省略号，不调用模型。
+- 摘要插入区间起点后重新计算预算，继续裁剪最旧允许组并重新计算区间/摘要，直到稳定；仍超预算返回 `context.window_exceeded`。compaction 与本批 drafts 同批 append，只引用本批之前已落盘节点。
 - `compaction` 只由 `Context` 自动写入；`queue.enqueue` 拒绝客户端提交。
 
 #### 4.2.7 持久化与出队
 
 - 首次 `assemble` 使用 `Sessions.create`；后续使用 `Sessions.append`，父节点为 `headId`。
-- 出队、持久化、`selection` 更新与 `seq` 自增在同一临界区完成；失败时队列保留、选择缓存不更新、不产生半批节点。
+- 出队、持久化、`selection` 更新与共享 clock 的事件序号分配在同一临界区完成；提交点前失败时队列保留、选择缓存不更新，不产生半批节点。提交点后失败先重读核对本批，不能把旧兄弟节点误认成本批或重复写入；结果仍不清时保留待确认状态，其他修改返回 `context.pending_commit`、`data.retryable=true`，恢复确认后清除 pending。
 - `Context` 不直接写文件；只调用 `Sessions`。
 - 临时会话首次落盘后 `persisted=true`；`SessionMeta` 由服务层提供，不由 `Context` 创建。
 - `Context.updateMeta` 由 Gateway 在 `SessionStore.updateMeta` 成功后调用；`assemble` 使用最新 `meta.model`。
@@ -1132,6 +1174,7 @@ interface RunTurnInput {
   adapter: LlmAdapter;
   execute: ExecuteProvider;
   events: EventBus;
+  eventClock: SessionEventClock;
   contextWindow: number;
   maxOutput: number;
   nodeId?: NodeId;
@@ -1197,7 +1240,7 @@ idle -> running -> cancelling -> ended
 - 写入成功后发布 `session.updated`，只携带本批节点；超过事件字节预算时拆分为多个事件。
 - `turn.step` 在一个 step 完成后发布；`turn.ended` 在 turn 结束后发布；被取消的 step 使用 `stopReason="cancelled"`。
 - 取消时若已有部分回复，先写入部分回复；未发送的草稿不落盘。随后写入 `role=cancel` 控制消息，`at` 为当前最后节点，并清除未装配条目的 `confirmedAt`。
-- 事件通过 `EventBus` 发布；所有事件的 `seq` 在同一会话锁内分配。
+- 事件通过 `EventBus` 发布；driver 与 Context/Gateway 共享同会话 `SessionEventClock`，所有会话事件的 `seq` 通过会话锁内 `next()` 分配。
 
 ### 4.5 跨模块约束
 
@@ -1266,7 +1309,7 @@ interface Concurrency {
 ```
 
 - 每个会话一把非重入逻辑锁；会话内队列写、配置、turn 启动、装配提交、持久化与 `seq` 自增按锁串行化。
-- `Context.assemble` 自持会话锁；队列读写方法由调用方在锁内调用；锁外执行 resolve/loader/provider/tool。
+- `Context.assemble` 自持 A/C 会话锁，调用方不得持锁调用；`initialize`、`selectionFor` 与所有同步方法由调用方在锁内调用。锁外执行 resolve/loader/provider/tool。Context、driver、Gateway 共享同会话 `SessionEventClock`；`next()` 仅在会话锁内调用，快照取 `current()`，不独立维护计数。
 - 不同会话可并行；事件发送与请求处理不共享全局锁。
 - `activeTurn` 只记录正在运行的 turn；`turn.list` 从该集合生成快照，允许无锁快照偏差。
 - `runExclusive` 不跨会话持有锁；回调内不得 acquire 同一会话锁。
@@ -1291,7 +1334,7 @@ interface EventBus {
 ```
 
 - `EventBus` 同步、按发布顺序 fan-out；handler 只入队发送，不 await。
-- 会话事件的 `seq` 在会话锁内分配；`client.launched` 没有会话 `seq`。
+- Context、driver、Gateway 共享同会话 `SessionEventClock { current(): number; next(): number }`；每个会话事件的 `seq` 通过会话锁内 `next()` 分配，Context 快照读取 `current()`；`client.launched` 没有会话 `seq`。Context 仅依赖 `ContextEvents.publish` 发布端，不依赖订阅接口；本轮不实施 EventBus。
 - `Gateway` 把引擎事件转换为协议事件，并只发送给订阅该会话的连接。
 
 `Gateway` 把协议方法映射到 `Context`、`Sessions`、`AgentLoopDriver`、`Extensions` 与存储；本身不实现上下文组装或工具执行。
@@ -1302,6 +1345,7 @@ interface EventBus {
 interface SessionRuntime {
   meta: SessionMeta;
   context: Context;
+  eventClock: SessionEventClock; // 同会话 Context/driver/Gateway 共享
   subscribers: Set<string>;   // connection id
 }
 ```
@@ -1333,7 +1377,7 @@ interface SessionRuntime {
 - `Context` 的 `queue.updated`、`selection.updated`、`session.updated`，以及 driver 的 turn 事件进入 `EventBus`。
 - `Gateway` 把引擎事件转换为协议事件，只发送给订阅该会话的连接。
 - 事件都带 `sessionId`、`seq` 与 `at`；`queue.updated` 携带完整队列，`selection.updated` 携带完整名称集合。
-- `session.updated` 只携带本次追加节点；超过事件字节预算时拆分；`meta` 变化时 nodes 可为空。
+- `session.updated` 只携带本次追加节点；核心按完整 EngineEvent JSON 的 UTF-8 字节预算 4194304 拆分，每帧独立 seq；`meta` 变化时 nodes 可为空。队列与选择通知按最终状态各发布一次。
 - `client.launched` 是连接级事件，不受会话订阅限制。
 - 事件不重放；重连后客户端重新 `session.read`。
 
@@ -1768,7 +1812,9 @@ interface ClientRegistry {
 ### 7.5 失败与恢复约定
 
 - 首次落盘在提交点前失败：队列保留，无 meta/nodes；客户端可重试。提交点后 I/O 失败可能已整批落盘，须重读确认；不能仅凭 `storage.io` 盲目重试。
-- 上下文装配追加失败：队列保留，选择缓存不更新；不继续请求。
+- 上下文装配追加在提交点前失败：队列保留，选择缓存不更新；不继续请求。提交点后失败须按本批父节点/水位及内容重读核对，不能把旧兄弟节点误认成本批或重复写入；结果仍不清时其他修改返回 `context.pending_commit`、`data.retryable=true`，确认恢复后清除 pending。
+- 声明选择或默认 head 在一次重跑后仍变化，返回 `context.changed`、`data.retryable=true`；未来 Gateway 原样映射上述内部错误，本轮不新增协议实现。
+- 装配取消通过 AbortSignal 的原始 reason 传播，不新增取消协议码；持久化后的事件回调异常不得触发持久化失败补偿。
 - assistant/tool/cancel 追加失败：不继续请求；已写节点保留；队列已出队，不自动恢复。
 - 取消写入失败：turn 仍结束，但标记未落盘；重启时无法恢复该标记，用户可继续。
 - 恢复时 `meta.json` 损坏或有 meta 但 commit 缺失/非法：保留会话原始文件，收集 `RecoveryIssue`；该会话不可加载，不影响直接读取其他健康会话，`list` 整体拒绝。
