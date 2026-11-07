@@ -351,7 +351,8 @@ interface Event<E = JsonValue> {
 - 请求帧、响应帧、事件帧分别受 `MAX_FRAME_BYTES` 限制；发送侧保证响应不超过 `MAX_RESPONSE_BYTES`、事件不超过 `MAX_EVENT_BYTES`。
 - 队列大小按完整 `QueueEntry` JSON 的 UTF-8 字节计：单条上限 262144，完整队列数组（含数组标点）上限 1048576；分别返回 `queue.entry_too_large`、`queue.too_large`。入队、编辑及确认均先计算完整候选队列，再原子替换；队列和声明不静默截断。
 - `Context` 的 `session.updated` 按完整 `EngineEvent` JSON 的 UTF-8 字节预算 4194304 拆为多个事件，每帧独立分配 `seq`；客户端按 `id`/`parentId` 合并。队列与选择通知各按最终状态发布一次。
-- 来源/技能单节点内容以 262144 字节为裁剪目标：仅截断 `text`/`reasoning`（包括 `toolResult` 内文本），保留 Unicode code point 边界，末尾追加可见标记 `\n[truncated]`；`toolCall.arguments` 永不截断。不可裁字段使节点内容仍处于 256 KiB 至 4 MiB 时允许原样保留；仍超过 4194304 字节以 `context.source_failed` 失败。供应商产生的超大不可截断节点以 `provider.invalid_response` 失败，均不写入半截节点。
+- 来源/技能单节点 `content` JSON 的 UTF-8 字节上限为 262144：仅截断 `text`/`reasoning`（包括 `toolResult` 内文本），保留 Unicode code point 边界，末尾追加可见标记 `\n[truncated]`；`toolCall.arguments` 永不截断。文本安全截断后 `content` 仍超过 262144 字节，以 `context.source_failed` 失败，不允许原样保留 256 KiB 至 4 MiB 的不可裁内容，不写入半截节点。
+- 供应商输出独立采用 `MAX_NODE_CONTENT_BYTES` 文本裁剪目标，仅截断上述文本并追加可见标记，保留 code point 边界；`toolCall.arguments` 永不截断。不可裁字段可保留，但必须在写库前验证包含该完整节点的单节点 `session.updated` EngineEvent JSON 的 UTF-8 大小不超过 4194304 字节（包括节点字段与事件封装），超限以 `provider.invalid_response` 失败；不能只检查裸 `content`，也不能通过批次拆分或节点分片规避上限。
 - 不支持在 JSON 对象内嵌裸换行；字符串内的换行必须转义。
 - 客户端可以在同一连接上并发发送多个请求；响应通过 `id` 关联。
 - 事件可以与响应交错；客户端不得依赖事件与某个响应的固定先后顺序。
@@ -737,7 +738,7 @@ type ProtocolEvent =
 | turn | `turn.node_id_forbidden` | 活跃 turn 的 `turn.start` 带 `nodeId` |
 | turn | `turn.active` | 活跃 turn 中调用 `session.configure` |
 | turn | `turn.empty` | 最终无任何可见 kind=agent 消息；通过 turn.ended.error 表达 |
-| 上下文 | `context.source_failed` | 上下文来源/技能解析失败或不可裁内容超过 4 MiB |
+| 上下文 | `context.source_failed` | 上下文来源/技能解析失败或文本安全截断后 content 仍超过 256 KiB |
 | 上下文 | `context.changed` | 声明选择或默认 head 在一次重跑后仍变化；data.retryable=true |
 | 上下文 | `context.pending_commit` | 提交结果仍无法读清时尝试其他修改；data.retryable=true |
 | 上下文 | `context.window_exceeded` | 裁剪后仍超出模型窗口 |
@@ -745,7 +746,7 @@ type ProtocolEvent =
 | 存储 | `storage.corrupt` | 记录、meta 或 definition 损坏 |
 | 供应商 | `provider.transport` | 网络/传输错误 |
 | 供应商 | `provider.timeout` | 请求超时 |
-| 供应商 | `provider.invalid_response` | 响应无法解析；含超大不可截断节点 |
+| 供应商 | `provider.invalid_response` | 响应无法解析；文本安全截断后完整单节点事件仍超过 4 MiB（写库前失败） |
 | 供应商 | `provider.refusal` | 供应商拒绝 |
 | 工具 | `tool.failed` | 工具执行失败 |
 | 工具 | `tool.denied` | 工具拒绝执行 |
@@ -1042,6 +1043,7 @@ interface Skills {
 }
 ```
 
+- 来源/技能按 §3.1 安全截断文本后，单节点 content JSON 的 UTF-8 大小必须不超过 262144 字节；不可裁字段导致仍超限时，在写库前以 `context.source_failed` 失败。
 - 过滤与去重只看 `SessionNode.source`。
 - 来源/技能节点是内容，不是选择状态；每个 `source` 在分支中最多追加一次。
 - 取消选择不删除已有节点，只从本次消息序列排除；再次选择复用已有节点。
@@ -1237,7 +1239,7 @@ idle -> running -> cancelling -> ended
 
 - `Context` 负责装配节点与 compaction 的持久化；`AgentLoopDriver` 负责 assistant 回复、工具结果与 cancel 控制消息的追加。
 - 每批写入使用 `Sessions.append`，父节点为当前 `headId`；成功后立即将 `headId` 推进到本批末节点，后续 assistant、tool、cancel 批次及下一次 assemble 均使用新端点；失败不继续循环。
-- 写入成功后发布 `session.updated`，只携带本批节点；超过事件字节预算时拆分为多个事件。
+- 写入前按 §3.1 验证供应商输出经文本安全截断后，每个完整单节点 `session.updated` EngineEvent JSON 的 UTF-8 大小不超过 4194304 字节；包括节点字段与事件封装，超限以 `provider.invalid_response` 失败。写入成功后发布 `session.updated`，只携带本批节点；超过事件字节预算时按节点拆批，单个节点不分片。
 - `turn.step` 在一个 step 完成后发布；`turn.ended` 在 turn 结束后发布；被取消的 step 使用 `stopReason="cancelled"`。
 - 取消时若已有部分回复，先写入部分回复；未发送的草稿不落盘。随后写入 `role=cancel` 控制消息，`at` 为当前最后节点，并清除未装配条目的 `confirmedAt`。
 - 事件通过 `EventBus` 发布；driver 与 Context/Gateway 共享同会话 `SessionEventClock`，所有会话事件的 `seq` 通过会话锁内 `next()` 分配。
