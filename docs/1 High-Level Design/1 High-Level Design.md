@@ -271,7 +271,7 @@ daemon --> core : 依赖
 4. 供应商方言驱动构建请求，经服务层提供的网络环境调用供应商提供的大语言模型接口。
 5. 解析响应；若响应包含工具调用，进入工具流水线：按序包装、执行包装后工具、回填结果。
 6. 装配内容写入会话：以适当的形式将上下文追加写入硬盘完成持久化；引擎事件经服务层转为协议事件推送客户端。
-7. 当没有待执行的工具调用且消息队列为空时，本轮结束；用户可在热会话进行中中止，中止语义见 §6.1。
+7. 当没有待执行的工具调用且没有可装配的已确认条目时，本轮结束；用户可在热会话进行中中止，中止语义见 §6.1。
 
 ```plantuml
 @startuml
@@ -475,7 +475,7 @@ endlegend
 
 `Tools` 导出包装器契约，提供指定错误类型供包装器或工具实现中断执行并提供反馈；服务层 `Extensions` 负责发现并装载包装器实现代码。
 
-多个工具调用可串行或并行执行，结果按供应商 API 要求回填。一轮 turn 在没有待执行的工具调用且消息队列为空时结束；用户中止时按 §6.1 处理。
+多个工具调用可串行或并行执行，结果按原始 `ToolCall` 顺序回填。一轮 turn 在没有待执行的工具调用且没有可装配的已确认条目时结束；用户中止时按 §6.1 处理。
 
 ```plantuml
 @startuml
@@ -499,9 +499,9 @@ stop
 
 消息队列用于与用户交互，存储用户发送给智能体的消息和发送给本运行框架的控制消息。
 
-构建用于发起智能体工作循环的请求体时使用的所有智能体上下文必须来源于会话记录和消息队列。上下文来源由用户显式启用，启用即授权其在装配时产出片段；`Context` 先把片段追加为会话节点，再据此写入请求体。`AGENTS.md` `SYSTEM.md` 等以文件形式存储的上下文，以及 skill 、 tool 等工作机制要求的上下文，只能在特定时机自动插入消息队列作为独立条目，在用户审查、修改完毕并发出确认信号后才能写入请求体及会话记录，绝不允许在确认信号发出后修改已确认条目的内容；新增条目属于后续装配。不允许将会话记录及消息队列以外的内容写入请求体。
+构建用于发起智能体工作循环的请求体时使用的所有智能体上下文必须来源于会话记录和消息队列。上下文来源由用户显式启用，启用即授权其在首次选中装配时产出片段并固化；`Context` 先把片段追加为会话节点，再据此写入请求体。取消选择后再次启用复用已固化片段；零片段来源在每个 step 重试。`AGENTS.md` `SYSTEM.md` 等以文件形式存储的上下文，以及 skill 、 tool 等工作机制要求的上下文，只能在特定时机自动插入消息队列作为独立条目，在用户审查、修改完毕并发出确认信号后才能写入请求体及会话记录，绝不允许在确认信号发出后修改已确认条目的内容；新增条目属于后续装配。不允许将会话记录及消息队列以外的内容写入请求体。
 
-会话记录包括直接写入请求体的“智能体消息”和不直接写入请求体的“控制消息”两个大类。每个会话的所有消息使用树型结构表示、存储，各消息节点必须有父节点指针，根节点的父节点指针指向自己。在每个 step 组装请求上下文时，根据当前消息节点的父节点指针可向上获取会话树的活动分支的完整记录，智能体消息可直接写入请求体，控制消息由 `role` 判别并指导 `Context` 完成组装工作；控制消息的 `content` 同样由 `ContentBlock[]` 承载。用户可在消息队列中操作智能体消息和控制消息，其中控制消息的内容不允许修改，用户只能完整增加或删除控制消息条目。系统提示词作为角色为 `system` 的智能体消息写入请求体，用户可在队列中修改；声明类控制消息、压缩记录与中止标记只能整条增删。
+会话记录包括直接写入请求体的“智能体消息”和不直接写入请求体的“控制消息”两个大类。每个会话的所有消息使用树型结构表示、存储，各消息节点必须有父节点指针，根节点的父节点指针指向自己。在每个 step 组装请求上下文时，根据当前消息节点的父节点指针可向上获取会话树的活动分支的完整记录，智能体消息可直接写入请求体，控制消息由 `role` 判别并指导 `Context` 完成组装工作；控制消息的 `content` 同样由 `ContentBlock[]` 承载。用户可在消息队列中操作智能体消息和控制消息，其中控制消息的内容不允许修改，声明类控制消息可整条增加或删除；压缩记录与中止标记只能由运行框架写入，用户只能整条删除。系统提示词作为角色为 `system` 的智能体消息写入请求体，用户可在队列中修改；装配时只取最新的 `system-prompt` 节点，旧节点保留用于溯源。控制消息只能整条增删，但压缩记录与中止标记的写入者受上述限制。
 
 skill、tool、包装器、上下文来源等可选条目的选择变更使用声明类控制消息表示，某条目状态变更记为1，组装上下文时根据会话记录及消息队列中所有声明类控制消息按异或计算当前消息节点的声明集合并写入请求体；不保存完整选择集。
 
@@ -764,7 +764,7 @@ interface Event<E = JsonValue> {
 | 协议 | `protocol.hello` | `{ versions }` | `{ version, compatible }` |
 | 会话 | `session.create` | `{ workspace?, templateId?, model?, provider?, systemPrompt?, extensions? }` | `SessionMeta` |
 | 会话 | `session.list` | `{}` | `{ sessions: SessionMeta[] }` |
-| 会话 | `session.read` | `{ sessionId, nodeId? }` | `{ meta: SessionMeta, records: SessionNode[], queue: QueueEntry[], selection }` |
+| 会话 | `session.read` | `{ sessionId, nodeId?, limit?, cursor? }` | `{ meta: SessionMeta, seq, records: SessionNode[], queue: QueueEntry[], selection, nextCursor? }` |
 | 会话 | `session.configure` | `{ sessionId, model?, provider?, systemPrompt? }` | `SessionMeta` |
 | 会话 | `session.subscribe` | `{ sessionId }` | 订阅确认，事件经推送 |
 | 会话 | `session.unsubscribe` | `{ sessionId }` | `{ sessionId }` |
@@ -785,7 +785,6 @@ interface Event<E = JsonValue> {
 
 | 事件 | 触发 |
 |---|---|
-| `protocol.incompatible` | 协议版本不兼容 |
 | `session.updated` | 会话记录追加 |
 | `turn.started` | 活跃 turn 开始 |
 | `turn.step` | 一个 step 完成 |
@@ -800,7 +799,7 @@ interface Event<E = JsonValue> {
 
 `provider.list` 返回 `ProviderInfo[]`。`ProviderInfo` 包含 `id`、`ready`、`models`；`ModelInfo` 包含 `id`、`contextWindow`、`maxOutput`、`modalities`、`pricing?`。`ModelInfo.id` 在所属 provider 内唯一，选择单位是 `(provider, model)`；`ready` 表示凭据有效且至少有一个模型，不可用或无模型的 provider 返回 `ready` 为 false（无模型时 `models` 为空），详细原因由 CLI `providers check` 提供。该清单不返回 `dialect`、`baseUrl`、`auth`、`headers` 等配置细节；`session.create`、`session.configure` 的 `provider`、`model` 取自该清单，不在清单中的组合由 daemon 拒绝。
 
-`QueueEntry` 是 `Omit<SessionNode, "parentId" | "schemaVersion">`（`SessionNode` 见 §6.5），包含 `id`、`kind`、`role`、`content`、`source`、`createdAt`；`id` 由 `Context` 在入队时分配，仅在队列阶段有效，出队后作废。`queue.enqueue` 的 `entries` 为 `Omit<QueueEntry, "id" | "createdAt">`，`session.read` 的 `queue` 返回 `QueueEntry[]`，`queue.updated` 携带当前完整 `QueueEntry[]`。
+`QueueEntry` 是 `Omit<SessionNode, "parentId" | "schemaVersion">`（`SessionNode` 见 §6.5），包含 `id`、`kind`、`role`、`content`、`source`、`createdAt` 与服务端写入的 `confirmedAt?`；`id` 由 `Context` 在入队时分配，仅在队列阶段有效，出队后作废。`queue.enqueue` 的 `entries` 为 `Omit<QueueEntry, "id" | "createdAt" | "confirmedAt">`，`session.read` 的 `queue` 返回 `QueueEntry[]`，`queue.updated` 携带当前完整 `QueueEntry[]`。
 
 - 版本协商：连接建立时客户端先发 `protocol.hello` 交换版本；主版本不同返回错误并关闭连接，次版本向下兼容。daemon 升级会断开连接，客户端重连后重新握手。
 - 传输：默认 Unix domain socket；连接建立时校验 peer 凭据，要求与 daemon 同用户。Windows 使用命名管道。
@@ -809,7 +808,7 @@ interface Event<E = JsonValue> {
 - 会话创建：`session.create` 只由服务层创建临时 `SessionMeta` 与内存队列，不写盘；首次 `turn.start` 产生节点时，`SessionRepository.create` 原子写入 meta 与 nodes。`Sessions` 对所有节点统一分配 `id`/`parentId`，初始节点与后续追加没有区别。临时会话不进入 `session.list`；首次 turn 必须产生至少一个节点，否则报错且不落盘。
 - 运行时：`turn.list` 给出活跃 turn 快照，`turn.started` / `turn.ended` 维护该集合；会话是否在运行由成员资格表示，不设 `status` 字段。
 - 订阅：`session.subscribe` 按连接订阅一个会话，推送记录、队列、选择与 turn 事件；`session.unsubscribe` 移除当前连接的该会话订阅。退订只影响当前连接，不影响其他客户端，也不中止活跃 turn；连接断开自动清除该连接的全部订阅；重复退订幂等；不设退订事件，不另设队列订阅方法。
-- 队列：`session.read` 的 `queue` 返回待装配条目；`queue.enqueue` 只入队；`turn.start` 时确认。`queue.edit` 只作用于 `kind=agent` 的条目；声明类控制消息、压缩记录、中止标记只能整条 `queue.enqueue` 或 `queue.remove`；`queue.clear` 清空全部待装配条目。条目被装配取走后，不再接受 `queue.edit`/`queue.remove`。队列按入队顺序，不提供重排方法。
+- 队列：`session.read` 的 `queue` 返回待装配条目；条目区分已确认与未确认，`turn.start` 确认当前队列，装配只消费已确认前缀。`queue.edit` 只作用于未确认的 `kind=agent` 条目；已确认条目可整条 `queue.remove` 或由 `queue.clear` 清除，但不可编辑。声明类控制消息可整条增加或删除；压缩记录与中止标记只能由运行框架写入，用户只能整条删除。无活跃 turn 时 `queue.clear` 清空全部待装配条目；有活跃 turn 时整个请求返回 `queue.entry_locked`。`turn.cancel` 清除尚未装配条目的确认状态。条目被装配取走后，不再接受 `queue.edit`/`queue.remove`。队列按入队顺序，不提供重排方法。
 - 队列事件：`queue.updated` 在入队、编辑、删除、清空与出队后推送当前完整 `QueueEntry[]`；客户端整体替换本地队列。`session.read` 用于首次加载和重连，订阅仍由 `session.subscribe` 承担，不新增 `queue.subscribe`。
 - 多客户端：队列写操作由 `Concurrency` 串行化；客户端以 `session.read` 的 `queue` 为初始快照、`queue.updated` 为增量，重连后重新 `session.read`；并发编辑按最后写入者获胜。
 - 会话视图：`session.read` 在同一会话锁内返回 `meta`、`records`、`queue` 与 `selection`。无 `nodeId` 时 `records` 为完整会话树（扁平 `SessionNode[]`，按追加顺序），`selection` 按活动分支的声明类控制消息的 delta 异或；有 `nodeId` 时 `records` 为该节点向上至根的线性分支，`selection` 按该分支的声明类控制消息的 delta 异或。`queue` 始终是当前待装配条目；临时会话没有节点，带 `nodeId` 报错；`session.read` 不改变活动分支，分支继续由 `turn.start` 的 `nodeId` 选择。
@@ -963,7 +962,7 @@ interface ContextFragment {
 }
 ```
 
-`Context` 在装配请求上下文时调用被启用的来源，先把片段追加为会话节点，再写入请求体；启用来源即授权其片段随本次装配写入会话。上下文来源和技能内容作为 `role=system` 的智能体消息写入会话；装配时只将当前选中的来源/技能节点写入请求，取消选择不删除已写入节点，但不再参与组装。上下文来源的启用状态由 `entries.snapshot` 的 `selection` 表示，并以声明类控制消息记录；启用后才在装配时调用 `resolve`。上下文来源在装配时调用，不提供独立的手动刷新方法。
+`Context` 在首次选中装配时调用被启用的来源，先把片段追加为会话节点，再写入请求体；启用来源即授权其片段在首次选中时写入会话。上下文来源和技能内容作为 `role=system` 的智能体消息写入会话；装配时只将当前选中的来源/技能节点写入请求，取消选择不删除已写入节点，但不再参与组装。上下文来源的启用状态由 `entries.snapshot` 的 `selection` 表示，并以声明类控制消息记录；启用后才在首次选中装配时调用 `resolve`，零片段来源在每个 step 重试。上下文来源不提供独立的手动刷新方法。
 
 ### 6.5 存储与执行接口
 
