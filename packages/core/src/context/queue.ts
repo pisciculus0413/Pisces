@@ -50,13 +50,22 @@ function validateContent(content: ContentBlock[]): void {
       case "toolCall":
         if (
           typeof block.id !== "string" ||
+          block.id.length === 0 ||
           typeof block.name !== "string" ||
+          block.name.length === 0 ||
           !("arguments" in block)
         )
           invalidControl();
         break;
       case "toolResult":
-        if (typeof block.toolCallId !== "string") invalidControl();
+        if (
+          typeof block.toolCallId !== "string" ||
+          block.toolCallId.length === 0 ||
+          (block.isError !== undefined && typeof block.isError !== "boolean") ||
+          (block.code !== undefined && typeof block.code !== "string") ||
+          (block.synthetic !== undefined && block.synthetic !== "interrupted")
+        )
+          invalidControl();
         validateContent(block.content);
         break;
       default:

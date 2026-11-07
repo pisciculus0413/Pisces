@@ -341,3 +341,69 @@ test("non-JSON content is rejected atomically before accepting any batch item", 
   expect(context.snapshot().queue[0]?.content).toEqual(text("hello"));
   expect(events).toHaveLength(1);
 });
+
+const invalidToolContent = [
+  { name: "empty call id", block: { type: "toolCall", id: "", name: "pkg#tool", arguments: {} } },
+  { name: "empty call name", block: { type: "toolCall", id: "c1", name: "", arguments: {} } },
+  { name: "empty result id", block: { type: "toolResult", toolCallId: "", content: [] } },
+  {
+    name: "invalid isError",
+    block: { type: "toolResult", toolCallId: "c1", content: [], isError: "false" },
+  },
+  { name: "invalid code", block: { type: "toolResult", toolCallId: "c1", content: [], code: 42 } },
+  {
+    name: "invalid synthetic",
+    block: { type: "toolResult", toolCallId: "c1", content: [], synthetic: "other" },
+  },
+];
+const invalidToolCases = invalidToolContent.flatMap(({ name, block }) =>
+  ["direct", "nested"].flatMap((placement) =>
+    ["enqueue", "edit"].map((operation) => ({
+      name,
+      placement,
+      operation,
+      content: [
+        placement === "direct"
+          ? block
+          : { type: "toolResult", toolCallId: "outer", content: [block] },
+      ] as ContentBlock[],
+    })),
+  ),
+);
+
+test.each(invalidToolCases)(
+  "rejects $name in $placement content during $operation atomically",
+  ({ operation, content }) => {
+    const { context, events } = createContextHarness();
+    context.enqueue([user("existing")]);
+    const before = context.snapshot();
+    const notifications = structuredClone(events);
+    expect(() => {
+      if (operation === "enqueue")
+        context.enqueue([user("valid batch item"), { ...user(), content }]);
+      else context.edit(qid("q1"), content);
+    }).toThrowError(expect.objectContaining({ code: "queue.invalid_control" }));
+    expect(context.snapshot()).toEqual(before);
+    expect(events).toEqual(notifications);
+  },
+);
+
+test("accepts valid tool identifiers and optional result fields through nested content", () => {
+  const { context } = createContextHarness();
+  const content = [
+    { type: "toolCall", id: "c1", name: "pkg#tool", arguments: { value: null } },
+    {
+      type: "toolResult",
+      toolCallId: "c1",
+      content: text("result"),
+      isError: false,
+      code: "",
+      synthetic: "interrupted",
+    },
+  ] as ContentBlock[];
+  context.enqueue([{ ...user(), content }]);
+  expect(context.snapshot().queue[0]?.content).toEqual(content);
+  const nested: ContentBlock[] = [{ type: "toolResult", toolCallId: "outer", content }];
+  context.edit(qid("q1"), nested);
+  expect(context.snapshot().queue[0]?.content).toEqual(nested);
+});
