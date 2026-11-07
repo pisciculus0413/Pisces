@@ -1054,10 +1054,10 @@ interface Skills {
 
 - `contextWindow`、`maxOutput` 必须是有限非负整数，且 `contextWindow > 0`；否则抛内部 `TypeError`。
 - `estimateTokens(value) = ceil(new TextEncoder().encode(JSON.stringify(value)).length / 3)`；消息总量为每条 `Message` 估算值之和。`toolTokenReserve = estimateTokens(request.tools ?? [])`，空工具特例为 0；工具仅序列化 name/description/parameters。预算 `B = max(1024, contextWindow - maxOutput - toolTokenReserve)`。请求参数不隐式增加，model 使用 C 段最新 `meta.model`。
-- 普通 agent 节点为一组；含 toolCall 的 assistant 至对应全部 toolResult 的最小连续区间为一组，交叠区间合并。一个 assistant 的多个调用一起保护，组内可含其他消息；尚缺结果的调用组整体保留。仅外层 toolResult 参与配对，结果 content 中嵌套 toolResult 仅作内容。同分支重复 call id、重复 result 或孤立 toolResult 均为 `storage.corrupt`，不发送孤立结果、不伪造结果；cancel/control 不变成请求消息。
+- 普通 agent 节点为一组；含 toolCall 的 assistant 至对应全部 toolResult 的最小连续区间为一组，交叠区间合并。一个 assistant 的多个调用一起保护，组内可含其他消息；尚缺结果的调用组整体保留。仅外层 toolResult 参与配对，结果 content 中嵌套 toolResult 仅作内容。同分支重复 call id、重复 result 或孤立 toolResult 均为 `storage.corrupt`，不发送孤立结果、不伪造结果；cancel/control 不变成请求消息。按 source 选择过滤并应用有效压缩后，对可见消息再次校验配对：孤立结果仍为 `storage.corrupt`，缺结果调用组整体保留。
 - 只有 `kind=agent`、`role=system`、`source="instruction"` 的节点不可裁剪，全部按分支/队列顺序原样保留；含任一 instruction 的整个工具组不可裁剪。system/create、来源/技能及其他普通消息均可裁剪；受保护组超预算时失败。
-- 先应用已有 compaction：跳过 from/to 范围，summary 作为一条 system 消息插入区间起点；范围须属于当前分支且不重叠，不能跨 instruction，否则忽略该 compaction。
-- 按最旧允许消息组裁剪后，分别计算连续历史节点区间；区间不能跨 instruction、已有压缩或 declaration 控制节点，不引用本批新 drafts。每区间独立满足 `节点数 >= 4 || 被丢弃消息估算 tokens >= ceil(B / 5)` 才生成 compaction，from/to 为区间首末节点。
+- 先应用已有 compaction：跳过 from/to 范围，summary 作为一条 system 消息插入区间起点；范围须属于当前分支且不重叠，不能跨 instruction；只覆盖工具组一部分或覆盖未闭合组的已有 compaction 也忽略。
+- 按最旧允许消息组裁剪后，分别计算连续历史节点区间；区间不能跨 instruction、已有压缩或 declaration 控制节点，不引用本批新 drafts；候选区间必须完整覆盖相交工具组，否则不生成 compaction。每区间独立满足 `节点数 >= 4 || 被丢弃消息估算 tokens >= ceil(B / 5)` 才生成 compaction，from/to 为区间首末节点。
 - 摘要固定为 `"[compaction]\n" + lines.join("\n")`。每行是 `role + ": " + snippet`；snippet 按节点 content 顺序取 text/reasoning.text、toolCall 的 `name + " " + JSON.stringify(arguments)`、toolResult 的递归文本，以 `"\n"` 拼接后取前 200 个 Unicode code points；整个摘要再取前 2048 个 code points，不加省略号，不调用模型。
 - 摘要插入区间起点后重新计算预算，继续裁剪最旧允许组并重新计算区间/摘要，直到稳定；仍超预算返回 `context.window_exceeded`。compaction 与本批 drafts 同批 append，只引用本批之前已落盘节点。
 - `compaction` 只由 `Context` 自动写入；`queue.enqueue` 拒绝客户端提交。
