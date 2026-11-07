@@ -951,7 +951,7 @@ interface Context {
 6. 对选择中尚未出现在分支里的技能，按名称升序追加为 `kind=agent`、`role=system`、`source=技能名` 的节点；已存在复用。
 7. 将队列条目按顺序转成 `SessionNodeDraft`；控制消息的内容保持为单个 `text` 块 JSON。
 8. 组装可见序列：
-   - 筛选出 `source="instruction"` 的节点，仅分支内最新的 instruction 参与装配；
+   - `source="instruction"` 的节点按活动分支顺序全部参与装配，本批已确认的新消息按队列顺序追加，不过滤旧 instruction；
    - 来源/技能节点只在其 `source` 位于当前选择集时进入；
    - `declaration` 不进入消息；`compaction` 按范围跳过并插入 summary；`cancel` 不进入消息。
 9. 选择中的工具/包装器必须能从该名称最近一次携带 `definitions` 的 declaration 找到定义；缺失按 `storage.corrupt` 处理。`LlmRequest.tools` 从这些定义构造，不读实时注册表。
@@ -1006,7 +1006,7 @@ interface Skills {
 - 来源/技能节点是内容，不是选择状态；每个 `source` 在分支中最多追加一次。
 - 取消选择不删除已有节点，只从本次消息序列排除；再次选择复用已有节点。
 - 零片段来源不落节点，每 step 重新 resolve；这是允许的代价。
-- 上下文来源和技能内容都进入 `role=system` 消息；`instruction` 节点由最新一条生效。
+- 上下文来源和技能内容都进入 `role=system` 消息；已确认的 `instruction` 消息按分支顺序保留，新增消息不替换已持久化的旧消息。
 
 #### 4.2.6 裁剪与压缩
 
