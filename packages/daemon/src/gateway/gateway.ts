@@ -22,6 +22,7 @@ import {
   type SessionEventClock,
   type SessionId,
   type SessionMeta,
+  type SessionNode,
   type Sessions,
   type Skills,
   type Tools,
@@ -40,6 +41,7 @@ import type {
   ProviderListResult,
   QueueEnqueueResult,
   SessionDefaults,
+  SessionReadResult,
 } from "./protocol.js";
 
 export interface GatewayDeps {
@@ -87,6 +89,7 @@ const EMPTY_SKILLS: Skills = { selected: () => [] };
 const EMPTY_SOURCES: ContextSourceRegistry = { get: () => undefined };
 const ENTRY_NAME = /^[^#\s]+#[^#\s]+$/u;
 const SESSION_ID = /^[A-Za-z0-9_-]+$/;
+const ENCODER = new TextEncoder();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -94,6 +97,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function invalidRequest(): never {
   throw new PiscesError("protocol.invalid_request", "Invalid request parameters");
+}
+
+async function collect(source: AsyncIterable<SessionNode>): Promise<SessionNode[]> {
+  const nodes: SessionNode[] = [];
+  for await (const node of source) nodes.push(node);
+  return nodes;
 }
 
 async function defaultValidateWorkspace(workspace: string): Promise<boolean> {
@@ -303,6 +312,64 @@ export function createGateway(deps: GatewayDeps): Gateway {
           throw error;
         }
         return meta;
+      });
+    },
+
+    async "session.read"(params): Promise<SessionReadResult> {
+      const sessionId = params.sessionId;
+      if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) invalidRequest();
+      const nodeId = params.nodeId;
+      if (nodeId !== undefined && typeof nodeId !== "string") invalidRequest();
+      const cursor = params.cursor;
+      if (cursor !== undefined && typeof cursor !== "string") invalidRequest();
+      const limit = params.limit;
+      if (
+        limit !== undefined &&
+        (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1)
+      )
+        invalidRequest();
+      const id = sessionId as SessionId;
+
+      return deps.concurrency.runExclusive(id, async () => {
+        const runtime = await runtimeFor(id);
+        await runtime.context.initialize();
+        const target = nodeId as NodeId | undefined;
+        if (target !== undefined && !runtime.persisted)
+          throw new PiscesError("session.node_not_found", "Node not in session");
+        const records = !runtime.persisted
+          ? []
+          : await collect(
+              target === undefined
+                ? runtime.sessions.readTree(id)
+                : runtime.sessions.readBranch(id, target),
+            );
+        let start = 0;
+        if (cursor !== undefined) {
+          const index = records.findIndex((node) => node.id === cursor);
+          if (index === -1) throw new PiscesError("session.node_not_found", "Node not in session");
+          start = index + 1;
+        }
+        const page: SessionNode[] = [];
+        let bytes = 0;
+        for (let index = start; index < records.length; index++) {
+          const node = records[index] as SessionNode;
+          const size = ENCODER.encode(JSON.stringify(node)).length;
+          if (limit !== undefined && page.length > 0 && bytes + size > limit) break;
+          page.push(node);
+          bytes += size;
+        }
+        const snapshot = runtime.context.snapshot();
+        const first = cursor === undefined;
+        return {
+          meta: runtime.meta,
+          seq: snapshot.seq,
+          records: page,
+          queue: first ? snapshot.queue : [],
+          selection: first ? await runtime.context.selectionFor(target) : [],
+          ...(start + page.length < records.length
+            ? { nextCursor: (page.at(-1) as SessionNode).id }
+            : {}),
+        };
       });
     },
 
