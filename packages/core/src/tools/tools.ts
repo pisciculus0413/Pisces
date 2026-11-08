@@ -90,6 +90,27 @@ function isToolDeclaration(value: unknown): value is ToolDeclaration {
   );
 }
 
+function matchesBaseline(
+  value: unknown,
+  baseline: {
+    id: string;
+    source: string;
+    name: string;
+    description: string;
+    parameters: JsonObject;
+  },
+): value is ToolDeclaration {
+  return (
+    isToolDeclaration(value) &&
+    isJsonObject(value.parameters) &&
+    value.id === baseline.id &&
+    value.source === baseline.source &&
+    value.name === baseline.name &&
+    value.description === baseline.description &&
+    jsonEqual(value.parameters, baseline.parameters)
+  );
+}
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -193,15 +214,7 @@ export function createTools(options: ToolsOptions = {}): Tools {
         }
         try {
           const candidate = wrapper(wrapped);
-          if (
-            !isToolDeclaration(candidate) ||
-            !isJsonObject(candidate.parameters) ||
-            candidate.id !== baseline.id ||
-            candidate.source !== baseline.source ||
-            candidate.name !== baseline.name ||
-            candidate.description !== baseline.description ||
-            !jsonEqual(candidate.parameters, baseline.parameters)
-          )
+          if (!matchesBaseline(wrapped, baseline) || !matchesBaseline(candidate, baseline))
             return wrapperFailure(wrapperName);
           wrapped = candidate;
         } catch {

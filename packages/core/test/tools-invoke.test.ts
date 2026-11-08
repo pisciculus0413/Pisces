@@ -167,6 +167,36 @@ test("rejects nested parameter mutation and a missing final execute", async () =
   ).toEqual(errorResult("tool.failed", "Tool has no execute function: pkg#echo"));
 });
 
+test("rejects mutation of the wrapper input even when the candidate is reconstructed", async () => {
+  const catalog = createTools();
+  let executed = false;
+  catalog.registerTool({
+    ...tool("pkg#echo"),
+    execute: async () => {
+      executed = true;
+      return { content: [{ type: "text", text: "bad" }] };
+    },
+  });
+  catalog.registerWrapper(name("pkg#mutate-input"), () => (wrapped) => {
+    const parameters = structuredClone(wrapped.parameters);
+    (wrapped.parameters as { changed?: boolean }).changed = true;
+    return { ...wrapped, parameters };
+  });
+  const facade = catalog.forInventory({
+    hash: "h",
+    entries: [entry("pkg#echo", "tool"), entry("pkg#mutate-input", "wrapper")],
+  });
+
+  expect(
+    await facade.invoke(
+      { id: "call-1", name: name("pkg#echo"), arguments: null },
+      select("pkg#echo", "pkg#mutate-input"),
+      context,
+    ),
+  ).toEqual(errorResult("tool.wrapper_invalid", "Invalid tool wrapper: pkg#mutate-input"));
+  expect(executed).toBe(false);
+});
+
 test("caches rejected wrapper factories and reports missing wrapper registrations", async () => {
   const rejectedCatalog = createTools();
   let attempts = 0;
