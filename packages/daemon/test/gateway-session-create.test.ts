@@ -1,6 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import type { EntryName, JsonValue, SessionId, SessionMeta } from "@pisces/core";
 import { afterEach, expect, test } from "vitest";
 import {
@@ -130,6 +130,22 @@ test("rejects a default workspace path that does not exist", async () => {
       provider: "p",
       model: "m",
     },
+  });
+
+  await expectRejected(h, {}, "session.invalid_workspace");
+});
+
+test("rejects an existing relative explicit workspace", async () => {
+  const h = await openHarness({ defaults: { provider: "p", model: "m" } });
+  const relativeWorkspace = relative(process.cwd(), await tempWorkspace());
+
+  await expectRejected(h, { workspace: relativeWorkspace }, "session.invalid_workspace");
+});
+
+test("rejects an existing relative default workspace", async () => {
+  const relativeWorkspace = relative(process.cwd(), await tempWorkspace());
+  const h = await openHarness({
+    defaults: { workspace: relativeWorkspace, provider: "p", model: "m" },
   });
 
   await expectRejected(h, {}, "session.invalid_workspace");

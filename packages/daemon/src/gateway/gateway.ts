@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import {
   type AgentLoopDriver,
   type Context,
@@ -96,6 +97,7 @@ function invalidRequest(): never {
 }
 
 async function defaultValidateWorkspace(workspace: string): Promise<boolean> {
+  if (!isAbsolute(workspace)) return false;
   try {
     const info = await stat(workspace);
     if (!info.isDirectory()) return false;
@@ -195,7 +197,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
     });
 
     const driver = createAgentLoopDriver({
-      runExclusive: (id, task) => deps.concurrency.runExclusive(id, task),
+      runExclusive: (_id, task) => deps.concurrency.runExclusive(sessionId, task),
       now,
     });
 
