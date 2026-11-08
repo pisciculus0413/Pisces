@@ -43,6 +43,11 @@ interface AttemptSignal {
   throwIfInterrupted(): void;
 }
 
+interface CancellableBody {
+  stream: ReadableStream<Uint8Array>;
+  dispose(): void;
+}
+
 function invalidConfiguration(): never {
   throw new PiscesError("config.invalid", INVALID_CONFIGURATION);
 }
@@ -210,15 +215,36 @@ async function resolveCredential(
   }
 }
 
+function validateRequestPath(path: string): void {
+  if (path.includes("#") || path.includes("\\")) invalidUrl();
+  const queryIndex = path.indexOf("?");
+  const pathname = queryIndex === -1 ? path : path.slice(0, queryIndex);
+  let current = pathname;
+  while (true) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(current);
+    } catch {
+      invalidUrl();
+    }
+    if (decoded.includes("\\")) invalidUrl();
+    for (const segment of decoded.split("/")) {
+      if (segment === "." || segment === "..") invalidUrl();
+    }
+    if (decoded === current) return;
+    current = decoded;
+  }
+}
+
 function providerUrl(baseUrl: string, path: string): string {
   if (
     typeof baseUrl !== "string" ||
     typeof path !== "string" ||
     !path.startsWith("/") ||
-    path.startsWith("//") ||
-    path.includes("\\")
+    path.startsWith("//")
   )
     invalidUrl();
+  validateRequestPath(path);
 
   let base: URL;
   try {
@@ -236,13 +262,21 @@ function providerUrl(baseUrl: string, path: string): string {
     invalidUrl();
 
   let result: URL;
+  const basePath = base.pathname.replace(/\/+$/, "");
   try {
-    const basePath = base.pathname.replace(/\/+$/, "");
     result = new URL(`${base.origin}${basePath}${path}`);
   } catch {
     invalidUrl();
   }
-  if (result.origin !== base.origin || result.username || result.password || result.hash)
+  if (
+    result.origin !== base.origin ||
+    result.username ||
+    result.password ||
+    result.hash ||
+    (basePath.length > 0 &&
+      result.pathname !== basePath &&
+      !result.pathname.startsWith(`${basePath}/`))
+  )
     invalidUrl();
   return result.toString();
 }
@@ -279,6 +313,84 @@ async function cancelResponse(response: Response): Promise<void> {
   }
 }
 
+function cancellableBody(body: ReadableStream<Uint8Array>, signal: AbortSignal): CancellableBody {
+  const reader = body.getReader();
+  let cancelled = false;
+  let released = false;
+
+  const release = () => {
+    if (released) return;
+    released = true;
+    try {
+      reader.releaseLock();
+    } catch {
+      // A pending read keeps the lock until the stream itself settles.
+    }
+  };
+
+  const cancel = async () => {
+    if (!cancelled) {
+      cancelled = true;
+      try {
+        await reader.cancel();
+      } catch {
+        // Cancellation is best-effort; interruption still remains terminal.
+      }
+    }
+    release();
+  };
+
+  const cancelOnAbort = () => {
+    void cancel();
+  };
+  if (signal.aborted) cancelOnAbort();
+  else signal.addEventListener("abort", cancelOnAbort, { once: true });
+
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          const next = await reader.read();
+          if (next.done) {
+            controller.close();
+            release();
+            return;
+          }
+          if (signal.aborted) {
+            cancelOnAbort();
+            controller.close();
+            return;
+          }
+          controller.enqueue(next.value);
+        } catch (error) {
+          if (signal.aborted) {
+            cancelOnAbort();
+            try {
+              controller.close();
+            } catch {
+              // The wrapper may already be cancelled by the interrupted consumer.
+            }
+          } else {
+            controller.error(error);
+            release();
+          }
+        }
+      },
+      async cancel() {
+        await cancel();
+      },
+    },
+    { highWaterMark: 0 },
+  );
+
+  return {
+    stream,
+    dispose() {
+      signal.removeEventListener("abort", cancelOnAbort);
+    },
+  };
+}
+
 function normalizedTransportError(error: unknown): PiscesError {
   return error instanceof PiscesError ? error : transportFailure();
 }
@@ -290,20 +402,39 @@ function isSse(response: Response): boolean {
 }
 
 async function* responseChunks(response: Response, attempt: AttemptSignal): AsyncGenerator<string> {
+  attempt.throwIfInterrupted();
   if (isSse(response)) {
     if (!response.body) invalidHttpResponse();
-    for await (const chunk of parseSseStream(response.body)) {
-      attempt.throwIfInterrupted();
-      yield chunk;
+    const body = cancellableBody(response.body, attempt.signal);
+    const iterator = parseSseStream(body.stream)[Symbol.asyncIterator]();
+    try {
+      while (true) {
+        attempt.throwIfInterrupted();
+        const next = await iterator.next();
+        attempt.throwIfInterrupted();
+        if (next.done) return;
+        yield next.value;
+      }
+    } finally {
+      await iterator.return?.(undefined);
+      body.dispose();
     }
-    attempt.throwIfInterrupted();
-    return;
   }
 
-  const body = await response.text();
-  attempt.throwIfInterrupted();
-  attempt.dispose();
-  yield body;
+  if (!response.body) {
+    attempt.dispose();
+    yield "";
+    return;
+  }
+  const body = cancellableBody(response.body, attempt.signal);
+  try {
+    const text = await new Response(body.stream).text();
+    attempt.throwIfInterrupted();
+    attempt.dispose();
+    yield text;
+  } finally {
+    body.dispose();
+  }
 }
 
 export function createProviderHost(options: ProviderHostOptions): ProviderHost {
@@ -359,14 +490,19 @@ export function createProviderHost(options: ProviderHostOptions): ProviderHost {
               attempt.throwIfInterrupted();
               throw normalizedTransportError(error);
             }
-            attempt.throwIfInterrupted();
+            if (attempt.signal.aborted) {
+              await cancelResponse(response);
+              attempt.throwIfInterrupted();
+            }
 
             if (response.status === 429 || (response.status >= 500 && response.status <= 599)) {
               await cancelResponse(response);
+              attempt.throwIfInterrupted();
               retry = attemptNumber < maxAttempts;
               if (!retry) invalidHttpResponse();
             } else if (response.status < 200 || response.status > 299) {
               await cancelResponse(response);
+              attempt.throwIfInterrupted();
               invalidHttpResponse();
             } else {
               yield* responseChunks(response, attempt);

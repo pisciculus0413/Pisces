@@ -381,19 +381,80 @@ test("distinguishes timeout from outer cancellation and redacts fetch failures",
 
 test("a fetch which ignores abort cannot yield a response after cancellation", async () => {
   const controller = new AbortController();
+  let cancelled = 0;
+  const body = new ReadableStream<Uint8Array>({
+    cancel() {
+      cancelled++;
+    },
+  });
+  let startedResolve!: () => void;
+  const started = new Promise<void>((resolve) => {
+    startedResolve = resolve;
+  });
   const host = createProviderHost(
     hostOptions({
       fetch: async (_input, init) =>
         new Promise<Response>((resolve) => {
-          init?.signal?.addEventListener("abort", () => resolve(sseResponse("late")), {
-            once: true,
-          });
+          startedResolve();
+          init?.signal?.addEventListener(
+            "abort",
+            () =>
+              resolve(
+                new Response(body, {
+                  headers: { "content-type": "text/event-stream" },
+                }),
+              ),
+            { once: true },
+          );
         }),
     }),
   );
   const pending = collect(executeFor(host, controller.signal));
+  await started;
   controller.abort("stop");
   await expect(pending).rejects.toBe("stop");
+  expect(cancelled).toBe(1);
+});
+
+test("cancellation after a yielded SSE chunk cancels a stalled response body", async () => {
+  const controller = new AbortController();
+  let cancelled = 0;
+  let pulls = 0;
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        if (pulls++ === 0) controller.enqueue(new TextEncoder().encode("data: first\n\n"));
+        else return new Promise(() => {});
+      },
+      cancel() {
+        cancelled++;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const host = createProviderHost(
+    hostOptions({
+      fetch: async () =>
+        new Response(stream, {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    }),
+  );
+  const iterator = executeFor(host, controller.signal)[Symbol.asyncIterator]();
+  expect(await iterator.next()).toEqual({ done: false, value: "first" });
+
+  const next = iterator.next();
+  controller.abort("stop");
+  const outcome = await Promise.race([
+    next.then(
+      () => "value",
+      (error) => error,
+    ),
+    new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 250)),
+  ]);
+
+  expect(outcome).toBe("stop");
+  expect(cancelled).toBe(1);
 });
 
 test("does not retry a body failure after a 2xx SSE stream has started", async () => {
@@ -551,13 +612,22 @@ test("rejects unsafe options, URLs, headers, and unknown providers safely", asyn
     code: "config.invalid",
   });
 
-  const badUrl = createProviderHost(hostOptions());
-  await expect(
-    collect(executeFor(badUrl, undefined, request({ path: "https://evil.test/steal" }))),
-  ).rejects.toMatchObject({
-    code: "provider.invalid_response",
-    message: "Provider request URL is invalid",
-  });
+  let unsafeUrlFetches = 0;
+  const badUrl = createProviderHost(
+    hostOptions({
+      fetch: async () => {
+        unsafeUrlFetches++;
+        return new Response("unexpected");
+      },
+    }),
+  );
+  for (const path of ["https://evil.test/steal", "/../chat", "/%2e%2e/chat", "/%252e%252e/chat"]) {
+    await expect(collect(executeFor(badUrl, undefined, request({ path })))).rejects.toMatchObject({
+      code: "provider.invalid_response",
+      message: "Provider request URL is invalid",
+    });
+  }
+  expect(unsafeUrlFetches).toBe(0);
 
   const badHeaders = createProviderHost(hostOptions());
   await expect(
