@@ -1321,21 +1321,37 @@ interface Transport {
 ### 5.2 `Concurrency`
 
 ```ts
+interface ActiveTurn {
+  sessionId: SessionId;
+  turnId: TurnId;
+  startedAt: string;
+}
+
+interface ConcurrencyOptions {
+  cancelAllTimeoutMs?: number; // 默认 5000ms
+}
+
 interface Concurrency {
   runExclusive<T>(sessionId: SessionId, task: () => Promise<T>): Promise<T>;
-  registerTurn(sessionId: SessionId, turnId: TurnId, startedAt: string): void;
+  registerTurn(sessionId: SessionId, turnId: TurnId, startedAt: string, cancel: () => void): void;
   unregisterTurn(sessionId: SessionId, turnId: TurnId): void;
   activeTurn(sessionId: SessionId): TurnId | undefined;
+  activeTurns(): ActiveTurn[];
+  cancelTurn(turnId: TurnId): boolean;
   cancelAll(maxWaitMs?: number): Promise<void>;
 }
 ```
 
 - 每个会话一把非重入逻辑锁；会话内队列写、配置、turn 启动、装配提交、持久化与 `seq` 自增按锁串行化。
+- 同会话嵌套获取在返回的 Promise 上以 `TypeError("Session lock is not reentrant")` 拒绝，而非同步抛出；`runExclusive` 只返回 Promise，重入失败与其他失败走同一 rejection 通道。重入校验只对当前实际仍持有的会话锁生效：已释放锁遗留的 `AsyncLocalStorage` 上下文延迟进入时不会假报重入。
+- `runExclusive` 的 task 拒绝时释放会话锁，后续排队任务保持 FIFO 顺序且不被污染。
 - `Context.assemble` 自持 A/C 会话锁，调用方不得持锁调用；`initialize`、`selectionFor` 与所有同步方法由调用方在锁内调用。锁外执行 resolve/loader/provider/tool。Context、driver、Gateway 共享同会话 `SessionEventClock`；`next()` 仅在会话锁内调用，快照取 `current()`，不独立维护计数。
 - 不同会话可并行；事件发送与请求处理不共享全局锁。
-- `activeTurn` 只记录正在运行的 turn；`turn.list` 从该集合生成快照，允许无锁快照偏差。
+- `activeTurn` 只记录正在运行的 turn；`activeTurns()` 返回按 `sessionId`、`turnId` 排序的脱离快照，`turn.list` 据此生成快照，允许无锁快照偏差。
+- `registerTurn` 每个会话只登记一个 turn，重复登记以 `turn.active` 拒绝而不替换已有 turn；登记时保存取消 handle。
+- `cancelTurn(turnId)` 对未知 turn 返回 `false`，否则至多调用一次该 turn 的取消 handle。handle 抛错被隔离，不向调用方转抛原始异常；`cancelAll` 因此仍继续取消其它 turn 并照常等待超时。
 - `runExclusive` 不跨会话持有锁；回调内不得 acquire 同一会话锁。
-- `cancelAll(maxWaitMs)` 超时后保留 `active-turn.json`，由启动恢复处理。
+- `cancelAll(maxWaitMs = 5000)` 取消全部已登记 turn 并等待其完成；超时不报错且不删除登记项（含 `active-turn.json` 标记），由启动恢复处理。
 - `Concurrency` 不持久化状态；daemon 重启后活跃 turn 集合为空。
 
 ### 5.3 `EventBus` 与 `Gateway`
@@ -1355,9 +1371,10 @@ interface EventBus {
 }
 ```
 
-- `EventBus` 同步、按发布顺序 fan-out；handler 只入队发送，不 await。
+- `EventBus.publish` 同步、在调用栈内按订阅顺序 fan-out：每个 handler 都会被尝试，某个 handler 抛错不影响后续 handler 收到事件；全部 handler 执行完后原样重新抛出第一个异常。订阅变更只影响后续发布，不修改本次发布已取的快照；handler 只入队发送，不 await。
+- daemon 的 `EventBus` 只转发事件并原样重新抛出第一个 handler 失败，不包装、不清洗、不重新解释异常。`event.publish_failed` 映射及其原始 `cause` 由 core 的 `createEventPublisher`/`deliverEvent` 与 `createContextEvents` 负责，daemon 侧不在 bus 上重新包装 raw cause。
 - Context 的事件发布适配器与 driver 的 `EventPublisher` 都在同步 handler 抛错时抛出 `event.publish_failed`，原异常保存在 `cause`。Context 的提交状态与 driver 的持久化状态已完成后才发布，因此节点、队列状态、head 推进与已分配 `seq` 保留并允许序号空洞；不重试、不回滚。
-- Context、driver、Gateway 共享同会话 `SessionEventClock { current(): number; next(): number }`；每个会话事件的 `seq` 通过会话锁内 `next()` 分配，Context 快照读取 `current()`；`client.launched` 没有会话 `seq`。Context 仅依赖 `ContextEvents.publish` 发布端，不依赖订阅接口；本轮不实施 EventBus。
+- Context、driver、Gateway 共享同会话 `SessionEventClock { current(): number; next(): number }`；每个会话事件的 `seq` 通过会话锁内 `next()` 分配，Context 快照读取 `current()`；`client.launched` 没有会话 `seq`。Context 仅依赖 `ContextEvents.publish` 发布端，不依赖订阅接口。
 - `Gateway` 把引擎事件转换为协议事件，并只发送给订阅该会话的连接。
 
 `Gateway` 把协议方法映射到 `Context`、`Sessions`、`AgentLoopDriver`、`Extensions` 与存储；本身不实现上下文组装或工具执行。
