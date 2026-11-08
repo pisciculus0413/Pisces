@@ -721,14 +721,19 @@ test("returns stop_incomplete for an active turn, retains the lock, and stops on
   // the turn without exercising the fail-closed cancellation deadline.
   await executeEntered;
 
-  await expect(host.stop()).rejects.toMatchObject({ code: "daemon.stop_incomplete" });
-  expect(host.status().state).toBe("quiescing");
-  expect((await lstat(host.socketPath)).isSocket()).toBe(true);
-  await expect((await loadHost()).startDaemon(hostOptions(dataDir))).rejects.toMatchObject({
-    code: "daemon.lock_busy",
-  });
+  try {
+    await expect(host.stop()).rejects.toMatchObject({ code: "daemon.stop_incomplete" });
+    expect(host.status().state).toBe("quiescing");
+    expect((await lstat(host.socketPath)).isSocket()).toBe(true);
+    await expect((await loadHost()).startDaemon(hostOptions(dataDir))).rejects.toMatchObject({
+      code: "daemon.lock_busy",
+    });
+  } finally {
+    // Always release the provider gate so a failed assertion cannot leave the
+    // turn (and the retained lock) live for afterEach.
+    releaseTurn();
+  }
 
-  releaseTurn();
   await waitFor(() => host.status().activeTurns === 0);
   await host.stop();
   expect(host.status()).toEqual({ state: "stopped", activeTurns: 0 });

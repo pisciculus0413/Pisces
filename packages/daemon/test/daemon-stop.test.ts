@@ -21,10 +21,12 @@ import type { GatewayResponse } from "../src/gateway/protocol.js";
 import {
   type DaemonHost,
   type DaemonHostSeams,
+  type DaemonHostTestControl,
   type StartDaemonOptions,
   startDaemonWithSeams,
 } from "../src/host/daemon-host.js";
 import { daemonLockFs } from "../src/host/lock.js";
+import { runtimePathsFs } from "../src/host/runtime-paths.js";
 import type { ProviderHost } from "../src/provider/provider-host.js";
 import { createSessionStore } from "../src/session-store/session-store.js";
 import { sessionStoreIo } from "../src/session-store/session-store-io.js";
@@ -48,6 +50,19 @@ const tempDir = async (): Promise<string> => {
 };
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Fail a test instead of hanging when a required signal never arrives. */
+const within = async <T>(promise: Promise<T>, label: string, timeoutMs = 2000): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(label)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+};
 
 const waitFor = async (condition: () => boolean, timeoutMs = 5000): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
@@ -309,9 +324,18 @@ test("cancels a turn.start queued behind the session lock before the cancel snap
   const sessionId = "s-queued" as SessionId;
   await seedPersistedSession(dataDir, sessionId);
   const driver = abortableDriver();
+  const readyGate = gate();
+  const providerHost = readyProviderHost({
+    execute: () => driver.execute,
+    async ready() {
+      readyGate.enter();
+      await readyGate.promise;
+      return true;
+    },
+  });
   const host = await openHost(
     dataDir,
-    { providerHost: readyProviderHost({ execute: () => driver.execute }) },
+    { providerHost },
     { stopDeadlines: { pendingDrainMs: 2000, cancelAllMs: 2000 } },
   );
 
@@ -333,6 +357,12 @@ test("cancels a turn.start queued behind the session lock before the cancel snap
   await client.hello();
   let stopping: Promise<void> | undefined;
   try {
+    // Keep one admitted request blocked so stop cannot reach cancelAll until the
+    // queued turn has registered *and* its provider is really iterating.
+    const blocker = client.request("provider.list");
+    blocker.catch(() => {});
+    await readyGate.entered;
+
     const configure = client.request("session.configure", { sessionId, model: "m", provider: "p" });
     configure.catch(() => {});
     await metaGate.entered;
@@ -359,15 +389,25 @@ test("cancels a turn.start queued behind the session lock before the cancel snap
     // The queued turn.register happens while stop is still draining admitted
     // requests, i.e. before cancelAll takes its snapshot.
     metaGate.open();
+    await within(driver.started, "provider did not start for the queued turn");
+    const configured = await within(configure, "queued session.configure did not settle");
+    expect(configured.error).toBeUndefined();
+    const started = await within(starting, "queued turn.start did not settle");
+    expect(started.error).toBeUndefined();
+    expect((started.result as { turnId?: TurnId }).turnId).toBeDefined();
+
+    // Only now let the drain finish, so cancellation observes a live turn.
+    readyGate.open();
     await stopping;
 
-    expect(driver.observed.every((aborted) => aborted)).toBe(true);
+    expect(driver.observed).toEqual([true]);
     expect(host.status()).toEqual({ state: "stopped", activeTurns: 0 });
     expect(await createActiveTurnStore({ dataDir }).read(sessionId)).toBeUndefined();
     await expect(lstat(host.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
     const restarted = await openHost(dataDir);
     await restarted.stop();
   } finally {
+    readyGate.open();
     metaGate.open();
     sessionStoreIo.writeSynced = realWriteSynced;
     await stopping?.catch(() => {});
@@ -436,53 +476,116 @@ test("retains marker, lock and socket after cleanup_failed and never reports sto
   await seedPersistedSession(dataDir, sessionId);
   const driver = abortableDriver();
   const markers = createActiveTurnStore({ dataDir });
+  let control: DaemonHostTestControl | undefined;
+  let host: DaemonHost | undefined;
 
   const realUnlink = sessionStoreIo.unlink;
-  sessionStoreIo.unlink = (async (path: unknown) => {
-    if (String(path).endsWith("active-turn.json")) {
-      throw Object.assign(new Error("unlink failed"), { code: "EACCES" });
-    }
-    return (realUnlink as (value: unknown) => Promise<void>)(path);
-  }) as typeof sessionStoreIo.unlink;
-
-  const host = await openHost(
-    dataDir,
-    { providerHost: readyProviderHost({ execute: () => driver.execute }) },
-    { stopDeadlines: { pendingDrainMs: 200, cancelAllMs: 200 } },
-  );
-  const client = await Client.connect(host.socketPath);
-  await client.hello();
-  await ok(client, "session.subscribe", { sessionId });
-  const started = (await ok(client, "turn.start", { sessionId })) as { turnId: TurnId };
-  await waitFor(() => host.status().activeTurns === 1);
-  await driver.started;
-  const inode = (await lstat(host.socketPath)).ino;
-
   try {
-    await expect(host.stop()).rejects.toMatchObject({ code: "daemon.stop_incomplete" });
+    sessionStoreIo.unlink = (async (path: unknown) => {
+      if (String(path).endsWith("active-turn.json")) {
+        throw Object.assign(new Error("unlink failed"), { code: "EACCES" });
+      }
+      return (realUnlink as (value: unknown) => Promise<void>)(path);
+    }) as typeof sessionStoreIo.unlink;
+
+    host = await openHost(
+      dataDir,
+      { providerHost: readyProviderHost({ execute: () => driver.execute }) },
+      {
+        stopDeadlines: { pendingDrainMs: 200, cancelAllMs: 200 },
+        onTestControl: (value) => {
+          control = value;
+        },
+      },
+    );
+    const activeHost = host;
+    const client = await Client.connect(activeHost.socketPath);
+    await client.hello();
+    await ok(client, "session.subscribe", { sessionId });
+    const started = (await ok(client, "turn.start", { sessionId })) as { turnId: TurnId };
+    await waitFor(() => activeHost.status().activeTurns === 1);
+    await driver.started;
+    const inode = (await lstat(activeHost.socketPath)).ino;
+
+    await expect(activeHost.stop()).rejects.toMatchObject({ code: "daemon.stop_incomplete" });
     // The turn was cancelled but its marker cleanup failed, so it stays registered.
     expect(driver.observed).toEqual([true]);
     // The Gateway is still attached during an incomplete stop: its cleanup event
     // is published to the subscribed client instead of being disposed away.
     await waitFor(() => client.events().includes("turn.cleanup_failed"));
-    expect(host.status()).toEqual({ state: "quiescing", activeTurns: 1 });
+    expect(activeHost.status()).toEqual({ state: "quiescing", activeTurns: 1 });
     expect(await markers.read(sessionId)).toMatchObject({ turnId: started.turnId });
-    expect((await lstat(host.socketPath)).ino).toBe(inode);
+    expect((await lstat(activeHost.socketPath)).ino).toBe(inode);
     await expectLockHeld(dataDir);
 
     // Retry must not silently turn the retained state into a stopped daemon.
-    await expect(host.stop()).rejects.toMatchObject({ code: "daemon.stop_incomplete" });
-    expect(host.status().state).toBe("quiescing");
+    await expect(activeHost.stop()).rejects.toMatchObject({ code: "daemon.stop_incomplete" });
+    expect(activeHost.status().state).toBe("quiescing");
     expect(await markers.read(sessionId)).toMatchObject({ turnId: started.turnId });
   } finally {
-    // This state is intentionally unrecoverable in-process: the gateway keeps the
-    // cleanup_failed turn registered so the next process can recover its marker.
     sessionStoreIo.unlink = realUnlink;
     driver.release();
-    await waitFor(() => host.status().activeTurns === 0, 300).catch(() => {});
-    await host.stop().catch(() => {});
+    // Only after the assertions: recover the intentionally retained turn through
+    // the internal test seam, then run a normal stop so no lock/socket leaks.
+    await control?.releaseRetainedTurns();
+    await host?.stop();
   }
+
+  const stopped = host;
+  if (stopped === undefined) throw new Error("host was not created");
+  // The retained host was reclaimed through a normal stop, not left holding the
+  // lock/socket while afterEach removes its directory.
+  expect(stopped.status()).toEqual({ state: "stopped", activeTurns: 0 });
+  expect(await markers.read(sessionId)).toBeUndefined();
 }, 15000);
+
+test("retains Gateway and lock when inode-checked socket unlink fails, then stops on retry", async () => {
+  const dataDir = await tempDir();
+  let control: DaemonHostTestControl | undefined;
+  const host = await openHost(
+    dataDir,
+    {},
+    {
+      onTestControl: (value) => {
+        control = value;
+      },
+    },
+  );
+  const client = await Client.connect(host.socketPath);
+  await client.hello();
+
+  const realUnlink = runtimePathsFs.unlink;
+  let injectFailure = true;
+  runtimePathsFs.unlink = async (path) => {
+    if (injectFailure && String(path).includes(".stale-")) {
+      throw Object.assign(new Error("unlink failed"), { code: "EACCES" });
+    }
+    return realUnlink(path);
+  };
+
+  try {
+    await expect(host.stop()).rejects.toMatchObject({ code: "daemon.stop_incomplete" });
+    expect(host.status()).toEqual({ state: "quiescing", activeTurns: 0 });
+    // The listener closed but its quarantined inode could not be removed, so the
+    // daemon must keep the Gateway handler for the retry instead of disposing it.
+    expect(control?.gatewayDisposes()).toBe(0);
+    await expectLockHeld(dataDir);
+    await expect(lstat(host.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+    injectFailure = false;
+    await host.stop();
+    expect(control?.gatewayDisposes()).toBe(1);
+    expect(host.status()).toEqual({ state: "stopped", activeTurns: 0 });
+    await expect(lstat(host.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+    const restarted = await openHost(dataDir);
+    await restarted.stop();
+  } finally {
+    runtimePathsFs.unlink = realUnlink;
+    injectFailure = false;
+    // If an assertion failed, still release owned resources through a normal retry.
+    await host.stop();
+  }
+});
 
 test("removes the active-turn marker before releasing the lock", async () => {
   const dataDir = await tempDir();
