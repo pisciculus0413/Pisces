@@ -109,3 +109,11 @@ export interface ProviderListResult {
 export interface TurnListResult {
   turns: ActiveTurn[];
 }
+
+export interface SessionSubscribeParams {
+  sessionId: SessionId;
+}
+
+export interface SessionSubscribeResult {
+  sessionId: SessionId;
+}

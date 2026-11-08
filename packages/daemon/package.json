@@ -15,7 +15,8 @@
     "clean": "tsc -b tsconfig.build.json --clean"
   },
   "dependencies": {
-    "@pisces/core": "workspace:*"
+    "@pisces/core": "workspace:*",
+    "@pisces/protocol": "workspace:*"
   },
   "devDependencies": {
     "node-gyp": "12.4.0"

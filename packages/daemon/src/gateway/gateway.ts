@@ -31,6 +31,7 @@ import {
   type Tools,
   type TurnId,
 } from "@pisces/core";
+import type { ProtocolEvent } from "@pisces/protocol";
 import type { ProviderHost } from "../provider/provider-host.js";
 import type { Concurrency } from "../runtime/concurrency.js";
 import { createSessionEventClock } from "../runtime/event-clock.js";
@@ -70,7 +71,15 @@ export interface GatewayDeps {
 }
 
 export interface Gateway {
-  handle(request: GatewayRequest): Promise<GatewayResponse>;
+  handle(request: GatewayRequest, connectionId?: string): Promise<GatewayResponse>;
+  attach(connectionId: string, enqueue: (event: ProtocolEvent) => void): void;
+  detach(connectionId: string): void;
+  dispose(): void;
+}
+
+interface Connection {
+  enqueue: (event: ProtocolEvent) => void;
+  subscriptions: Set<SessionId>;
 }
 
 interface PendingMarker {
@@ -100,6 +109,33 @@ const EMPTY_SOURCES: ContextSourceRegistry = { get: () => undefined };
 const ENTRY_NAME = /^[^#\s]+#[^#\s]+$/u;
 const SESSION_ID = /^[A-Za-z0-9_-]+$/;
 const ENCODER = new TextEncoder();
+const SESSION_EVENT_TYPES = new Set([
+  "session.updated",
+  "queue.updated",
+  "selection.updated",
+  "turn.started",
+  "turn.delta",
+  "turn.step",
+  "turn.ended",
+  "turn.cleanup_failed",
+]);
+
+function projectSessionEvent(event: EngineEvent): ProtocolEvent | undefined {
+  if (!SESSION_EVENT_TYPES.has(event.type)) return undefined;
+  if (event.sessionId === undefined || typeof event.seq !== "number") return undefined;
+  if (typeof event.at !== "string") return undefined;
+  if (event.data === null || typeof event.data !== "object" || Array.isArray(event.data))
+    return undefined;
+  return {
+    event: event.type,
+    data: {
+      sessionId: event.sessionId,
+      seq: event.seq,
+      at: event.at,
+      ...(event.data as { [key: string]: JsonValue }),
+    },
+  };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -159,6 +195,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
   const newTurnId = deps.newTurnId ?? (() => randomUUID() as TurnId);
   const baseSessions = createSessions({ repository: deps.store, newId: newNodeId, now });
   const runtimes = new Map<SessionId, SessionRuntime>();
+  const connections = new Map<string, Connection>();
 
   function createRuntime(meta: SessionMeta, persisted: boolean): SessionRuntime {
     const sessionId = meta.id;
@@ -351,7 +388,9 @@ export function createGateway(deps: GatewayDeps): Gateway {
     }
   }
 
-  const handlers: Record<string, (params: Record<string, unknown>) => Promise<unknown>> = {
+  type Route = (params: Record<string, unknown>, connection?: Connection) => Promise<unknown>;
+
+  const handlers: Record<string, Route> = {
     async "provider.list"(): Promise<ProviderListResult> {
       const providers: ProviderInfo[] = [];
       for (const descriptor of deps.providers.list()) {
@@ -695,21 +734,84 @@ export function createGateway(deps: GatewayDeps): Gateway {
     },
   };
 
+  const connectionHandlers: Record<string, Route> = {
+    async "session.subscribe"(params, connection) {
+      if (connection === undefined)
+        throw new PiscesError("internal.error", "Connection is not attached");
+      const sessionId = params.sessionId;
+      if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) invalidRequest();
+      const id = sessionId as SessionId;
+      return deps.concurrency.runExclusive(id, async () => {
+        await runtimeFor(id);
+        // Installed under the session lock so events cannot be published between validation
+        // and subscription.
+        connection.subscriptions.add(id);
+        return { sessionId: id };
+      });
+    },
+
+    async "session.unsubscribe"(params, connection) {
+      if (connection === undefined)
+        throw new PiscesError("internal.error", "Connection is not attached");
+      const sessionId = params.sessionId;
+      if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) invalidRequest();
+      const id = sessionId as SessionId;
+      connection.subscriptions.delete(id);
+      return { sessionId: id };
+    },
+  };
+
   // Installed once per Gateway. `turn.ended` moves the runtime to cleanup without unregistering;
   // marker deletion and unregistration stay in `launch`.
   const handler = (event: EngineEvent): void => {
-    if (event.type !== "turn.ended" || event.sessionId === undefined) return;
-    const runtime = runtimes.get(event.sessionId);
-    if (runtime === undefined) return;
-    const turnId = isRecord(event.data) ? event.data.turnId : undefined;
-    if (typeof turnId !== "string") return;
-    if (deps.concurrency.activeTurn(event.sessionId) !== turnId) return;
-    runtime.phase = "cleanup";
+    if (event.type === "turn.ended" && event.sessionId !== undefined) {
+      const runtime = runtimes.get(event.sessionId);
+      if (runtime !== undefined) {
+        const turnId = isRecord(event.data) ? event.data.turnId : undefined;
+        if (typeof turnId === "string" && deps.concurrency.activeTurn(event.sessionId) === turnId) {
+          runtime.phase = "cleanup";
+        }
+      }
+    }
+
+    if (event.sessionId === undefined || !SESSION_EVENT_TYPES.has(event.type)) return;
+    const targets: [string, Connection][] = [];
+    for (const entry of connections) {
+      if (entry[1].subscriptions.has(event.sessionId)) targets.push(entry);
+    }
+    if (targets.length === 0) return;
+    let projected: ProtocolEvent | undefined;
+    try {
+      projected = projectSessionEvent(event);
+    } catch {
+      return;
+    }
+    if (projected === undefined) return;
+    for (const [connectionId, connection] of targets) {
+      try {
+        connection.enqueue(projected);
+      } catch {
+        connections.delete(connectionId);
+      }
+    }
   };
-  deps.events.subscribe(handler);
+  const unsubscribe = deps.events.subscribe(handler);
 
   return {
-    async handle(request) {
+    attach(connectionId, enqueue) {
+      connections.set(connectionId, { enqueue, subscriptions: new Set() });
+    },
+
+    detach(connectionId) {
+      connections.delete(connectionId);
+    },
+
+    dispose() {
+      unsubscribe();
+      connections.clear();
+    },
+
+    async handle(request, connectionId) {
       if (!isRecord(request.params))
         return {
           id: request.id,
@@ -717,15 +819,22 @@ export function createGateway(deps: GatewayDeps): Gateway {
         };
 
       // Own properties only: inherited names such as "constructor" or "toString" must not route.
-      const route = Object.hasOwn(handlers, request.method) ? handlers[request.method] : undefined;
-      if (!route)
+      const connection = connectionId === undefined ? undefined : connections.get(connectionId);
+      let route: Route | undefined;
+      if (connection !== undefined && Object.hasOwn(connectionHandlers, request.method))
+        route = connectionHandlers[request.method];
+      else if (Object.hasOwn(handlers, request.method)) route = handlers[request.method];
+      if (route === undefined)
         return {
           id: request.id,
           error: { code: "protocol.unknown_method", message: "Unknown protocol method" },
         };
 
       try {
-        return { id: request.id, result: (await route(request.params)) as JsonValue };
+        return {
+          id: request.id,
+          result: (await route(request.params, connection)) as JsonValue,
+        };
       } catch (error) {
         if (error instanceof PiscesError)
           return { id: request.id, error: { code: error.code, message: error.message } };

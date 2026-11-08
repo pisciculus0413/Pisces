@@ -186,6 +186,9 @@ importers:
       '@pisces/core':
         specifier: workspace:*
         version: link:../core
+      '@pisces/protocol':
+        specifier: workspace:*
+        version: link:../protocol
     devDependencies:
       node-gyp:
         specifier: 12.4.0

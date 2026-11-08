@@ -635,6 +635,25 @@ test("fails the turn before any request when the temporary marker cannot be writ
   await waitForEmpty(h);
 });
 
+test("fails a persisted turn before any request when its marker cannot be written", async () => {
+  const dataDir = await tempDir();
+  const h = await createGatewayHarness({
+    dataDir,
+    markerStore: failingMarkerStore(createActiveTurnStore({ dataDir })),
+  });
+  open.push(h);
+  const { meta } = await h.seed([draftUser("hello")]);
+
+  const started = await turnStart(h, meta.id);
+  expect(started.error).toEqual({ code: "storage.io", message: expect.any(String) });
+  expect(h.executed).toEqual([]);
+  expect(h.events().filter((event) => event.type === "turn.started")).toEqual([]);
+  expect((await turnList(h)).turns).toEqual([]);
+  expect(await h.markers.read(meta.id)).toBeUndefined();
+  const records = await collect(h.store.readBranch(meta.id));
+  expect(records.map((node) => node.role)).toEqual(["user"]);
+});
+
 test("keeps the turn listed and blocks new starts while marker cleanup is pending", async () => {
   const dataDir = await tempDir();
   const blocker = blockingRemoveMarkerStore(createActiveTurnStore({ dataDir }));

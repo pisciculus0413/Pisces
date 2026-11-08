@@ -3,6 +3,8 @@
  *
  * 见 docs/0-module.md。
  */
+
+export type { ProtocolEvent } from "@pisces/protocol";
 export {
   type ActiveTurnMarker,
   type ActiveTurnStore,
