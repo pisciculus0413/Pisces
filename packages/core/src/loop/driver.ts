@@ -2,6 +2,7 @@ import { createEventPublisher, type EngineEventPublisher } from "../events.js";
 import type { ContentBlock, StopReason, Usage } from "../messages.js";
 import type { SessionNodeDraft } from "../sessions/types.js";
 import { PiscesError } from "../types.js";
+import { limitDriverContent } from "./content.js";
 import type {
   AgentLoopDriver,
   AgentLoopDriverOptions,
@@ -81,7 +82,21 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     drafts: SessionNodeDraft[],
   ) {
     return options.runExclusive(input.sessionId, async () => {
-      const nodes = await input.sessions.append(input.sessionId, drafts, parentId);
+      const nodes = await input.sessions.append(input.sessionId, drafts, parentId, {
+        validate(nodes) {
+          try {
+            events.validateSessionNodes(nodes);
+          } catch (error) {
+            if (error instanceof PiscesError && error.code === "context.source_failed")
+              throw new PiscesError(
+                "provider.invalid_response",
+                "Provider output exceeds node event budget",
+                { cause: error },
+              );
+            throw error;
+          }
+        },
+      });
       events.publishSession(nodes);
       return nodes;
     });
@@ -158,7 +173,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
               kind: "agent",
               role: "assistant",
               source: "assistant",
-              content: blocks,
+              content: limitDriverContent(blocks),
             },
           ]);
           if (!assistant.length)
@@ -188,7 +203,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
                   {
                     type: "toolResult",
                     toolCallId: block.id,
-                    content: structuredClone(result.content),
+                    content: limitDriverContent(result.content),
                     ...(result.isError === undefined ? {} : { isError: result.isError }),
                     ...(result.code === undefined ? {} : { code: result.code }),
                   },

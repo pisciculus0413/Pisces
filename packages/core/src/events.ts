@@ -195,6 +195,7 @@ export function createEventPublisher(
     kind: "text" | "reasoning",
     delta: string,
   ): void {
+    if (!delta.length) return;
     const points = Array.from(delta);
     let offset = 0;
     do {
