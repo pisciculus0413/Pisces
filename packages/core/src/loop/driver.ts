@@ -110,13 +110,15 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     });
   }
 
-  async function end(
+  async function endAtomic(
     input: RunTurnInput,
     events: EngineEventPublisher,
     reason: TurnResult["reason"],
-    error?: { code: string; message: string },
+    error: { code: string; message: string } | undefined,
+    unconfirm: boolean,
   ): Promise<TurnResult> {
     await options.runExclusive(input.sessionId, async () => {
+      if (unconfirm) input.context.unconfirm();
       if (active) active.state = "ended";
       events.publishTurn("turn.ended", {
         turnId: input.turnId,
@@ -137,6 +139,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     input: RunTurnInput,
     events: EngineEventPublisher,
     cause: unknown,
+    unconfirm = false,
   ): Promise<TurnResult> {
     const error = failure(cause);
     if (active?.state === "ended")
@@ -147,7 +150,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
         error,
       };
     try {
-      return await end(input, events, "failed", error);
+      return await endAtomic(input, events, "failed", error, unconfirm);
     } catch (terminationError) {
       return {
         sessionId: input.sessionId,
@@ -207,12 +210,6 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     });
   }
 
-  async function clearConfirmations(input: RunTurnInput) {
-    await options.runExclusive(input.sessionId, async () => {
-      input.context.unconfirm();
-    });
-  }
-
   async function finishCancelled(
     input: RunTurnInput,
     events: EngineEventPublisher,
@@ -238,7 +235,6 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
         },
       );
     }
-    await clearConfirmations(input);
     if (progress.headId) {
       await append(
         input,
@@ -270,9 +266,13 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
       await publishStep(input, events, progress.step, "cancelled", progress.usage);
       progress.stepPublished = true;
     }
-    return terminalError
-      ? finalizeFailure(input, events, terminalError)
-      : end(input, events, "cancelled");
+    return endAtomic(
+      input,
+      events,
+      terminalError ? "failed" : "cancelled",
+      terminalError ? failure(terminalError) : undefined,
+      true,
+    );
   }
 
   async function completeIfIdle(
@@ -540,7 +540,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
           try {
             return await finishCancelled(input, events, progress, terminalError);
           } catch (finalizationError) {
-            return await finalizeFailure(input, events, finalizationError);
+            return await finalizeFailure(input, events, finalizationError, true);
           }
         }
         return await finalizeFailure(input, events, error);

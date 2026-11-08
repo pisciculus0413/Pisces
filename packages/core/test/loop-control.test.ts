@@ -224,6 +224,42 @@ test("cancels a stream, persists partial content, and resets confirmations", asy
   await expect(h.driver.cancel("missing" as TurnId)).resolves.toBe(false);
 });
 
+test("unconfirms a steer confirmed before cancelled-turn finalization", async () => {
+  const h = createLoopHarness();
+  await h.enqueueAndConfirm([user("hello")]);
+  const entered = gate();
+  const resume = gate();
+  const adapter: LlmAdapter = {
+    dialect: "fake",
+    buildRequest: (request) => ({ path: "/chat", body: JSON.stringify(request) }),
+    parseChunk: (chunk) => JSON.parse(chunk) as LlmEvent[],
+  };
+  const execute: ExecuteProvider = async function* (_request, signal) {
+    yield JSON.stringify([{ type: "content", delta: "partial" }]);
+    entered.resolve();
+    await resume.promise;
+    signal?.throwIfAborted();
+  };
+  const barrier = h.holdAfterStep(1);
+  const pending = run(h, adapter, execute);
+  await entered.promise;
+  await h.driver.cancel("t1" as TurnId);
+  resume.resolve();
+  await barrier.reached;
+
+  await h.enqueueAndConfirm([user("late steer")]);
+  barrier.release();
+  expect((await pending).reason).toBe("cancelled");
+
+  const queue = await h.runExclusive(async () => h.context.snapshot().queue);
+  expect(queue).toHaveLength(1);
+  expect(queue[0]?.confirmedAt).toBeUndefined();
+  expect(h.published.at(-1)).toMatchObject({
+    type: "turn.ended",
+    data: { turnId: "t1", reason: "cancelled" },
+  });
+});
+
 test("keeps parsed calls on cancellation before tool execution", async () => {
   const entered = gate();
   const resume = gate();
