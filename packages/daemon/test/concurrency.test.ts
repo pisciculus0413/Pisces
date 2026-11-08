@@ -229,3 +229,64 @@ test("defaults to the injected cancelAllTimeoutMs", async () => {
   }
   expect(concurrency.activeTurns()).toEqual([{ sessionId: S1, turnId, startedAt: NOW }]);
 });
+
+test("isolates a throwing cancel handle and still cancels and waits for the others", async () => {
+  const concurrency = createConcurrency();
+  const attempts: string[] = [];
+  const t1 = "t1" as TurnId;
+  const t2 = "t2" as TurnId;
+  concurrency.registerTurn(S1, t1, NOW, () => {
+    attempts.push("t1");
+    throw new Error("cancel boom");
+  });
+  concurrency.registerTurn(S2, t2, NOW, () => {
+    attempts.push("t2");
+    concurrency.unregisterTurn(S2, t2);
+  });
+  await expect(concurrency.cancelAll(25)).resolves.toBeUndefined();
+  expect(attempts).toEqual(["t1", "t2"]);
+  expect(concurrency.activeTurns()).toEqual([{ sessionId: S1, turnId: t1, startedAt: NOW }]);
+});
+
+test("cancelTurn does not throw when the cancel handle throws", () => {
+  const concurrency = createConcurrency();
+  const turnId = "t1" as TurnId;
+  let calls = 0;
+  concurrency.registerTurn(S1, turnId, NOW, () => {
+    calls++;
+    throw new Error("cancel boom");
+  });
+  expect(() => concurrency.cancelTurn(turnId)).not.toThrow();
+  expect(concurrency.cancelTurn(turnId)).toBe(true);
+  expect(calls).toBe(1);
+  expect(concurrency.activeTurn(S1)).toBe(turnId);
+});
+
+test("does not treat a released session as reentrant from a stale context", async () => {
+  const concurrency = createConcurrency();
+  let releaseGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let delayed: Promise<string> | undefined;
+  const first = concurrency.runExclusive(S1, async () => {
+    entered();
+    await gate;
+    delayed = new Promise<string>((resolve, reject) => {
+      setTimeout(() => {
+        concurrency
+          .runExclusive(S2, async () => concurrency.runExclusive(S1, async () => "late"))
+          .then(resolve, reject);
+      }, 0);
+    });
+  });
+  await started;
+  releaseGate();
+  await first;
+  if (delayed === undefined) throw new Error("delayed task was not scheduled");
+  await expect(delayed).resolves.toBe("late");
+});

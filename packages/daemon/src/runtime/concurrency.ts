@@ -31,15 +31,18 @@ interface TurnEntry {
 
 export function createConcurrency(options: ConcurrencyOptions = {}): Concurrency {
   const tails = new Map<SessionId, Promise<void>>();
-  const held = new AsyncLocalStorage<ReadonlySet<SessionId>>();
+  const held = new AsyncLocalStorage<ReadonlyMap<SessionId, symbol>>();
+  const holders = new Map<SessionId, symbol>();
   const turns = new Map<TurnId, TurnEntry>();
 
   function runExclusive<T>(sessionId: SessionId, task: () => Promise<T>): Promise<T> {
-    if (held.getStore()?.has(sessionId) === true) {
+    const inherited = held.getStore()?.get(sessionId);
+    if (inherited !== undefined && holders.get(sessionId) === inherited) {
       return Promise.reject(new TypeError("Session lock is not reentrant"));
     }
 
     const previous = tails.get(sessionId) ?? Promise.resolve();
+    const token = Symbol(sessionId);
     let release!: () => void;
     const tail = new Promise<void>((resolve) => {
       release = resolve;
@@ -48,12 +51,14 @@ export function createConcurrency(options: ConcurrencyOptions = {}): Concurrency
     tails.set(sessionId, chained);
 
     const run = previous.then(() => {
-      const next = new Set(held.getStore());
-      next.add(sessionId);
+      const next = new Map<SessionId, symbol>(held.getStore());
+      next.set(sessionId, token);
+      holders.set(sessionId, token);
       return held.run(next, task);
     });
 
     return run.finally(() => {
+      if (holders.get(sessionId) === token) holders.delete(sessionId);
       release();
       if (tails.get(sessionId) === chained) tails.delete(sessionId);
     });
@@ -112,7 +117,12 @@ export function createConcurrency(options: ConcurrencyOptions = {}): Concurrency
   function cancelEntry(entry: TurnEntry): Promise<void> {
     if (!entry.cancelled) {
       entry.cancelled = true;
-      entry.cancel();
+      try {
+        entry.cancel();
+      } catch {
+        // A failing cancel handle is isolated: remaining turns are still cancelled and the
+        // raw failure is not rethrown. The entry stays registered until unregisterTurn.
+      }
     }
     return entry.done;
   }
