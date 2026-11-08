@@ -18,6 +18,14 @@ export interface DaemonLock {
 const lockFailed = (): PiscesError =>
   new PiscesError("daemon.lock_failed", "lock file could not be acquired");
 
+/**
+ * Narrow test seam for the release path; it never bypasses lock acquisition or
+ * ownership checks. Production always closes the real handle.
+ */
+export const daemonLockFs: { close(handle: FileHandle): Promise<void> } = {
+  close: (handle) => handle.close(),
+};
+
 export async function acquireDaemonLock(lockPath: string): Promise<DaemonLock> {
   let handle: FileHandle;
   try {
@@ -49,8 +57,10 @@ export async function acquireDaemonLock(lockPath: string): Promise<DaemonLock> {
   return {
     async release(): Promise<void> {
       if (released) return;
+      // Mark released only after the descriptor is closed: a failed close keeps
+      // ownership observable so the caller can retry instead of assuming it is free.
+      await daemonLockFs.close(handle);
       released = true;
-      await handle.close();
     },
   };
 }

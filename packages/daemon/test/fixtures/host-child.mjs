@@ -5,10 +5,11 @@ import { createProviderManagement } from "@pisces/core";
  * Child-process fixture for real daemon startup.
  *
  * Runs only compiled `dist/*.js` (and the ignored native addon next to it), never
- * the Vitest TypeScript aliases. Usage: node host-child.mjs <entry.js> <dataDir>
+ * the Vitest TypeScript aliases.
+ * Usage: node host-child.mjs <entry.js> <dataDir> [ready|blocking]
  */
 
-const [entryPath, dataDir] = process.argv.slice(2);
+const [entryPath, dataDir, mode = "ready"] = process.argv.slice(2);
 
 const emit = (value) => {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -40,6 +41,15 @@ async function main() {
   providers.registerDialect("test", () => adapter);
   const providerHost = {
     execute() {
+      if (mode === "blocking") {
+        // Keeps a committed active-turn marker on disk until the process is killed.
+        return async function* (_request, signal) {
+          await new Promise((resolve) => {
+            if (signal?.aborted) resolve();
+            else signal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+        };
+      }
       return async function* () {
         yield "frame";
       };
@@ -55,7 +65,12 @@ async function main() {
     providerHost,
     defaults: { provider: "p", model: "m", workspace: dataDir },
   });
-  emit({ event: "ready", socketPath: host.socketPath });
+  emit({
+    event: "ready",
+    socketPath: host.socketPath,
+    initializationIssues: host.initializationIssues.length,
+    recoveryIssues: host.recoveryIssues.length,
+  });
 
   let stopping = false;
   const shutdown = () => {

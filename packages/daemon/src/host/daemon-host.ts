@@ -78,6 +78,15 @@ export interface DaemonHost {
   stop(): Promise<void>;
 }
 
+/**
+ * Internal seams for host-ordering tests. Deliberately not re-exported from the
+ * package index: public `startDaemon` always runs the real native self-probe
+ * and never exposes an authentication bypass.
+ */
+export interface DaemonHostSeams {
+  probePeerCredentials?: (runDir: string) => Promise<void>;
+}
+
 const startFailed = (): PiscesError =>
   new PiscesError("daemon.start_failed", "daemon could not start");
 
@@ -108,7 +117,17 @@ const drainWithin = async (waits: Promise<void>[], timeoutMs: number): Promise<b
   }
 };
 
-export async function startDaemon(options: StartDaemonOptions): Promise<DaemonHost> {
+export function startDaemon(options: StartDaemonOptions): Promise<DaemonHost> {
+  return startDaemonWithSeams(options, {});
+}
+
+// Module-internal entry point (not exported from the package index) used only to
+// verify startup ordering with a rejecting probe.
+export async function startDaemonWithSeams(
+  options: StartDaemonOptions,
+  seams: DaemonHostSeams,
+): Promise<DaemonHost> {
+  const probe = seams.probePeerCredentials ?? probePeerCredentials;
   // Platform and process identity are checked before the deferred native import runs.
   assertLinuxPlatform();
   assertUnambiguousProcessIdentity(process.getuid?.(), process.geteuid?.());
@@ -135,7 +154,7 @@ export async function startDaemon(options: StartDaemonOptions): Promise<DaemonHo
   let stopPromise: Promise<void> | undefined;
 
   try {
-    await probePeerCredentials(paths.runDir);
+    await probe(paths.runDir);
     await clearStaleSocket(paths.socketPath);
 
     const store = createSessionStore({ dataDir: options.dataDir });

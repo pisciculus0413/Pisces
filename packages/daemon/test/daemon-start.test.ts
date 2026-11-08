@@ -12,6 +12,7 @@ import {
   type EntryName,
   type LlmAdapter,
   type NodeId,
+  PiscesError,
   type ProviderManagement,
   type SessionId,
   type SessionMeta,
@@ -23,7 +24,7 @@ import { afterEach, expect, test } from "vitest";
 import { createActiveTurnStore } from "../src/gateway/active-turn.js";
 import type { GatewayResponse } from "../src/gateway/protocol.js";
 import type { DaemonHost, StartDaemonOptions } from "../src/host/daemon-host.js";
-import { acquireDaemonLock, type DaemonLock } from "../src/host/lock.js";
+import { acquireDaemonLock, type DaemonLock, daemonLockFs } from "../src/host/lock.js";
 import { prepareRuntimePaths } from "../src/host/runtime-paths.js";
 import type { ProviderHost } from "../src/provider/provider-host.js";
 import { createSessionStore } from "../src/session-store/session-store.js";
@@ -149,6 +150,23 @@ const waitFor = async (condition: () => boolean, timeoutMs = 5000): Promise<void
   }
 };
 
+const waitExit = (child: ChildProcess, timeoutMs = 5000): Promise<number | null> =>
+  new Promise((resolve, reject) => {
+    if (child.exitCode !== null) {
+      resolve(child.exitCode);
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.removeListener("exit", done);
+      reject(new Error("child did not exit"));
+    }, timeoutMs);
+    const done = (code: number | null): void => {
+      clearTimeout(timer);
+      resolve(code);
+    };
+    child.once("exit", done);
+  });
+
 const adapter: LlmAdapter = {
   dialect: "test",
   buildRequest(request) {
@@ -222,6 +240,28 @@ const draftAssistantCall = (callId: string): SessionNodeDraft => ({
   content: [{ type: "toolCall", id: callId, name: "pkg#tool" as EntryName, arguments: {} }],
 });
 
+function sessionMeta(dataDir: string, sessionId: SessionId): SessionMeta {
+  return {
+    id: sessionId,
+    model: "m",
+    provider: "p",
+    workspace: dataDir,
+    createdAt: NOW,
+    schemaVersion: 1,
+  };
+}
+
+async function seedPersistedSession(dataDir: string, sessionId: SessionId): Promise<void> {
+  const store = createSessionStore({ dataDir });
+  await store.initialize();
+  const sessions = createSessions({
+    repository: store,
+    newId: () => "root-node" as NodeId,
+    now: () => NOW,
+  });
+  await sessions.create(sessionMeta(dataDir, sessionId), [draftUser("root")]);
+}
+
 async function seedCommittedTurn(dataDir: string, sessionId: SessionId): Promise<void> {
   const store = createSessionStore({ dataDir });
   await store.initialize();
@@ -231,15 +271,7 @@ async function seedCommittedTurn(dataDir: string, sessionId: SessionId): Promise
     newId: () => `seed-${++generated}` as NodeId,
     now: () => NOW,
   });
-  const meta: SessionMeta = {
-    id: sessionId,
-    model: "m",
-    provider: "p",
-    workspace: dataDir,
-    createdAt: NOW,
-    schemaVersion: 1,
-  };
-  const [root] = await sessions.create(meta, [draftUser("root")]);
+  const [root] = await sessions.create(sessionMeta(dataDir, sessionId), [draftUser("root")]);
   if (root === undefined) throw new Error("missing committed root");
   const startOffset = await store.commitOffset(sessionId);
   await sessions.append(sessionId, [draftAssistantCall("call_1")], root.id);
@@ -257,8 +289,12 @@ interface ChildSession {
   stop(): Promise<number | null>;
 }
 
-function spawnHostChild(modulePath: string, dataDir: string): ChildSession {
-  const child = spawn(process.execPath, [FIXTURE, modulePath, dataDir], {
+function spawnHostChild(
+  modulePath: string,
+  dataDir: string,
+  mode: "ready" | "blocking" = "ready",
+): ChildSession {
+  const child = spawn(process.execPath, [FIXTURE, modulePath, dataDir, mode], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   children.push(child);
@@ -376,6 +412,47 @@ test("binds only after crash recovery completes, then serves the recovered sessi
   ]);
 });
 
+test("recovers a marker committed by a SIGKILLed child before serving the restarted process", async () => {
+  const dataDir = await tempDir();
+  const sessionId = "s-child-crash" as SessionId;
+  await seedPersistedSession(dataDir, sessionId);
+
+  const crashed = spawnHostChild(DIST_ENTRY, dataDir, "blocking");
+  const firstReady = await crashed.next();
+  expect(firstReady).toMatchObject({ event: "ready", recoveryIssues: 0 });
+  const firstClient = await Client.connect(firstReady.socketPath as string);
+  await firstClient.hello();
+  const started = (await ok(firstClient, "turn.start", { sessionId })) as { turnId: TurnId };
+  const marker = await createActiveTurnStore({ dataDir }).read(sessionId);
+  expect(marker?.turnId).toBe(started.turnId);
+
+  crashed.child.kill("SIGKILL");
+  await waitExit(crashed.child);
+  firstClient.close();
+  // The crash must leave the committed marker behind for the next process.
+  expect((await createActiveTurnStore({ dataDir }).read(sessionId))?.turnId).toBe(started.turnId);
+
+  const restarted = spawnHostChild(DIST_ENTRY, dataDir);
+  const secondReady = await restarted.next();
+  expect(secondReady).toMatchObject({
+    event: "ready",
+    initializationIssues: 0,
+    recoveryIssues: 0,
+  });
+  const secondClient = await Client.connect(secondReady.socketPath as string);
+  await secondClient.hello();
+  const read = (await ok(secondClient, "session.read", { sessionId })) as {
+    records: { kind: string; role: string; source: string }[];
+  };
+  expect(read.records.map((node) => `${node.kind}:${node.role}:${node.source}`)).toEqual([
+    "agent:user:create",
+    "control:cancel:recovery",
+  ]);
+  expect(await createActiveTurnStore({ dataDir }).read(sessionId)).toBeUndefined();
+  secondClient.close();
+  await restarted.stop();
+}, 20000);
+
 test("serves hello, provider.list and session.create/read over the real socket", async () => {
   const dataDir = await tempDir();
   const host = await openHost(hostOptions(dataDir));
@@ -488,6 +565,45 @@ test("releases only its own lock after refusing another process's live socket", 
   await host.stop();
 });
 
+test("refuses startup when the native self-probe rejects, before public bind and with the lock released", async () => {
+  const dataDir = await tempDir();
+  const paths = await prepareRuntimePaths(dataDir);
+  const server = createServer();
+  servers.push(server);
+  await new Promise<void>((resolve) => {
+    server.listen(paths.socketPath, () => resolve());
+  });
+  const socketInode = (await lstat(paths.socketPath)).ino;
+
+  const hostModule = await loadHost();
+  await expect(
+    hostModule.startDaemonWithSeams(hostOptions(dataDir), {
+      probePeerCredentials: async () => {
+        throw new PiscesError("daemon.peercred_probe_failed", "peer credential probe failed");
+      },
+    }),
+  ).rejects.toMatchObject({ code: "daemon.peercred_probe_failed" });
+  // Probe ran before stale/live handling and before any public bind.
+  expect((await lstat(paths.socketPath)).ino).toBe(socketInode);
+  const stillLive = await Client.connect(paths.socketPath);
+  stillLive.close();
+  const lock = await acquireDaemonLock(paths.lockPath);
+  await lock.release();
+
+  const otherDir = await tempDir();
+  await expect(
+    hostModule.startDaemonWithSeams(hostOptions(otherDir), {
+      probePeerCredentials: async () => {
+        throw new Error("raw probe failure");
+      },
+    }),
+  ).rejects.toMatchObject({ code: "daemon.start_failed" });
+  const otherPaths = await prepareRuntimePaths(otherDir);
+  await expect(lstat(otherPaths.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+  const otherLock = await acquireDaemonLock(otherPaths.lockPath);
+  await otherLock.release();
+});
+
 test("reclaims a stale socket left by a crashed listener", async () => {
   const dataDir = await tempDir();
   const paths = await prepareRuntimePaths(dataDir);
@@ -523,6 +639,51 @@ test("stops a zero-turn host: closes clients, unlinks its socket and frees the l
   expect(restarted.status()).toEqual({ state: "running", activeTurns: 0 });
   await restarted.stop();
   await expect(lstat(restarted.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("retries a failed lock release instead of treating it as released", async () => {
+  const dataDir = await tempDir();
+  const paths = await prepareRuntimePaths(dataDir);
+  const lock = await acquireDaemonLock(paths.lockPath);
+  const realClose = daemonLockFs.close;
+  daemonLockFs.close = async () => {
+    throw new Error("close failed");
+  };
+  try {
+    await expect(lock.release()).rejects.toThrow("close failed");
+    await expect(lock.release()).rejects.toThrow("close failed");
+  } finally {
+    daemonLockFs.close = realClose;
+  }
+  await lock.release();
+  const again = await acquireDaemonLock(paths.lockPath);
+  await again.release();
+});
+
+test("does not report stopped when lock release fails, and retries the stop", async () => {
+  const dataDir = await tempDir();
+  const host = await openHost(hostOptions(dataDir));
+  const realClose = daemonLockFs.close;
+  let calls = 0;
+  daemonLockFs.close = async (handle) => {
+    calls += 1;
+    if (calls === 1) throw new Error("close failed");
+    await realClose(handle);
+  };
+  try {
+    await expect(host.stop()).rejects.toThrow("close failed");
+    expect(host.status().state).toBe("quiescing");
+    // The failed close left the flock held by this process.
+    await expect((await loadHost()).startDaemon(hostOptions(dataDir))).rejects.toMatchObject({
+      code: "daemon.lock_busy",
+    });
+  } finally {
+    daemonLockFs.close = realClose;
+  }
+  await host.stop();
+  expect(host.status()).toEqual({ state: "stopped", activeTurns: 0 });
+  const restarted = await openHost(hostOptions(dataDir));
+  await restarted.stop();
 });
 
 test("returns stop_incomplete for an active turn, retains the lock, and stops on retry", async () => {
