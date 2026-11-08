@@ -1407,7 +1407,7 @@ interface SessionRuntime {
 - `entries.snapshot`：从 `Extensions` 取得当前清点，从 `Context` 取得已持久化选择与 effective 列表；不合并队列。
 - `turn.start`：同一会话锁内完成“读 activeTurn → 校验 → `context.confirm()` → registerTurn”；无活跃 turn 时生成 `turnId`，已落盘会话写 `active-turn.json`，异步调用 `AgentLoopDriver.run`，返回 `{turnId, mode:"new"}`；已有活跃 turn 时返回该 turn 的 `turnId` 与 `mode=steer`，不写新标记。
 - `turn.list`：从 `Concurrency` 返回活跃 turn 快照。
-- `turn.cancel`：不取会话锁，按 `turnId` 找到 driver/AbortController 后取消；找不到返回 `cancelled=false`。
+- `turn.cancel`：不取会话锁，委托 `Concurrency.cancelTurn(turnId)`，通过 `registerTurn` 登记时保存的取消 handle 发起取消，`cancelled` 取其返回值；未知 `turnId` 返回 `{ cancelled: false }`。取消句柄只触发 driver 的协作式取消（中止供应商流、置位工具信号并停止新 step，见 §3.6.3），不强制终止、不取会话锁，也不绕过 `Concurrency` 自行查找 driver。
 - `provider.list`：从 `ProviderManagement` 与 `CredentialStore` 生成；`ready` 由凭据状态计算。
 - `template.list` / `preview` / `apply`：委托 `TemplateStore`、`WorkspaceAccess`、`ExecHost`，并创建临时会话。
 - `client.list` / `start`：委托 `ClientRegistry`。
