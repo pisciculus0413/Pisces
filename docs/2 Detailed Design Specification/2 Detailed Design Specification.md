@@ -745,6 +745,7 @@ type ProtocolEvent =
 | 上下文 | `context.window_exceeded` | 裁剪后仍超出模型窗口 |
 | 存储 | `storage.io` | 持久化 I/O 失败 |
 | 存储 | `storage.corrupt` | 记录、meta 或 definition 损坏 |
+| 事件 | `event.publish_failed` | 同步 EventBus handler 抛错；已提交节点、队列状态、head 推进与已分配 `seq` 保留并允许序号空洞，不重试或回滚；driver 中作为终态 turn 错误 |
 | 供应商 | `provider.transport` | 网络/传输错误 |
 | 供应商 | `provider.timeout` | 请求超时 |
 | 供应商 | `provider.invalid_response` | 响应无法解析；文本安全截断后完整单节点事件仍超过 4 MiB（写库前失败） |
@@ -764,6 +765,7 @@ type ProtocolEvent =
 
 - 请求级错误通过 `Response.error` 返回。
 - turn 进行中的供应商或工具错误通过 `turn.ended.error` 或工具结果回填，不伪造成请求错误。
+- `event.publish_failed` 表示同步事件 handler 失败；Context 与 driver 的事件发布适配器都保留原异常为 `cause`，不重试、不回滚已提交状态。driver 中通过 `turn.ended.reason="failed"` 与 `TurnResult.error` 结束 turn。
 - 错误消息不得包含凭据；需要附加结构化信息时使用 `data`。
 
 ### 3.10 校验、并发与一致性
@@ -1349,6 +1351,7 @@ interface EventBus {
 ```
 
 - `EventBus` 同步、按发布顺序 fan-out；handler 只入队发送，不 await。
+- Context 的事件发布适配器与 driver 的 `EventPublisher` 都在同步 handler 抛错时抛出 `event.publish_failed`，原异常保存在 `cause`。Context 的提交状态与 driver 的持久化状态已完成后才发布，因此节点、队列状态、head 推进与已分配 `seq` 保留并允许序号空洞；不重试、不回滚。
 - Context、driver、Gateway 共享同会话 `SessionEventClock { current(): number; next(): number }`；每个会话事件的 `seq` 通过会话锁内 `next()` 分配，Context 快照读取 `current()`；`client.launched` 没有会话 `seq`。Context 仅依赖 `ContextEvents.publish` 发布端，不依赖订阅接口；本轮不实施 EventBus。
 - `Gateway` 把引擎事件转换为协议事件，并只发送给订阅该会话的连接。
 

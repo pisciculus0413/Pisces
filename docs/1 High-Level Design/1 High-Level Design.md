@@ -1222,10 +1222,12 @@ interface ProjectRef {
 | 会话 | `session.model_required`、`session.invalid_model`、`session.workspace_required`、`session.invalid_workspace` | 拒绝创建；不写临时会话目录 |
 | turn | `turn.active` | 活跃 turn 中调用 `session.configure` 时整体拒绝，不部分更新 |
 | 存储 | `storage.io`、`storage.corrupt` | 立即失败，不返回部分结果；报告会话 id |
+| 事件 | `event.publish_failed` | 同步 EventBus handler 抛错；已提交节点、队列状态、head 推进与已分配 `seq` 保留并允许序号空洞，不重试、不回滚；在 driver 内作为终态 turn 错误 |
 | 配置 | `config.invalid`、`config.unknown_key` | 拒绝写入并返回校验错误 |
 
 - 客户端收到 `Response.error.code` 与可读消息；错误消息不包含凭据。
 - 工具内抛出 `ToolDeniedError` 立即结束该工具执行，构造错误结果。
+- `event.publish_failed` 表示事件是通知而非事务日志：handler 同步失败后不重放、不回滚已提交状态；turn 中发生时通过 `turn.ended.error` 结束。
 - daemon 崩溃后按 §8.1 恢复；未完成的热会话标记为中断，由用户决定是否继续。
 
 ### 8.5 构建与分发

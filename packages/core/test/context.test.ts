@@ -706,7 +706,10 @@ test("normal commit state is complete before an event callback throws", async ()
       throw error;
     }
   };
-  await expect(h.context.assemble(OPTIONS)).rejects.toBe(error);
+  await expect(h.context.assemble(OPTIONS)).rejects.toMatchObject({
+    code: "event.publish_failed",
+    cause: error,
+  });
   expect(h.context.snapshot().queue).toEqual([]);
   expect((await h.context.assemble(OPTIONS)).nodes).toEqual([]);
   expect(await collect(h.sessions.readTree(META.id))).toHaveLength(1);

@@ -11,6 +11,12 @@ export interface ToolCall {
   arguments: JsonValue; // 已解析的工具参数
 }
 
+export interface WireToolCall {
+  id: string;
+  name: string; // provider 安全名，仅在 adapter 边界使用
+  arguments: JsonValue;
+}
+
 export interface ToolResult {
   content: ContentBlock[];
   isError?: boolean;
@@ -34,6 +40,14 @@ export interface Message {
   role: "system" | "user" | "assistant" | "tool";
   content: ContentBlock[];
 }
+
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens?: number;
+}
+
+export type StopReason = "stop" | "toolCall" | "length" | "contentFilter" | "cancelled" | "error";
 
 export interface DefinitionSnapshot {
   name: EntryName;

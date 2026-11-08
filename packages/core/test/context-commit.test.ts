@@ -142,7 +142,12 @@ test.each([false, true])(
       if (event.type === "session.updated") throw subscriber;
     };
     if (storage) h.failNextWriteAfterCommit(error);
-    await expect(h.context.assemble(OPTIONS)).rejects.toBe(storage ? error : subscriber);
+    if (storage) await expect(h.context.assemble(OPTIONS)).rejects.toBe(error);
+    else
+      await expect(h.context.assemble(OPTIONS)).rejects.toMatchObject({
+        code: "event.publish_failed",
+        cause: subscriber,
+      });
     expect(delivered.map((e) => e.type)).toEqual([
       "session.updated",
       "selection.updated",
@@ -178,7 +183,10 @@ test("frames actual envelopes at whole nodes and continues after a frame callbac
     if (events.length === 1) throw error;
   };
   const tree = vi.spyOn(h.sessions, "readTree");
-  await expect(h.context.assemble(OPTIONS)).rejects.toBe(error);
+  await expect(h.context.assemble(OPTIONS)).rejects.toMatchObject({
+    code: "event.publish_failed",
+    cause: error,
+  });
   const frames = events.filter((e) => e.type === "session.updated");
   expect(frames.length).toBeGreaterThan(1);
   for (const frame of frames)
