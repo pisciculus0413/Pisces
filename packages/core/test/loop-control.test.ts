@@ -260,6 +260,99 @@ test("unconfirms a steer confirmed before cancelled-turn finalization", async ()
   });
 });
 
+test("does not retry cancellation when cancel-node publication fails", async () => {
+  const h = createLoopHarness();
+  await h.enqueueAndConfirm([user("hello")]);
+  const { adapter, execute } = adapterFor([
+    [
+      { type: "content", delta: "partial" },
+      { type: "stop", reason: "stop" },
+    ],
+  ]);
+  let cancelled = false;
+  h.events.subscribe((event) => {
+    if (event.type === "session.updated") {
+      const nodes = (event.data as unknown as { nodes: SessionNode[] }).nodes;
+      if (!cancelled && nodes.some((node) => node.role === "assistant")) {
+        cancelled = true;
+        void h.driver.cancel("t1" as TurnId);
+      }
+      if (nodes.some((node) => node.role === "cancel")) throw new Error("cancel publish failed");
+    }
+  });
+  const append = vi.spyOn(h.repository, "append");
+
+  expect(await run(h, adapter, execute)).toMatchObject({
+    reason: "failed",
+    error: { code: "event.publish_failed" },
+  });
+  const cancelAttempts = append.mock.calls.filter(([, nodes]) =>
+    nodes.some((node) => node.role === "cancel"),
+  );
+  expect(cancelAttempts).toHaveLength(1);
+  expect((await tree(h)).filter((node) => node.role === "cancel")).toHaveLength(1);
+});
+
+test("does not retry cancellation when cancelled-step publication fails", async () => {
+  const h = createLoopHarness();
+  await h.enqueueAndConfirm([user("hello")]);
+  const { adapter, execute } = adapterFor([
+    [
+      { type: "content", delta: "partial" },
+      { type: "stop", reason: "stop" },
+    ],
+  ]);
+  let cancelled = false;
+  h.events.subscribe((event) => {
+    if (event.type === "session.updated") {
+      const nodes = (event.data as unknown as { nodes: SessionNode[] }).nodes;
+      if (!cancelled && nodes.some((node) => node.role === "assistant")) {
+        cancelled = true;
+        void h.driver.cancel("t1" as TurnId);
+      }
+    } else if (
+      event.type === "turn.step" &&
+      (event.data as { stopReason?: string }).stopReason === "cancelled"
+    )
+      throw new Error("step publish failed");
+  });
+  const append = vi.spyOn(h.repository, "append");
+
+  expect(await run(h, adapter, execute)).toMatchObject({
+    reason: "failed",
+    error: { code: "event.publish_failed" },
+  });
+  const cancelAttempts = append.mock.calls.filter(([, nodes]) =>
+    nodes.some((node) => node.role === "cancel"),
+  );
+  expect(cancelAttempts).toHaveLength(1);
+});
+
+test("uses a Context-committed head when assembly cancels after publication failure", async () => {
+  const h = createLoopHarness();
+  await h.enqueueAndConfirm([user("hello")]);
+  const cancellations: Promise<boolean>[] = [];
+  let triggered = false;
+  h.events.subscribe((event) => {
+    if (triggered || event.type !== "session.updated") return;
+    const nodes = (event.data as unknown as { nodes: SessionNode[] }).nodes;
+    if (!nodes.some((node) => node.role === "user")) return;
+    triggered = true;
+    cancellations.push(h.driver.cancel("t1" as TurnId));
+    throw new Error("context publish failed");
+  });
+  const { adapter, execute } = adapterFor([]);
+
+  expect(await run(h, adapter, execute)).toMatchObject({
+    reason: "failed",
+    error: { code: "event.publish_failed" },
+  });
+  await Promise.all(cancellations);
+  const nodes = await tree(h);
+  expect(nodes.map((node) => node.role)).toEqual(["user", "cancel"]);
+  expect(nodes[1]?.parentId).toBe(nodes[0]?.id);
+});
+
 test("keeps parsed calls on cancellation before tool execution", async () => {
   const entered = gate();
   const resume = gate();

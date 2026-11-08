@@ -27,6 +27,7 @@ interface TurnProgress {
   usage: Usage | undefined;
   assistantPersisted: boolean;
   stepPublished: boolean;
+  finalizationStarted: boolean;
 }
 
 function failure(error: unknown): { code: string; message: string } {
@@ -275,6 +276,41 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     );
   }
 
+  async function refreshCommittedHead(input: RunTurnInput, progress: TurnProgress) {
+    await options.runExclusive(input.sessionId, async () => {
+      let headId: NodeId | undefined;
+      try {
+        for await (const node of input.sessions.readBranch(input.sessionId)) headId = node.id;
+      } catch (error) {
+        if (error instanceof PiscesError && error.code === "session.not_found") return;
+        throw error;
+      }
+      if (headId) progress.headId = headId;
+    });
+  }
+
+  async function finalizeCancellationOnce(
+    input: RunTurnInput,
+    events: EngineEventPublisher,
+    progress: TurnProgress,
+    terminalError?: unknown,
+  ): Promise<TurnResult> {
+    if (progress.finalizationStarted)
+      return finalizeFailure(
+        input,
+        events,
+        new PiscesError("storage.corrupt", "Cancellation finalization already started"),
+        true,
+      );
+    progress.finalizationStarted = true;
+    try {
+      await refreshCommittedHead(input, progress);
+      return await finishCancelled(input, events, progress, terminalError);
+    } catch (error) {
+      return finalizeFailure(input, events, error, true);
+    }
+  }
+
   async function completeIfIdle(
     input: RunTurnInput,
     events: EngineEventPublisher,
@@ -317,6 +353,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
         usage: undefined,
         assistantPersisted: false,
         stepPublished: false,
+        finalizationStarted: false,
       };
 
       try {
@@ -330,7 +367,8 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
         });
         input.signal.addEventListener("abort", forwardAbort, { once: true });
         if (input.signal.aborted) forwardAbort();
-        if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+        if (controller.signal.aborted)
+          return await finalizeCancellationOnce(input, events, progress);
 
         for (let step = 1; ; step++) {
           progress.blocks = [];
@@ -348,7 +386,8 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
           });
           progress.headId = assembled.headId;
           progress.step = step;
-          if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+          if (controller.signal.aborted)
+            return await finalizeCancellationOnce(input, events, progress);
 
           let wire: WireRequest;
           try {
@@ -409,7 +448,8 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
               }
             }
           }
-          if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+          if (controller.signal.aborted)
+            return await finalizeCancellationOnce(input, events, progress);
           if (progress.stopReason === undefined)
             throw new PiscesError("provider.invalid_response", "Provider response has no stop");
 
@@ -455,10 +495,12 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
               progress.headId = nodes.at(-1)?.id;
             },
           );
-          if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+          if (controller.signal.aborted)
+            return await finalizeCancellationOnce(input, events, progress);
 
           if (calls.length) {
-            if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+            if (controller.signal.aborted)
+              return await finalizeCancellationOnce(input, events, progress);
             const results = await Promise.all(
               calls.map((call) =>
                 input.tools.invoke(call, assembled.selection, {
@@ -489,7 +531,8 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
             await append(input, events, progress.headId, drafts, (nodes) => {
               progress.headId = nodes.at(-1)?.id;
             });
-            if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+            if (controller.signal.aborted)
+              return await finalizeCancellationOnce(input, events, progress);
             if (
               !(await publishStep(
                 input,
@@ -500,7 +543,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
                 controller.signal,
               ))
             )
-              return await finishCancelled(input, events, progress);
+              return await finalizeCancellationOnce(input, events, progress);
             progress.stepPublished = true;
             continue;
           }
@@ -515,19 +558,22 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
               controller.signal,
             ))
           )
-            return await finishCancelled(input, events, progress);
+            return await finalizeCancellationOnce(input, events, progress);
           progress.stepPublished = true;
-          if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+          if (controller.signal.aborted)
+            return await finalizeCancellationOnce(input, events, progress);
 
           const completion = await completeIfIdle(input, events, controller.signal);
-          if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+          if (controller.signal.aborted)
+            return await finalizeCancellationOnce(input, events, progress);
           if (completion === "completed")
             return {
               sessionId: input.sessionId,
               turnId: input.turnId,
               reason: "completed",
             };
-          if (completion === "cancelled") return await finishCancelled(input, events, progress);
+          if (completion === "cancelled")
+            return await finalizeCancellationOnce(input, events, progress);
         }
       } catch (error) {
         if (error instanceof PiscesError && error.code === "turn.active") throw error;
@@ -537,11 +583,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
             error instanceof PiscesError && error.code === "event.publish_failed"
               ? error
               : undefined;
-          try {
-            return await finishCancelled(input, events, progress, terminalError);
-          } catch (finalizationError) {
-            return await finalizeFailure(input, events, finalizationError, true);
-          }
+          return await finalizeCancellationOnce(input, events, progress, terminalError);
         }
         return await finalizeFailure(input, events, error);
       } finally {
