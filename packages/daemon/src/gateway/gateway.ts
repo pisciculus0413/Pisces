@@ -11,6 +11,7 @@ import {
   createAgentLoopDriver,
   createContext,
   createSessions,
+  createTools,
   type EngineEvent,
   type EntryName,
   type EventBus,
@@ -20,6 +21,7 @@ import {
   type ProviderManagement,
   type QueueEntryId,
   type QueueEntryInput,
+  type RunTurnInput,
   type SessionEventClock,
   type SessionId,
   type SessionMeta,
@@ -43,6 +45,8 @@ import type {
   QueueEnqueueResult,
   SessionDefaults,
   SessionReadResult,
+  TurnListResult,
+  TurnStartResult,
 } from "./protocol.js";
 
 export interface GatewayDeps {
@@ -74,6 +78,8 @@ interface PendingMarker {
   startedAt: string;
 }
 
+type TurnPhase = "running" | "cleanup" | "cleanup_failed";
+
 /** One per session for the process lifetime; never evicted or re-created. */
 interface SessionRuntime {
   meta: SessionMeta;
@@ -83,6 +89,9 @@ interface SessionRuntime {
   driver: AgentLoopDriver;
   eventClock: SessionEventClock;
   pendingMarker?: PendingMarker;
+  phase?: TurnPhase;
+  /** Runtime-local only; a failing cancel handle is never rethrown or exported. */
+  cancelHandleError?: unknown;
 }
 
 const EMPTY_ENTRIES: ContextEntries = { kind: () => undefined };
@@ -147,6 +156,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
   const newNodeId = deps.newNodeId ?? (() => randomUUID() as NodeId);
   const newQueueEntryId = deps.newQueueEntryId ?? (() => randomUUID() as QueueEntryId);
   const newSessionId = deps.newSessionId ?? (() => randomUUID() as SessionId);
+  const newTurnId = deps.newTurnId ?? (() => randomUUID() as TurnId);
   const baseSessions = createSessions({ repository: deps.store, newId: newNodeId, now });
   const runtimes = new Map<SessionId, SessionRuntime>();
 
@@ -222,6 +232,123 @@ export function createGateway(deps: GatewayDeps): Gateway {
     const runtime = createRuntime(meta, true);
     runtimes.set(sessionId, runtime);
     return runtime;
+  }
+
+  function hasCancel(nodes: SessionNode[], turnId: TurnId): boolean {
+    for (const node of nodes) {
+      if (node.kind !== "control" || node.role !== "cancel") continue;
+      const block = node.content[0];
+      if (block?.type !== "text") continue;
+      try {
+        const value: unknown = JSON.parse(block.text);
+        if (isRecord(value) && value.turnId === turnId) return true;
+      } catch {
+        // A malformed cancel payload does not match any turn.
+      }
+    }
+    return false;
+  }
+
+  async function finishCleanup(
+    sessionId: SessionId,
+    turnId: TurnId,
+    runtime: SessionRuntime,
+  ): Promise<void> {
+    await deps.concurrency.runExclusive(sessionId, async () => {
+      deps.concurrency.unregisterTurn(sessionId, turnId);
+      delete runtime.phase;
+    });
+  }
+
+  async function handleCleanupFailure(
+    runtime: SessionRuntime,
+    sessionId: SessionId,
+    turnId: TurnId,
+  ): Promise<void> {
+    let appended = true;
+    await deps.concurrency.runExclusive(sessionId, async () => {
+      const event: EngineEvent = {
+        type: "turn.cleanup_failed",
+        sessionId,
+        seq: runtime.eventClock.next(),
+        at: now(),
+        data: {
+          turnId,
+          code: "storage.io",
+          message: "Active turn marker could not be removed",
+        },
+      };
+      try {
+        deps.events.publish(structuredClone(event));
+      } catch {
+        // Publication failures must not abort cleanup.
+      }
+      try {
+        const branch = await collect(runtime.sessions.readBranch(sessionId));
+        const last = branch.at(-1);
+        if (last !== undefined && !hasCancel(branch, turnId)) {
+          await runtime.sessions.append(
+            sessionId,
+            [
+              {
+                kind: "control",
+                role: "cancel",
+                source: "driver",
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({ turnId, reason: "cleanup_failed", at: last.id }),
+                  },
+                ],
+              },
+            ],
+            last.id,
+          );
+        }
+      } catch {
+        appended = false;
+        runtime.phase = "cleanup_failed";
+      }
+    });
+    if (!appended) return;
+    try {
+      await deps.markers.remove(sessionId, turnId);
+    } catch {
+      await deps.concurrency.runExclusive(sessionId, async () => {
+        runtime.phase = "cleanup_failed";
+      });
+      return;
+    }
+    await finishCleanup(sessionId, turnId, runtime);
+  }
+
+  async function launch(
+    input: RunTurnInput,
+    runtime: SessionRuntime,
+    sessionId: SessionId,
+    turnId: TurnId,
+  ): Promise<void> {
+    try {
+      try {
+        await runtime.driver.run(input);
+      } catch {
+        // The driver publishes its own terminal state; cleanup still runs.
+      } finally {
+        delete runtime.pendingMarker;
+        await deps.concurrency.runExclusive(sessionId, async () => {
+          if (runtime.phase === "running") runtime.phase = "cleanup";
+        });
+      }
+      try {
+        await deps.markers.remove(sessionId, turnId);
+      } catch {
+        await handleCleanupFailure(runtime, sessionId, turnId);
+        return;
+      }
+      await finishCleanup(sessionId, turnId, runtime);
+    } catch {
+      // Detached cleanup must not reject: state stays observable via events and markers.
+    }
   }
 
   const handlers: Record<string, (params: Record<string, unknown>) => Promise<unknown>> = {
@@ -441,11 +568,143 @@ export function createGateway(deps: GatewayDeps): Gateway {
         return { ids: runtime.context.enqueue(entries as QueueEntryInput[]) };
       });
     },
+
+    async "turn.start"(params): Promise<TurnStartResult> {
+      const sessionId = params.sessionId;
+      if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) invalidRequest();
+      const nodeId = params.nodeId;
+      if (nodeId !== undefined && typeof nodeId !== "string") invalidRequest();
+      const id = sessionId as SessionId;
+      const target = nodeId as NodeId | undefined;
+
+      const outcome = await deps.concurrency.runExclusive(
+        id,
+        async (): Promise<
+          | { input: RunTurnInput; runtime: SessionRuntime; turnId: TurnId }
+          | { steer: TurnStartResult }
+        > => {
+          const active = deps.concurrency.activeTurn(id);
+          if (active !== undefined) {
+            const runtime = runtimes.get(id);
+            if (runtime?.phase !== "running")
+              throw new PiscesError("turn.active", "Previous turn is still finalizing");
+            if (target !== undefined)
+              throw new PiscesError(
+                "turn.node_id_forbidden",
+                "Cannot select a node while steering",
+              );
+            runtime.context.confirm();
+            return { steer: { turnId: active, mode: "steer" } };
+          }
+
+          const runtime = await runtimeFor(id);
+          if (target !== undefined && !runtime.persisted)
+            throw new PiscesError("session.node_not_found", "Node not in session");
+          const selection = deps.providers.select(runtime.meta.provider, runtime.meta.model);
+          if (!selection) throw new PiscesError("session.invalid_model", "Invalid model");
+          const adapter = deps.providers.createAdapter(runtime.meta.provider);
+          const execute = deps.providerHost.execute(runtime.meta.provider);
+
+          let startOffset = 0;
+          let startNodeId = target;
+          if (runtime.persisted) {
+            startOffset = await deps.store.commitOffset(id);
+            if (startNodeId === undefined) {
+              try {
+                for await (const node of runtime.sessions.readBranch(id)) startNodeId = node.id;
+              } catch (error) {
+                if (!(error instanceof PiscesError) || error.code !== "session.node_not_found")
+                  throw error;
+              }
+            } else {
+              // Reading the branch validates the requested node before any marker is written.
+              for await (const node of runtime.sessions.readBranch(id, startNodeId)) void node;
+            }
+          }
+
+          const turnId = newTurnId();
+          const startedAt = now();
+          try {
+            if (runtime.persisted)
+              await deps.markers.write(id, {
+                turnId,
+                startedAt,
+                startOffset,
+                ...(startNodeId !== undefined ? { startNodeId } : {}),
+              });
+            runtime.context.confirm();
+            if (!runtime.persisted) runtime.pendingMarker = { turnId, startedAt };
+            const controller = new AbortController();
+            const cancel = (): void => {
+              try {
+                controller.abort(new DOMException("Turn cancelled", "AbortError"));
+              } catch (error) {
+                runtime.cancelHandleError = error;
+              }
+            };
+            deps.concurrency.registerTurn(id, turnId, startedAt, cancel);
+            runtime.phase = "running";
+            const input: RunTurnInput = {
+              sessionId: id,
+              turnId,
+              meta: runtime.meta,
+              context: runtime.context,
+              sessions: runtime.sessions,
+              tools: deps.createTools?.() ?? createTools(),
+              adapter,
+              execute,
+              events: deps.events,
+              eventClock: runtime.eventClock,
+              contextWindow: selection.model.contextWindow,
+              maxOutput: selection.model.maxOutput,
+              ...(startNodeId !== undefined ? { nodeId: startNodeId } : {}),
+              signal: controller.signal,
+            };
+            return { input, runtime, turnId };
+          } catch (error) {
+            delete runtime.pendingMarker;
+            if (runtime.persisted) {
+              try {
+                await deps.markers.remove(id, turnId);
+              } catch {
+                // Best effort: the turn never started, so its marker must not linger.
+              }
+            }
+            throw error;
+          }
+        },
+      );
+
+      if ("steer" in outcome) return outcome.steer;
+      void launch(outcome.input, outcome.runtime, id, outcome.turnId).catch(() => undefined);
+      return { turnId: outcome.turnId, mode: "new" };
+    },
+
+    async "turn.list"(): Promise<TurnListResult> {
+      return { turns: deps.concurrency.activeTurns() };
+    },
+
+    async "turn.cancel"(params): Promise<{ cancelled: boolean }> {
+      const turnId = params.turnId;
+      if (typeof turnId !== "string" || !turnId.length) invalidRequest();
+      const active = deps.concurrency.activeTurns().find((turn) => turn.turnId === turnId);
+      if (active === undefined) return { cancelled: false };
+      const runtime = runtimes.get(active.sessionId);
+      if (runtime === undefined || runtime.phase !== "running") return { cancelled: false };
+      return { cancelled: deps.concurrency.cancelTurn(turnId as TurnId) };
+    },
   };
 
-  // Installed once per Gateway; turn-lifecycle routing is added with the turn routes.
+  // Installed once per Gateway. `turn.ended` moves the runtime to cleanup without unregistering;
+  // marker deletion and unregistration stay in `launch`.
   const handler = (event: EngineEvent): void => {
-    if (event.sessionId === undefined) return;
+    if (event.type !== "turn.ended" || event.sessionId === undefined) return;
+    const runtime = runtimes.get(event.sessionId);
+    if (runtime === undefined) return;
+    const turnId = isRecord(event.data) ? event.data.turnId : undefined;
+    if (typeof turnId !== "string") return;
+    if (deps.concurrency.activeTurn(event.sessionId) !== turnId) return;
+    runtime.phase = "cleanup";
   };
   deps.events.subscribe(handler);
 
