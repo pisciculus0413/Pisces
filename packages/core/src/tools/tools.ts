@@ -130,6 +130,12 @@ export function createTools(options: ToolsOptions = {}): Tools {
       selection: SelectionState,
       context: ToolInvocationContext,
     ): Promise<ToolResult> {
+      const args = structuredClone(call.arguments);
+      const invocationContext: ToolInvocationContext = {
+        sessionId: context.sessionId,
+        workspace: context.workspace,
+        signal: context.signal,
+      };
       const selectedTool = selected(selection).find(
         (declaration) => declaration.name === call.name,
       );
@@ -174,7 +180,7 @@ export function createTools(options: ToolsOptions = {}): Tools {
       if (wrapped.execute === undefined)
         return failure("tool.failed", `Tool has no execute function: ${call.name}`);
       try {
-        return structuredClone(await wrapped.execute(call.arguments, context));
+        return structuredClone(await wrapped.execute(args, invocationContext));
       } catch (error) {
         if (error instanceof ToolDeniedError) return failure("tool.denied", messageOf(error));
         return failure("tool.failed", messageOf(error));
