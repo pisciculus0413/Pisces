@@ -1,6 +1,17 @@
 export * from "./context/context.js";
 export * from "./context/types.js";
-export * from "./events.js";
+export {
+  createEventPublisher,
+  type EngineEvent,
+  type EngineEventPublisher,
+  type EventBus,
+  type SessionUpdatedEvent,
+  type TurnDeltaEvent,
+  type TurnEndedEvent,
+  type TurnEvent,
+  type TurnStartedEvent,
+  type TurnStepEvent,
+} from "./events.js";
 export * from "./loop/driver.js";
 export * from "./loop/interrupted.js";
 export * from "./loop/types.js";
