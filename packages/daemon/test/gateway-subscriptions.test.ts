@@ -363,6 +363,117 @@ test("forwards only known safe session event types", async () => {
   ]);
 });
 
+test("projects a fixed safe payload for turn.cleanup_failed", async () => {
+  const h = await openHarness();
+  const { meta } = await h.seed([draftUser("hello")]);
+  const events = attach(h, "c");
+  await subscribe(h, "c", meta.id);
+
+  expect(() =>
+    h.bus.publish({
+      type: "turn.cleanup_failed",
+      sessionId: meta.id,
+      seq: 4,
+      at: FIXED_AT,
+      data: {
+        turnId: "cleanup-turn",
+        code: "provider.transport",
+        message: "upstream Authorization: Bearer secret",
+        cause: { headers: { authorization: "Bearer secret" }, body: "raw" },
+        credential: "secret",
+      },
+    }),
+  ).not.toThrow();
+
+  expect(events).toEqual([
+    {
+      event: "turn.cleanup_failed",
+      data: {
+        sessionId: meta.id,
+        seq: 4,
+        at: FIXED_AT,
+        turnId: "cleanup-turn",
+        code: "storage.io",
+        message: "Active turn marker could not be removed",
+      },
+    },
+  ]);
+  const wire = JSON.stringify(events);
+  for (const forbidden of [
+    "cause",
+    "headers",
+    "authorization",
+    "credential",
+    "upstream",
+    "provider.transport",
+  ]) {
+    expect(wire).not.toContain(forbidden);
+  }
+});
+
+test("drops turn.cleanup_failed events without a valid turn id", async () => {
+  const h = await openHarness();
+  const { meta } = await h.seed([draftUser("hello")]);
+  const events = attach(h, "c");
+  await subscribe(h, "c", meta.id);
+
+  expect(() =>
+    h.bus.publish({
+      type: "turn.cleanup_failed",
+      sessionId: meta.id,
+      seq: 5,
+      at: FIXED_AT,
+      data: {
+        turnId: "bad turn",
+        code: "storage.io",
+        message: "Active turn marker could not be removed",
+        cause: "raw",
+      },
+    }),
+  ).not.toThrow();
+  expect(events).toHaveLength(0);
+});
+
+test("authoritative routing metadata wins over payload fields", async () => {
+  const h = await openHarness();
+  const { meta } = await h.seed([draftUser("hello")]);
+  const events = attach(h, "c");
+  await subscribe(h, "c", meta.id);
+
+  expect(() =>
+    h.bus.publish({
+      type: "turn.delta",
+      sessionId: meta.id,
+      seq: 11,
+      at: FIXED_AT,
+      data: {
+        turnId: "turn-meta",
+        step: 1,
+        kind: "text",
+        delta: "hello",
+        sessionId: "spoofed" as SessionId,
+        seq: 999,
+        at: "1999-01-01T00:00:00.000Z",
+      },
+    }),
+  ).not.toThrow();
+
+  expect(events).toEqual([
+    {
+      event: "turn.delta",
+      data: {
+        sessionId: meta.id,
+        seq: 11,
+        at: FIXED_AT,
+        turnId: "turn-meta",
+        step: 1,
+        kind: "text",
+        delta: "hello",
+      },
+    },
+  ]);
+});
+
 test("dispose detaches the gateway handler", async () => {
   const h = await openHarness();
   const { meta } = await h.seed([draftUser("hello")]);

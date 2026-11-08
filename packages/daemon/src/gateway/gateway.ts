@@ -108,6 +108,11 @@ const EMPTY_SKILLS: Skills = { selected: () => [] };
 const EMPTY_SOURCES: ContextSourceRegistry = { get: () => undefined };
 const ENTRY_NAME = /^[^#\s]+#[^#\s]+$/u;
 const SESSION_ID = /^[A-Za-z0-9_-]+$/;
+// Turn ids use the same permitted ASCII set as session ids.
+const TURN_ID = SESSION_ID;
+const CLEANUP_FAILED_CODE = "storage.io";
+const CLEANUP_FAILED_MESSAGE = "Active turn marker could not be removed";
+const ROUTING_KEYS = new Set(["sessionId", "seq", "at"]);
 const ENCODER = new TextEncoder();
 const SESSION_EVENT_TYPES = new Set([
   "session.updated",
@@ -126,13 +131,38 @@ function projectSessionEvent(event: EngineEvent): ProtocolEvent | undefined {
   if (typeof event.at !== "string") return undefined;
   if (event.data === null || typeof event.data !== "object" || Array.isArray(event.data))
     return undefined;
+  const payload = event.data as { [key: string]: JsonValue };
+
+  if (event.type === "turn.cleanup_failed") {
+    const turnId = payload.turnId;
+    if (typeof turnId !== "string" || !TURN_ID.test(turnId)) return undefined;
+    // Never copy untrusted cleanup details such as a raw cause or arbitrary code/message.
+    return {
+      event: event.type,
+      data: {
+        sessionId: event.sessionId,
+        seq: event.seq,
+        at: event.at,
+        turnId,
+        code: CLEANUP_FAILED_CODE,
+        message: CLEANUP_FAILED_MESSAGE,
+      },
+    };
+  }
+
+  // Routing metadata is authoritative: payload copies of these keys are discarded.
+  const safePayload: { [key: string]: JsonValue } = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (ROUTING_KEYS.has(key)) continue;
+    safePayload[key] = value;
+  }
   return {
     event: event.type,
     data: {
       sessionId: event.sessionId,
       seq: event.seq,
       at: event.at,
-      ...(event.data as { [key: string]: JsonValue }),
+      ...safePayload,
     },
   };
 }
@@ -311,8 +341,8 @@ export function createGateway(deps: GatewayDeps): Gateway {
         at: now(),
         data: {
           turnId,
-          code: "storage.io",
-          message: "Active turn marker could not be removed",
+          code: CLEANUP_FAILED_CODE,
+          message: CLEANUP_FAILED_MESSAGE,
         },
       };
       try {
