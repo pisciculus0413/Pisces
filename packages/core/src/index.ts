@@ -17,6 +17,7 @@ export * from "./loop/interrupted.js";
 export * from "./loop/types.js";
 export * from "./messages.js";
 export * from "./providers/management.js";
+export * from "./providers/openai-chat.js";
 export * from "./providers/types.js";
 export * from "./sessions/sessions.js";
 export * from "./sessions/types.js";
