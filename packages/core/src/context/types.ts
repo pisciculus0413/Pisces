@@ -1,6 +1,8 @@
-import type { ContentBlock, EntryName, Message } from "../messages.js";
+import type { ContentBlock, EntryName, Message, SelectionState } from "../messages.js";
 import type { NodeId, SessionId, SessionMeta, SessionNode, Sessions } from "../sessions/types.js";
 import type { Brand, JsonObject, JsonValue } from "../types.js";
+
+export type { SelectionState };
 
 export type QueueEntryId = Brand<"QueueEntryId">;
 
@@ -15,8 +17,6 @@ export interface QueueEntry {
 }
 
 export type QueueEntryInput = Omit<QueueEntry, "id" | "createdAt" | "confirmedAt">;
-export type SelectionState = EntryName[];
-
 export interface ContextSourceContext {
   sessionId: SessionId;
   workspace: string;

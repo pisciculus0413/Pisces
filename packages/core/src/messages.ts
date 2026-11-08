@@ -3,6 +3,7 @@ import type { Brand, JsonObject, JsonValue } from "./types.js";
 
 export type EntryName = Brand<"EntryName">;
 export type TurnId = Brand<"TurnId">;
+export type SelectionState = EntryName[];
 
 export interface ToolCall {
   id: string; // 本次工具调用的 id，由供应商或适配器产生
