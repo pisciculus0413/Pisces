@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import type {
   EntryInfo,
   EntryName,
+  JsonObject,
   SelectionState,
   SessionId,
   ToolDeclaration,
@@ -340,4 +341,81 @@ test("maps wrapper-stage denials to wrapper_invalid", async () => {
       context,
     ),
   ).toEqual(errorResult("tool.wrapper_invalid", "Invalid tool wrapper: pkg#factory-deny"));
+});
+
+test.each([
+  ["Date", () => new Date("2026-11-08T00:00:00.000Z")],
+  ["non-finite number", () => ({ value: Number.POSITIVE_INFINITY })],
+  ["undefined value", () => ({ value: undefined })],
+  ["function value", () => ({ value: () => null })],
+  ["symbol value", () => ({ value: Symbol("value") })],
+  [
+    "cyclic structure",
+    () => {
+      const value: Record<string, unknown> = {};
+      value.self = value;
+      return value;
+    },
+  ],
+  ["array root", () => []],
+  ["Map prototype", () => new Map()],
+  [
+    "symbol key",
+    () => {
+      const value: Record<string, unknown> = {};
+      Object.defineProperty(value, Symbol("key"), { enumerable: true, value: true });
+      return value;
+    },
+  ],
+])("rejects wrapper parameters containing a %s", async (_label, makeParameters) => {
+  const catalog = createTools();
+  let executed = false;
+  catalog.registerTool({
+    ...tool("pkg#echo"),
+    execute: async () => {
+      executed = true;
+      return { content: [{ type: "text", text: "bad" }] };
+    },
+  });
+  catalog.registerWrapper(name("pkg#invalid-params"), () => (wrapped) => ({
+    ...wrapped,
+    parameters: makeParameters() as unknown as JsonObject,
+  }));
+  const facade = catalog.forInventory({
+    hash: "h",
+    entries: [entry("pkg#echo", "tool"), entry("pkg#invalid-params", "wrapper")],
+  });
+
+  expect(
+    await facade.invoke(
+      { id: "call-1", name: name("pkg#echo"), arguments: null },
+      select("pkg#echo", "pkg#invalid-params"),
+      context,
+    ),
+  ).toEqual(errorResult("tool.wrapper_invalid", "Invalid tool wrapper: pkg#invalid-params"));
+  expect(executed).toBe(false);
+});
+
+test("accepts wrapper parameters containing nested JSON arrays and null", async () => {
+  const catalog = createTools();
+  const parameters: JsonObject = {
+    nested: [1, "text", null, true, { value: 2 }],
+  };
+  catalog.registerTool({ ...tool("pkg#echo"), parameters });
+  catalog.registerWrapper(name("pkg#valid-params"), () => (wrapped) => ({
+    ...wrapped,
+    parameters: structuredClone(parameters),
+  }));
+  const facade = catalog.forInventory({
+    hash: "h",
+    entries: [entry("pkg#echo", "tool"), entry("pkg#valid-params", "wrapper")],
+  });
+
+  expect(
+    await facade.invoke(
+      { id: "call-1", name: name("pkg#echo"), arguments: null },
+      select("pkg#echo", "pkg#valid-params"),
+      context,
+    ),
+  ).toEqual({ content: [{ type: "text", text: "ok" }] });
 });

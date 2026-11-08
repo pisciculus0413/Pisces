@@ -1,5 +1,5 @@
 import type { EntryName, SelectionState, ToolCall, ToolResult } from "../messages.js";
-import type { JsonValue } from "../types.js";
+import type { JsonObject, JsonValue } from "../types.js";
 import { PiscesError } from "../types.js";
 import type {
   EntryInfo,
@@ -42,6 +42,37 @@ function jsonEqual(left: JsonValue, right: JsonValue): boolean {
     leftKeys.length === rightKeys.length &&
     leftKeys.every((key) => jsonEqual(left[key] as JsonValue, right[key] as JsonValue))
   );
+}
+
+function isJsonValue(value: unknown, ancestors = new Set<object>()): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || ancestors.has(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return false;
+  if (Object.getOwnPropertySymbols(value).length) return false;
+
+  ancestors.add(value);
+  let valid = true;
+  if (Array.isArray(value)) {
+    if (Object.keys(value).length !== value.length) valid = false;
+    for (let index = 0; valid && index < value.length; index++) {
+      if (!Object.hasOwn(value, index) || !isJsonValue(value[index], ancestors)) valid = false;
+    }
+  } else {
+    for (const item of Object.values(value)) {
+      if (!isJsonValue(item, ancestors)) {
+        valid = false;
+        break;
+      }
+    }
+  }
+  ancestors.delete(value);
+  return valid;
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && isJsonValue(value);
 }
 
 function isToolDeclaration(value: unknown): value is ToolDeclaration {
@@ -164,6 +195,7 @@ export function createTools(options: ToolsOptions = {}): Tools {
           const candidate = wrapper(wrapped);
           if (
             !isToolDeclaration(candidate) ||
+            !isJsonObject(candidate.parameters) ||
             candidate.id !== baseline.id ||
             candidate.source !== baseline.source ||
             candidate.name !== baseline.name ||
