@@ -1,7 +1,7 @@
 import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { NodeId, SessionId, TurnId } from "@pisces/core";
+import { type NodeId, PiscesError, type SessionId, type TurnId } from "@pisces/core";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { type ActiveTurnMarker, createActiveTurnStore } from "../src/gateway/active-turn.js";
 
@@ -25,6 +25,7 @@ test("writes, replaces, reads, scans and conditionally removes the marker", asyn
   await store.write(sid, marker);
   expect(await store.read(sid)).toEqual(marker);
   expect(await store.list()).toEqual([{ sessionId: sid, marker }]);
+  expect(await store.scan()).toEqual([{ sessionId: sid, marker }]);
   await store.write(sid, { ...marker, turnId: "t2" as TurnId });
   await store.remove(sid, "t1" as TurnId);
   expect(await store.read(sid)).toMatchObject({ turnId: "t2" });
@@ -100,6 +101,36 @@ test("rejects invalid markers before writing", async () => {
   await expect(store.write("bad/id" as SessionId, marker)).rejects.toBeInstanceOf(TypeError);
   await expect(store.read(sid)).resolves.toBeUndefined();
   expect(await readdir(join(dataDir, "sessions", sid))).toEqual([]);
+});
+
+test("scan isolates a corrupt marker per session for recovery", async () => {
+  const store = createActiveTurnStore({ dataDir });
+  await seed("good");
+  await seed("bad");
+  await seed("empty");
+  await store.write("good" as SessionId, marker);
+  await writeFile(markerPath("bad"), JSON.stringify({ ...marker, extra: true }));
+  const entries = await store.scan();
+  expect(entries.map((entry) => entry.sessionId)).toEqual(["bad", "good"]);
+  const bad = entries[0];
+  if (!bad || !("error" in bad)) throw new Error("Expected a per-session error entry");
+  expect("marker" in bad).toBe(false);
+  expect(bad.error).toBeInstanceOf(PiscesError);
+  expect(bad.error.code).toBe("storage.corrupt");
+  expect(entries[1]).toEqual({ sessionId: "good", marker });
+  await expect(store.list()).rejects.toMatchObject({ code: "storage.corrupt" });
+});
+
+test("a non-directory session path reports storage.corrupt", async () => {
+  const store = createActiveTurnStore({ dataDir });
+  await mkdir(join(dataDir, "sessions"), { recursive: true });
+  await writeFile(join(dataDir, "sessions", sid), "x");
+  await expect(store.read(sid)).rejects.toMatchObject({ code: "storage.corrupt" });
+  await expect(store.write(sid, marker)).rejects.toMatchObject({ code: "storage.corrupt" });
+  const entries = await store.scan();
+  expect(entries).toMatchObject([{ sessionId: sid, error: expect.any(PiscesError) }]);
+  await expect(entries[0]).not.toHaveProperty("marker");
+  await expect(store.list()).rejects.toMatchObject({ code: "storage.corrupt" });
 });
 
 test("lists only session directories holding a marker in UTF-16 order", async () => {

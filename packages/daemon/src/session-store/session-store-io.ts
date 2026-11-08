@@ -1,4 +1,6 @@
 import * as fs from "node:fs/promises";
+import { PiscesError } from "@pisces/core";
+import { corrupt } from "./session-store-format.js";
 
 async function write(path: string, bytes: Uint8Array, flag: "w" | "a"): Promise<void> {
   const file = await sessionStoreIo.open(path, flag);
@@ -43,3 +45,21 @@ export const sessionStoreIo = {
     }
   },
 };
+
+export const errorCode = (error: unknown) => (error as NodeJS.ErrnoException).code;
+export function storageError(error: unknown, message: string): Error {
+  return error instanceof PiscesError || error instanceof TypeError
+    ? error
+    : new PiscesError("storage.io", message, { cause: error });
+}
+export async function checked(path: string, directoryType = false): Promise<boolean> {
+  try {
+    const value = await sessionStoreIo.lstat(path);
+    if (directoryType ? !value.isDirectory() : !value.isFile())
+      throw corrupt(`Unexpected file type: ${path}`);
+    return true;
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return false;
+    throw error;
+  }
+}

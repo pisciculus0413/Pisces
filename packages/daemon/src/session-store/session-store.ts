@@ -16,7 +16,12 @@ import {
   type SessionIndex,
   validMeta,
 } from "./session-store-format.js";
-import { sessionStoreIo as io } from "./session-store-io.js";
+import {
+  checked,
+  errorCode as code,
+  sessionStoreIo as io,
+  storageError,
+} from "./session-store-io.js";
 
 export interface SessionStoreOptions {
   dataDir: string;
@@ -36,11 +41,7 @@ interface Snapshot {
   index: SessionIndex;
 }
 const names = ["meta.json", "events.jsonl", "events.commit"] as const;
-const code = (error: unknown) => (error as NodeJS.ErrnoException).code;
-const storageError = (error: unknown) =>
-  error instanceof PiscesError || error instanceof TypeError
-    ? error
-    : new PiscesError("storage.io", "Session storage I/O failed", { cause: error });
+const storageMessage = "Session storage I/O failed";
 const json = (value: unknown) => Buffer.from(`${JSON.stringify(value)}\n`);
 
 export function createSessionStore({ dataDir }: SessionStoreOptions): SessionStore {
@@ -59,17 +60,6 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
     if (id !== undefined) assertSessionId(id);
   }
   const directory = (id: SessionId) => join(root, id);
-  async function checked(path: string, directoryType = false): Promise<boolean> {
-    try {
-      const value = await io.lstat(path);
-      if (directoryType ? !value.isDirectory() : !value.isFile())
-        throw corrupt(`Unexpected file type: ${path}`);
-      return true;
-    } catch (error) {
-      if (code(error) === "ENOENT") return false;
-      throw error;
-    }
-  }
   async function bytesAt(path: string, offset: number, length: number): Promise<Buffer> {
     const file = await io.open(path, "r");
     try {
@@ -116,7 +106,7 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
         ) as SessionNode;
       }
     } catch (error) {
-      throw storageError(error);
+      throw storageError(error, storageMessage);
     }
   }
   async function temporary(dir: string, name: string, bytes: Buffer): Promise<void> {
@@ -167,7 +157,7 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
                   await io.unlink(join(dir, `${name}.tmp`));
             } catch (error) {
               invalidate(id);
-              const issue = storageError(error) as PiscesError;
+              const issue = storageError(error, storageMessage) as PiscesError;
               issuesBySession.set(id, issue);
               issues.push({ sessionId: id, error: issue });
             }
@@ -175,7 +165,7 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
           initialized = true;
           return issues;
         } catch (error) {
-          throw storageError(error);
+          throw storageError(error, storageMessage);
         }
       })();
       return initialization;
@@ -209,7 +199,7 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
       } catch (error) {
         invalidate(meta.id);
         if (owned && !committed) await io.rm(dir, { recursive: true, force: true });
-        throw storageError(error);
+        throw storageError(error, storageMessage);
       }
     },
     async append(id, nodes) {
@@ -226,7 +216,7 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
         cache.set(id, { meta: snapshot.meta, index: batch.index });
       } catch (error) {
         invalidate(id);
-        throw storageError(error);
+        throw storageError(error, storageMessage);
       }
     },
     async *readTree(id) {
@@ -238,7 +228,7 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
             await bytesAt(join(directory(id), "events.jsonl"), position.offset, position.length),
           ) as SessionNode;
       } catch (error) {
-        throw storageError(error);
+        throw storageError(error, storageMessage);
       }
     },
     async *readBranch(id, nodeId) {
@@ -261,7 +251,7 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
             await bytesAt(join(directory(id), "events.jsonl"), position.offset, position.length),
           ) as SessionNode;
       } catch (error) {
-        throw storageError(error);
+        throw storageError(error, storageMessage);
       }
     },
     async getMeta(id) {
@@ -269,7 +259,7 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
       try {
         return structuredClone((await load(id)).meta);
       } catch (error) {
-        throw storageError(error);
+        throw storageError(error, storageMessage);
       }
     },
     async commitOffset(id) {
@@ -277,7 +267,7 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
       try {
         return (await load(id)).index.commit;
       } catch (error) {
-        throw storageError(error);
+        throw storageError(error, storageMessage);
       }
     },
     readTreeSince(id, offset) {
@@ -303,7 +293,7 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
         }
         return result;
       } catch (error) {
-        throw storageError(error);
+        throw storageError(error, storageMessage);
       }
     },
     async updateMeta(id, input) {
@@ -318,7 +308,7 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
         cache.set(id, { meta, index: snapshot.index });
       } catch (error) {
         invalidate(id);
-        throw storageError(error);
+        throw storageError(error, storageMessage);
       }
     },
   };

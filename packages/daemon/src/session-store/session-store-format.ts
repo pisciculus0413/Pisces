@@ -12,14 +12,15 @@ export interface SessionIndex {
 }
 export const corrupt = (message: string, cause?: unknown) =>
   new PiscesError("storage.corrupt", message, { cause });
+export const validId = (value: unknown): value is string =>
+  typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value);
 export function assertSessionId(id: string): void {
-  if (typeof id !== "string" || !/^[A-Za-z0-9_-]+$/.test(id))
-    throw new TypeError("Invalid session id");
+  if (!validId(id)) throw new TypeError("Invalid session id");
 }
-const object = (value: unknown): value is Record<string, unknown> =>
+export const object = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const nonempty = (value: unknown): value is string => typeof value === "string" && value.length > 0;
-const timestamp = (value: unknown) =>
+export const timestamp = (value: unknown): value is string =>
   typeof value === "string" &&
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
   Number.isFinite(Date.parse(value)) &&
