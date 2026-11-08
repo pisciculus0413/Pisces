@@ -431,42 +431,59 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
               cause: error,
             });
           }
-          while (true) {
-            let next: IteratorResult<string>;
-            try {
-              next = await iterator.next();
-            } catch (error) {
-              if (controller.signal.aborted || error instanceof PiscesError) throw error;
-              throw new PiscesError("provider.transport", "Provider transport failed", {
-                cause: error,
-              });
-            }
-            if (next.done) break;
-            let parsed: unknown;
-            try {
-              parsed = input.adapter.parseChunk(next.value);
-            } catch (error) {
-              if (error instanceof PiscesError) throw error;
-              throw new PiscesError(
-                "provider.invalid_response",
-                "Provider response could not be parsed",
-                { cause: error },
-              );
-            }
-            for (const event of validateEvents(parsed)) {
-              if (event.type === "content" || event.type === "reasoning") {
-                if (!event.delta.length) continue;
-                const kind = event.type === "content" ? "text" : "reasoning";
-                appendDelta(progress.blocks, kind, event.delta);
-                await options.runExclusive(input.sessionId, async () => {
-                  events.publishDelta(input.turnId, step, kind, event.delta);
+          let providerDone = false;
+          try {
+            while (true) {
+              let next: IteratorResult<string>;
+              try {
+                next = await iterator.next();
+              } catch (error) {
+                if (controller.signal.aborted || error instanceof PiscesError) throw error;
+                throw new PiscesError("provider.transport", "Provider transport failed", {
+                  cause: error,
                 });
-              } else if (event.type === "usage") progress.usage = structuredClone(event.usage);
-              else if (event.type === "stop") progress.stopReason = event.reason;
-              else if (event.type === "error") throw new PiscesError(event.code, event.message);
-              else {
-                const block = { type: "toolCall", ...structuredClone(event.call) } as ContentBlock;
-                progress.blocks.push(block);
+              }
+              if (next.done) {
+                providerDone = true;
+                break;
+              }
+              let parsed: unknown;
+              try {
+                parsed = input.adapter.parseChunk(next.value);
+              } catch (error) {
+                if (error instanceof PiscesError) throw error;
+                throw new PiscesError(
+                  "provider.invalid_response",
+                  "Provider response could not be parsed",
+                  { cause: error },
+                );
+              }
+              for (const event of validateEvents(parsed)) {
+                if (event.type === "content" || event.type === "reasoning") {
+                  if (!event.delta.length) continue;
+                  const kind = event.type === "content" ? "text" : "reasoning";
+                  appendDelta(progress.blocks, kind, event.delta);
+                  await options.runExclusive(input.sessionId, async () => {
+                    events.publishDelta(input.turnId, step, kind, event.delta);
+                  });
+                } else if (event.type === "usage") progress.usage = structuredClone(event.usage);
+                else if (event.type === "stop") progress.stopReason = event.reason;
+                else if (event.type === "error") throw new PiscesError(event.code, event.message);
+                else {
+                  const block = {
+                    type: "toolCall",
+                    ...structuredClone(event.call),
+                  } as ContentBlock;
+                  progress.blocks.push(block);
+                }
+              }
+            }
+          } finally {
+            if (!providerDone) {
+              try {
+                await iterator.return?.();
+              } catch {
+                // Cleanup must not replace the failure that interrupted the provider stream.
               }
             }
           }
