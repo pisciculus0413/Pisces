@@ -74,6 +74,36 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     };
   }
 
+  async function append(
+    input: RunTurnInput,
+    events: EngineEventPublisher,
+    parentId: RunTurnInput["nodeId"],
+    drafts: SessionNodeDraft[],
+  ) {
+    return options.runExclusive(input.sessionId, async () => {
+      const nodes = await input.sessions.append(input.sessionId, drafts, parentId);
+      events.publishSession(nodes);
+      return nodes;
+    });
+  }
+
+  async function publishStep(
+    input: RunTurnInput,
+    events: EngineEventPublisher,
+    step: number,
+    stopReason: StopReason,
+    usage?: Usage,
+  ) {
+    await options.runExclusive(input.sessionId, async () => {
+      events.publishTurn("turn.step", {
+        turnId: input.turnId,
+        step,
+        stopReason,
+        ...(usage ? { usage } : {}),
+      });
+    });
+  }
+
   return {
     async run(input) {
       const events = publisher(input);
@@ -86,68 +116,94 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
         });
       });
 
-      let headId: RunTurnInput["nodeId"];
       try {
-        const assembled = await input.context.assemble({
-          ...(input.nodeId ? { nodeId: input.nodeId } : {}),
-          contextWindow: input.contextWindow,
-          maxOutput: input.maxOutput,
-          signal: input.signal,
-        });
-        headId = assembled.headId;
-        const wire = input.adapter.buildRequest(assembled.request);
-        const blocks: ContentBlock[] = [];
-        let usage: Usage | undefined;
-        let stopReason: StopReason | undefined;
-
-        for await (const chunk of input.execute(wire, input.signal)) {
-          for (const event of validateEvents(input.adapter.parseChunk(chunk))) {
-            if (event.type === "content" || event.type === "reasoning") {
-              appendDelta(blocks, event.type === "content" ? "text" : "reasoning", event.delta);
-              await options.runExclusive(input.sessionId, async () => {
-                events.publishDelta(
-                  input.turnId,
-                  1,
-                  event.type === "content" ? "text" : "reasoning",
-                  event.delta,
-                );
-              });
-            } else if (event.type === "usage") usage = structuredClone(event.usage);
-            else if (event.type === "stop") stopReason = event.reason;
-            else if (event.type === "error") throw new PiscesError(event.code, event.message);
-            else if (event.type === "toolCall")
-              throw new PiscesError(
-                "provider.invalid_response",
-                "Tool calls are not supported by this step",
-              );
-          }
-        }
-        if (stopReason === undefined)
-          throw new PiscesError("provider.invalid_response", "Provider response has no stop");
-
-        const nodes = await options.runExclusive(input.sessionId, async () => {
-          const draft: SessionNodeDraft = {
-            kind: "agent",
-            role: "assistant",
-            source: "assistant",
-            content: blocks,
-          };
-          const appended = await input.sessions.append(input.sessionId, [draft], headId);
-          headId = appended.at(-1)?.id;
-          events.publishSession(appended);
-          return appended;
-        });
-        if (!nodes.length)
-          throw new PiscesError("storage.corrupt", "Assistant append produced no nodes");
-        await options.runExclusive(input.sessionId, async () => {
-          events.publishTurn("turn.step", {
-            turnId: input.turnId,
-            step: 1,
-            stopReason,
-            ...(usage ? { usage } : {}),
+        let headId = input.nodeId;
+        for (let step = 1; ; step++) {
+          const assembled = await input.context.assemble({
+            ...(headId ? { nodeId: headId } : {}),
+            contextWindow: input.contextWindow,
+            maxOutput: input.maxOutput,
+            signal: input.signal,
           });
-        });
-        return await end(input, events, "completed");
+          headId = assembled.headId;
+          const wire = input.adapter.buildRequest(assembled.request);
+          const blocks: ContentBlock[] = [];
+          const calls: ContentBlock[] = [];
+          let usage: Usage | undefined;
+          let stopReason: StopReason | undefined;
+
+          for await (const chunk of input.execute(wire, input.signal)) {
+            for (const event of validateEvents(input.adapter.parseChunk(chunk))) {
+              if (event.type === "content" || event.type === "reasoning") {
+                const kind = event.type === "content" ? "text" : "reasoning";
+                appendDelta(blocks, kind, event.delta);
+                await options.runExclusive(input.sessionId, async () => {
+                  events.publishDelta(input.turnId, step, kind, event.delta);
+                });
+              } else if (event.type === "usage") usage = structuredClone(event.usage);
+              else if (event.type === "stop") stopReason = event.reason;
+              else if (event.type === "error") throw new PiscesError(event.code, event.message);
+              else {
+                const block = { type: "toolCall", ...structuredClone(event.call) } as ContentBlock;
+                blocks.push(block);
+                calls.push(block);
+              }
+            }
+          }
+          if (stopReason === undefined)
+            throw new PiscesError("provider.invalid_response", "Provider response has no stop");
+
+          const assistant = await append(input, events, headId, [
+            {
+              kind: "agent",
+              role: "assistant",
+              source: "assistant",
+              content: blocks,
+            },
+          ]);
+          if (!assistant.length)
+            throw new PiscesError("storage.corrupt", "Assistant append produced no nodes");
+          headId = assistant.at(-1)?.id;
+
+          if (calls.length) {
+            const results = await Promise.all(
+              calls.map((block) => {
+                if (block.type !== "toolCall") throw new TypeError("Invalid tool call block");
+                return input.tools.invoke(block, assembled.selection, {
+                  sessionId: input.sessionId,
+                  workspace: input.meta.workspace,
+                  signal: input.signal,
+                });
+              }),
+            );
+            const drafts: SessionNodeDraft[] = calls.map((block, index) => {
+              if (block.type !== "toolCall") throw new TypeError("Invalid tool call block");
+              const result = results[index];
+              if (!result) throw new TypeError("Missing tool result");
+              return {
+                kind: "agent",
+                role: "tool",
+                source: "tool",
+                content: [
+                  {
+                    type: "toolResult",
+                    toolCallId: block.id,
+                    content: structuredClone(result.content),
+                    ...(result.isError === undefined ? {} : { isError: result.isError }),
+                    ...(result.code === undefined ? {} : { code: result.code }),
+                  },
+                ],
+              };
+            });
+            const toolNodes = await append(input, events, headId, drafts);
+            headId = toolNodes.at(-1)?.id;
+            await publishStep(input, events, step, stopReason, usage);
+            continue;
+          }
+
+          await publishStep(input, events, step, stopReason, usage);
+          return await end(input, events, "completed");
+        }
       } catch (error) {
         const errorData = failure(error);
         try {
