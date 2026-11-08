@@ -259,7 +259,7 @@ test("maps a tool-thrown AbortError to tool.failed", async () => {
       context,
     ),
   ).toEqual({
-    content: [{ type: "text", text: "aborted" }],
+    content: [{ type: "text", text: "Tool execution failed" }],
     isError: true,
     code: "tool.failed",
   });

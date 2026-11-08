@@ -215,7 +215,7 @@ export function createTools(options: ToolsOptions = {}): Tools {
         return structuredClone(await wrapped.execute(args, invocationContext));
       } catch (error) {
         if (error instanceof ToolDeniedError) return failure("tool.denied", messageOf(error));
-        return failure("tool.failed", messageOf(error));
+        return failure("tool.failed", "Tool execution failed");
       }
     }
 

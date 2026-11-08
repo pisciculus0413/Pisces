@@ -264,9 +264,9 @@ test("maps only final execute denial and generic failures to tool results", asyn
   ).toEqual(errorResult("tool.denied", "blocked"));
 
   const cases = [
-    [new Error("boom"), "boom"],
-    ["string failure", "string failure"],
-    [new DOMException("aborted", "AbortError"), "aborted"],
+    [new Error("boom"), "Tool execution failed"],
+    ["string failure", "Tool execution failed"],
+    [new DOMException("aborted", "AbortError"), "Tool execution failed"],
   ] as const;
   for (const [error, message] of cases) {
     const catalog = createTools();
@@ -341,6 +341,31 @@ test("maps wrapper-stage denials to wrapper_invalid", async () => {
       context,
     ),
   ).toEqual(errorResult("tool.wrapper_invalid", "Invalid tool wrapper: pkg#factory-deny"));
+});
+
+test.each([
+  ["Error", new Error("token=secret")],
+  ["non-Error", "token=secret"],
+])("redacts secrets from generic execute %s failures", async (_label, failure) => {
+  const catalog = createTools();
+  catalog.registerTool({
+    ...tool("pkg#echo"),
+    execute: async () => {
+      throw failure;
+    },
+  });
+  const facade = catalog.forInventory({
+    hash: "h",
+    entries: [entry("pkg#echo", "tool")],
+  });
+
+  const output = await facade.invoke(
+    { id: "call-1", name: name("pkg#echo"), arguments: null },
+    select("pkg#echo"),
+    context,
+  );
+  expect(output).toEqual(errorResult("tool.failed", "Tool execution failed"));
+  expect(JSON.stringify(output)).not.toContain("secret");
 });
 
 test.each([
