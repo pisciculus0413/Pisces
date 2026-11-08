@@ -27,6 +27,9 @@ export interface RecoveryIssue {
 }
 export interface SessionStore extends SessionRepository {
   initialize(): Promise<RecoveryIssue[]>;
+  getMeta(sessionId: SessionId): Promise<SessionMeta>;
+  commitOffset(sessionId: SessionId): Promise<number>;
+  readTreeSince(sessionId: SessionId, offset: number): AsyncIterable<SessionNode>;
 }
 interface Snapshot {
   meta: SessionMeta;
@@ -102,6 +105,19 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
     const snapshot = { meta, index };
     if ((revisions.get(id) ?? 0) === revision) cache.set(id, snapshot);
     return snapshot;
+  }
+  async function* treeSince(id: SessionId, offset: number): AsyncGenerator<SessionNode> {
+    try {
+      const { index } = await load(id);
+      for (const position of index.positions.values()) {
+        if (position.offset < offset) continue;
+        yield parseJson(
+          await bytesAt(join(directory(id), "events.jsonl"), position.offset, position.length),
+        ) as SessionNode;
+      }
+    } catch (error) {
+      throw storageError(error);
+    }
   }
   async function temporary(dir: string, name: string, bytes: Buffer): Promise<void> {
     const path = join(dir, `${name}.tmp`);
@@ -247,6 +263,27 @@ export function createSessionStore({ dataDir }: SessionStoreOptions): SessionSto
       } catch (error) {
         throw storageError(error);
       }
+    },
+    async getMeta(id) {
+      ready(id);
+      try {
+        return structuredClone((await load(id)).meta);
+      } catch (error) {
+        throw storageError(error);
+      }
+    },
+    async commitOffset(id) {
+      ready(id);
+      try {
+        return (await load(id)).index.commit;
+      } catch (error) {
+        throw storageError(error);
+      }
+    },
+    readTreeSince(id, offset) {
+      ready(id);
+      if (!Number.isSafeInteger(offset) || offset < 0) throw new TypeError("Invalid commit offset");
+      return treeSince(id, offset);
     },
     async list() {
       ready();
