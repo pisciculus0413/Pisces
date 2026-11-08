@@ -656,7 +656,7 @@ store --> ui : 全树或分支记录（成型为界面视图）
 
 各内容类型的生效行为：
 
-- `tools`：声明通过 `LlmRequest.tools` 提供给智能体；智能体调用该条目时执行其实现。
+- `tools`：声明通过 `RequestToolDeclaration` 投影到 `LlmRequest.tools`；运行时身份与实现留在本地，智能体调用条目时执行已选中的实现。
 - `skills`：内容写入系统提示词。
 - `context`：由用户启用的来源在装配时产出片段；片段先追加为会话节点，再参与装配。
 - `providers`：指定使用的大语言模型供应商接口。
@@ -819,11 +819,17 @@ interface Event<E = JsonValue> {
 ### 6.2 供应商接口
 
 ```ts
+interface RequestToolDeclaration {
+  name: EntryName;
+  description: string;
+  parameters: JsonObject;
+}
+
 interface LlmRequest {
   model: string;
   messages: Message[];         // 供应商无关的消息序列
-  tools?: ToolDeclaration[];   // 只序列化 id/name/description/parameters，execute 留在本地
-  parameters?: GenerateParameters;
+  tools?: RequestToolDeclaration[];
+  parameters?: JsonObject;
 }
 
 type LlmEvent =
@@ -852,7 +858,7 @@ type ExecuteProvider = (
 ) => AsyncIterable<string>;
 ```
 
-适配器只做方言编解码；`AgentLoopDriver` 调用服务层注入的 `ExecuteProvider`，由服务层 `ProviderHost` 执行 HTTP、凭据、超时、重试与传输分帧。`ProviderHost` 以 `ProviderDescriptor.baseUrl` 与 `WireRequest.path` 组合请求地址，注入凭据与 `headers`。HTTP 与传输错误由服务层映射为错误事件，供应商错误体由适配器解析。首个内置方言为 OpenAI-compatible Chat Completions（`openai-chat`）：不支持图像/音频输出，`wireName` 上限为 64 个 ASCII 字符；所有 system 消息按顺序发送，不重新发送已存储的 reasoning，默认请求 `stream_options.include_usage=true`，并兼容响应中的 `reasoning_content`/`reasoning` 文本增量。
+适配器只做方言编解码；`RequestToolDeclaration` 仅含 `name/description/parameters`，适配器在边界把 `name` 编码为 `wireName`。`AgentLoopDriver` 调用服务层注入的 `ExecuteProvider`，由服务层 `ProviderHost` 执行 HTTP、凭据、超时、重试与传输分帧。`ProviderHost` 以 `ProviderDescriptor.baseUrl` 与 `WireRequest.path` 组合请求地址，注入凭据与 `headers`。HTTP 与传输错误由服务层映射为错误事件，供应商错误体由适配器解析。首个内置方言为 OpenAI-compatible Chat Completions（`openai-chat`）：不支持图像/音频输出，`wireName` 上限为 64 个 ASCII 字符；所有 system 消息按顺序发送，不重新发送已存储的 reasoning，默认请求 `stream_options.include_usage=true`，并兼容响应中的 `reasoning_content`/`reasoning` 文本增量。
 
 供应商描述符由 `ProviderManagement` 定义，从软件配置目录发现或由扩展声明：
 
