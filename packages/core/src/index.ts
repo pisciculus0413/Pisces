@@ -1,6 +1,7 @@
 export * from "./context/context.js";
 export * from "./context/types.js";
 export * from "./events.js";
+export * from "./loop/driver.js";
 export * from "./loop/interrupted.js";
 export * from "./loop/types.js";
 export * from "./messages.js";
