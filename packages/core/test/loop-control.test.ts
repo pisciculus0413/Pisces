@@ -5,6 +5,7 @@ import type {
   LlmAdapter,
   LlmEvent,
   LlmRequest,
+  NodeId,
   SessionNode,
   ToolInvocationContext,
   ToolResult,
@@ -258,6 +259,62 @@ test("unconfirms a steer confirmed before cancelled-turn finalization", async ()
     type: "turn.ended",
     data: { turnId: "t1", reason: "cancelled" },
   });
+});
+
+test("keeps an explicit non-default branch head on normal cancellation", async () => {
+  const h = createLoopHarness();
+  await h.enqueueAndConfirm([user("root")]);
+  const root = await h.context.assemble({ contextWindow: 100000, maxOutput: 1000 });
+  await h.enqueueAndConfirm([user("sibling")]);
+  const sibling = await h.context.assemble({ contextWindow: 100000, maxOutput: 1000 });
+  await expect(h.runExclusive(async () => h.context.snapshot().queue)).resolves.toEqual([]);
+
+  const entered = gate();
+  const resume = gate();
+  const adapter: LlmAdapter = {
+    dialect: "fake",
+    buildRequest: (request) => ({ path: "/chat", body: JSON.stringify(request) }),
+    parseChunk: (chunk) => JSON.parse(chunk) as LlmEvent[],
+  };
+  const execute: ExecuteProvider = async function* (_request, signal) {
+    yield JSON.stringify([{ type: "content", delta: "partial" }]);
+    entered.resolve();
+    await resume.promise;
+    signal?.throwIfAborted();
+  };
+  const pending = h.driver.run({
+    sessionId: LOOP_META.id,
+    turnId: "t1" as TurnId,
+    meta: LOOP_META,
+    context: h.context,
+    sessions: h.sessions,
+    tools: h.tools,
+    adapter,
+    execute,
+    events: h.events,
+    eventClock: h.eventClock,
+    contextWindow: 100000,
+    maxOutput: 1000,
+    nodeId: root.headId as NodeId,
+    signal: new AbortController().signal,
+  });
+  await entered.promise;
+  await h.driver.cancel("t1" as TurnId);
+  resume.resolve();
+  expect((await pending).reason).toBe("cancelled");
+
+  const nodes = await tree(h);
+  const assistant = nodes.find(
+    (node) =>
+      node.role === "assistant" &&
+      node.content[0]?.type === "text" &&
+      node.content[0].text === "partial",
+  );
+  const cancel = nodes.find((node) => node.role === "cancel");
+  expect(assistant?.parentId).toBe(root.headId);
+  expect(assistant?.parentId).not.toBe(sibling.headId);
+  expect(cancel?.parentId).toBe(assistant?.id);
+  expect(cancel?.parentId).not.toBe(sibling.headId);
 });
 
 test("does not retry cancellation when cancel-node publication fails", async () => {

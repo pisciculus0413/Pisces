@@ -1,3 +1,4 @@
+import type { AssembledContext } from "../context/types.js";
 import { createEventPublisher, type EngineEventPublisher } from "../events.js";
 import type { ContentBlock, StopReason, Usage } from "../messages.js";
 import type { NodeId, SessionNode, SessionNodeDraft } from "../sessions/types.js";
@@ -28,6 +29,8 @@ interface TurnProgress {
   assistantPersisted: boolean;
   stepPublished: boolean;
   finalizationStarted: boolean;
+  assembleInFlight: boolean;
+  recoverHeadOnCancel: boolean;
 }
 
 function failure(error: unknown): { code: string; message: string } {
@@ -304,7 +307,10 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
       );
     progress.finalizationStarted = true;
     try {
-      await refreshCommittedHead(input, progress);
+      if (progress.recoverHeadOnCancel) {
+        await refreshCommittedHead(input, progress);
+        progress.recoverHeadOnCancel = false;
+      }
       return await finishCancelled(input, events, progress, terminalError);
     } catch (error) {
       return finalizeFailure(input, events, error, true);
@@ -346,7 +352,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
         controller.abort(input.signal.reason);
       };
       const progress: TurnProgress = {
-        headId: undefined,
+        headId: input.nodeId,
         blocks: [],
         step: undefined,
         stopReason: undefined,
@@ -354,6 +360,8 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
         assistantPersisted: false,
         stepPublished: false,
         finalizationStarted: false,
+        assembleInFlight: false,
+        recoverHeadOnCancel: false,
       };
 
       try {
@@ -377,13 +385,27 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
           progress.usage = undefined;
           progress.assistantPersisted = false;
           progress.stepPublished = false;
+          progress.recoverHeadOnCancel = false;
 
-          const assembled = await input.context.assemble({
-            ...(progress.headId ? { nodeId: progress.headId } : {}),
-            contextWindow: input.contextWindow,
-            maxOutput: input.maxOutput,
-            signal: controller.signal,
-          });
+          progress.assembleInFlight = true;
+          let assembled: AssembledContext;
+          try {
+            assembled = await input.context.assemble({
+              ...(progress.headId ? { nodeId: progress.headId } : {}),
+              contextWindow: input.contextWindow,
+              maxOutput: input.maxOutput,
+              signal: controller.signal,
+            });
+          } catch (error) {
+            if (
+              progress.assembleInFlight &&
+              error instanceof PiscesError &&
+              error.code === "event.publish_failed"
+            )
+              progress.recoverHeadOnCancel = true;
+            throw error;
+          }
+          progress.assembleInFlight = false;
           progress.headId = assembled.headId;
           progress.step = step;
           if (controller.signal.aborted)
