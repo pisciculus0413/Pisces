@@ -15,6 +15,12 @@ export { createGateway, type Gateway, type GatewayDeps } from "./gateway/gateway
 export type * from "./gateway/protocol.js";
 export { type RecoveryDeps, recoverActiveTurns } from "./gateway/recovery.js";
 export {
+  type DaemonHost,
+  type DaemonHostStatus,
+  type StartDaemonOptions,
+  startDaemon,
+} from "./host/daemon-host.js";
+export {
   createProviderHost,
   type ProviderHost,
   type ProviderHostOptions,

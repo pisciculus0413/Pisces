@@ -1,7 +1,6 @@
 import { constants } from "node:fs";
 import { type FileHandle, open } from "node:fs/promises";
 import { PiscesError } from "@pisces/core";
-import { acquireLock } from "../transport/peer-credentials.js";
 
 /**
  * Daemon single-instance lock.
@@ -37,6 +36,9 @@ export async function acquireDaemonLock(lockPath: string): Promise<DaemonLock> {
     if (typeof uid !== "number" || !stat.isFile() || stat.uid !== uid) {
       throw lockFailed();
     }
+    // Defer the native import so module loading never touches the addon before the
+    // host platform guard; a missing addon fails closed at lock acquisition.
+    const { acquireLock } = await import("../transport/peer-credentials.js");
     acquireLock(handle.fd);
   } catch (error) {
     await handle.close().catch(() => {});
