@@ -828,6 +828,7 @@ interface LlmRequest {
 
 type LlmEvent =
   | { type: "content"; delta: string }
+  | { type: "reasoning"; delta: string }
   | { type: "toolCall"; call: ToolCall }
   | { type: "usage"; usage: Usage }
   | { type: "stop"; reason: StopReason }
@@ -851,7 +852,7 @@ type ExecuteProvider = (
 ) => AsyncIterable<string>;
 ```
 
-适配器只做方言编解码；`AgentLoopDriver` 调用服务层注入的 `ExecuteProvider`，由服务层 `ProviderHost` 执行 HTTP、凭据、超时、重试与传输分帧。`ProviderHost` 以 `ProviderDescriptor.baseUrl` 与 `WireRequest.path` 组合请求地址，注入凭据与 `headers`。HTTP 与传输错误由服务层映射为错误事件，供应商错误体由适配器解析。
+适配器只做方言编解码；`AgentLoopDriver` 调用服务层注入的 `ExecuteProvider`，由服务层 `ProviderHost` 执行 HTTP、凭据、超时、重试与传输分帧。`ProviderHost` 以 `ProviderDescriptor.baseUrl` 与 `WireRequest.path` 组合请求地址，注入凭据与 `headers`。HTTP 与传输错误由服务层映射为错误事件，供应商错误体由适配器解析。首个内置方言为 OpenAI-compatible Chat Completions（`openai-chat`）：不支持图像/音频输出，`wireName` 上限为 64 个 ASCII 字符；所有 system 消息按顺序发送，不重新发送已存储的 reasoning，默认请求 `stream_options.include_usage=true`，并兼容响应中的 `reasoning_content`/`reasoning` 文本增量。
 
 供应商描述符由 `ProviderManagement` 定义，从软件配置目录发现或由扩展声明：
 
@@ -875,6 +876,8 @@ interface ModelDescriptor {
 ```
 
 协议 `provider.list` 返回的 `ProviderInfo` / `ModelInfo` 以描述符为只读投影，`ready` 由凭据状态计算；不含 `dialect`、`baseUrl`、`auth`、`headers`。
+
+`ProviderDescriptor.models` 可以为空。空模型清单表示该 provider 当前没有可选模型，`models` 返回空数组且 `ready=false`。
 
 ### 6.3 工具与包装器接口
 
@@ -996,9 +999,15 @@ interface SessionRepository {
   list(): Promise<SessionMeta[]>;
 }
 
+interface Credential {
+  type: "apiKey" | "oauth";
+  value: string;
+  expiresAt?: string;
+}
+
 interface Credentials {
-  get(providerId: string): Promise<Credential | undefined>;
-  refresh(providerId: string): Promise<Credential>;
+  get(credentialRef: string): Promise<Credential | undefined>;
+  refresh(credentialRef: string): Promise<Credential>;
 }
 
 interface ExecOptions {

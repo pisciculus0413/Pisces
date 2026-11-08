@@ -592,7 +592,7 @@ interface TurnStartResult {
 
 - 返回 `ProviderInfo[]`，只包含协议展示所需字段。
 - 不返回 `dialect`、`baseUrl`、`auth`、`headers`。
-- `ready` 由凭据状态计算；无模型时 `models` 为空。
+- `ready` 由凭据状态计算；空模型清单合法，此时 `models=[]` 且 `ready=false`。
 - 模型选择单位是 `(provider, model)`。
 
 #### 3.7.2 模板方法
@@ -747,8 +747,8 @@ type ProtocolEvent =
 | 存储 | `storage.corrupt` | 记录、meta 或 definition 损坏 |
 | 事件 | `event.publish_failed` | 同步 EventBus handler 抛错；已提交节点、队列状态、head 推进与已分配 `seq` 保留并允许序号空洞，不重试或回滚；driver 中作为终态 turn 错误 |
 | 供应商 | `provider.transport` | 网络/传输错误 |
-| 供应商 | `provider.timeout` | 请求超时 |
-| 供应商 | `provider.invalid_response` | 响应无法解析；文本安全截断后完整单节点事件仍超过 4 MiB（写库前失败） |
+| 供应商 | `provider.timeout` | 单次请求尝试超时 |
+| 供应商 | `provider.invalid_response` | HTTP 非 2xx 状态、请求 URL/headers 无效、响应无法解析；文本安全截断后完整单节点事件仍超过 4 MiB（写库前失败） |
 | 供应商 | `provider.refusal` | 供应商拒绝 |
 | 工具 | `tool.failed` | 工具执行失败 |
 | 工具 | `tool.denied` | 工具拒绝执行 |
@@ -1211,9 +1211,14 @@ interface AgentLoopDriver {
   run(input: RunTurnInput): Promise<TurnResult>;
   cancel(turnId: TurnId): Promise<boolean>;
 }
+
+interface AgentLoopDriverOptions {
+  runExclusive<T>(sessionId: SessionId, task: () => Promise<T>): Promise<T>;
+  now(): string;
+}
 ```
 
-`LlmAdapter`、`ExecuteProvider` 与 `LlmRequest` 见 §2 与 HLD §6.2；`run` 不直接处理协议。
+`LlmAdapter`、`ExecuteProvider` 与 `LlmRequest` 见 §2 与 HLD §6.2；`run` 不直接处理协议。Driver 工厂注入共享的会话锁与事件时钟；`now()` 返回 RFC3339 UTC 毫秒时间戳。
 
 #### 4.4.2 状态机
 
@@ -1561,17 +1566,30 @@ interface ProviderHost {
   execute(providerId: string): ExecuteProvider;
   ready(providerId: string): Promise<boolean>;
 }
+
+interface ProviderHostOptions {
+  providers: ProviderManagement;
+  credentials: Credentials;
+  fetch?: typeof fetch;
+  timeoutMs?: number;             // default 60_000
+  maxAttempts?: number;           // default 3
+  retryBaseDelayMs?: number;      // default 250
+  now?: () => number;
+  sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+}
 ```
 
 - `ProviderDescriptor` 提供 `baseUrl`、`auth`、`headers` 与模型清单；`ProviderHost` 以 `baseUrl + WireRequest.path` 组合请求。
 - `ExecuteProvider` 绑定到 provider；`AgentLoopDriver` 只接收注入的函数，不读配置。
-- 凭据由 `CredentialStore` 提供；API key 注入请求头，OAuth 按需刷新；错误消息不含凭据。
-- 请求体为 `WireRequest.body`，headers 合并描述符 headers 与适配器 headers。
-- 响应使用流式读取；SSE 的 `data:` 载荷作为字符串块交给 `LLMAdapter.parseChunk`；非 SSE 响应按单块处理。
-- 429 与 5xx 可重试并退避；4xx（除 429）不重试；中止不重试；流开始后不重试。
-- 超时、网络错误、状态码错误映射为 `provider.transport` / `provider.timeout` / `provider.invalid_response`。
-- 供应商业务错误体交给适配器解析；`ProviderHost` 不解释模型内容。
-- `ready` 由凭据有效性与模型清单共同决定；`provider.list` 使用该结果。
+- `CredentialStore` 以 `ProviderDescriptor.auth.credentialRef` 为键返回 `{type,value,expiresAt?}`；API key 与 OAuth access token 均以 Bearer 注入，OAuth 缺失或过期时按需刷新。`ready` 不触发刷新。
+- 请求体为 `WireRequest.body`，每次重试保持一致。headers 以大小写不敏感语义合并：描述符 headers 先应用，适配器 headers 覆盖，`authorization` 最后由 Host 写入且不能被覆盖。URL 必须保留 `baseUrl` 路径前缀并拒绝跨 origin、反斜杠及原始/递归百分号编码的点段。
+- 首个内置方言为 `openai-chat`，不支持图像/音频输出。请求路径默认 `/chat/completions`，`wireName` 上限为 64 个 ASCII 字符，所有 system 消息按顺序发送，已存储 reasoning 不重新发送，`stream_options.include_usage=true` 为默认值。
+- 响应使用流式读取；媒体类型按大小写不敏感解析，`text/event-stream`（包括 `charset` 参数）的 `data:` 载荷作为字符串块交给 `LLMAdapter.parseChunk`；非 SSE 响应按单块处理。
+- 每次尝试默认超时 60 秒；429 与 5xx 最多总计 3 次尝试，默认确定性退避 250ms、500ms；4xx（除 429）不重试；中止不重试；成功响应开始后不重试。
+- 凭据缺失、类型不匹配、刷新失败、网络、fetch 与响应体读取错误映射为 `provider.transport`；尝试超时映射为 `provider.timeout`；HTTP 非 2xx 状态、无效 URL/headers 与响应解析错误映射为 `provider.invalid_response`。
+- 2xx 响应体原样交给适配器，包括顶层 provider business error/refusal payload；`ProviderHost` 不解释模型内容。非 2xx 响应体视为 HTTP 状态错误，Host 不向适配器暴露。
+- 错误消息不得包含凭据、Authorization、描述符 headers、响应体或原始 fetch 异常，也不保留原始异常为 cause。
+- `ready` 要求 provider 存在、至少有一个模型，且 `credentials.get(credentialRef)` 返回类型匹配、未过期的凭据；空模型清单合法但恒为 false。
 
 ### 5.7 `WorkspaceAccess` 与 `ExecHost`
 
@@ -1860,7 +1878,7 @@ interface ClientRegistry {
 - `create` 先 rename events 再 rename meta；中途崩溃只留下可清理的孤儿目录。
 - 队列不持久化；daemon 崩溃丢失未出队条目，这是有意的取舍，不做 WAL。
 - 活跃 turn 使用 `active-turn.json` 标记；重启时追加 `cancel` 并清理。
-- 供应商 429/5xx 可重试；流开始后不重试；取消不重试。
+- 供应商 429/5xx 最多总计 3 次尝试，默认退避 250ms、500ms；4xx（除 429）、取消及成功流开始后不重试。
 - 工具失败回填为工具结果，不终止 turn；存储失败终止 turn，不继续请求。
 - `stop` 等待写盘完成；异常退出不保证未落盘数据。
 - 不自动重放未完成的工具调用；用户决定是否继续。
