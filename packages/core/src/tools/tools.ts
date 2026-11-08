@@ -1,4 +1,5 @@
 import type { EntryName, SelectionState, ToolCall, ToolResult } from "../messages.js";
+import type { JsonValue } from "../types.js";
 import { PiscesError } from "../types.js";
 import type {
   EntryInfo,
@@ -9,6 +10,7 @@ import type {
   ToolsOptions,
   ToolWrapper,
 } from "./types.js";
+import { ToolDeniedError } from "./types.js";
 import { encodeWireName as defaultEncodeWireName } from "./wire-name.js";
 
 function cloneDeclaration(declaration: ToolDeclaration): ToolDeclaration {
@@ -26,6 +28,41 @@ function failure(code: string, message: string): ToolResult {
   return { content: [{ type: "text", text: message }], isError: true, code };
 }
 
+function jsonEqual(left: JsonValue, right: JsonValue): boolean {
+  if (left === right) return true;
+  if (left === null || right === null || typeof left !== typeof right) return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((value, index) => jsonEqual(value, right[index] as JsonValue));
+  }
+  if (typeof left !== "object" || typeof right !== "object") return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => jsonEqual(left[key] as JsonValue, right[key] as JsonValue))
+  );
+}
+
+function isToolDeclaration(value: unknown): value is ToolDeclaration {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const declaration = value as Partial<ToolDeclaration>;
+  return (
+    typeof declaration.id === "string" &&
+    typeof declaration.source === "string" &&
+    typeof declaration.name === "string" &&
+    typeof declaration.description === "string" &&
+    declaration.parameters !== null &&
+    typeof declaration.parameters === "object" &&
+    !Array.isArray(declaration.parameters) &&
+    (declaration.execute === undefined || typeof declaration.execute === "function")
+  );
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 interface InventoryBinding {
   hash: string;
   types: ReadonlyMap<EntryName, EntryInfo["type"]>;
@@ -35,6 +72,7 @@ export function createTools(options: ToolsOptions = {}): Tools {
   const encode = options.encodeWireName ?? defaultEncodeWireName;
   const declarations = new Map<EntryName, ToolDeclaration>();
   const wrappers = new Map<EntryName, () => ToolWrapper>();
+  const wrapperPromises = new Map<EntryName, Promise<ToolWrapper>>();
   const wireOwners = new Map<string, EntryName>();
   const unavailable = new Set<EntryName>();
 
@@ -59,6 +97,26 @@ export function createTools(options: ToolsOptions = {}): Tools {
       return binding === undefined || binding.types.get(name) === "tool";
     }
 
+    function isWrapper(name: EntryName): boolean {
+      return binding === undefined || binding.types.get(name) === "wrapper";
+    }
+
+    function loadWrapper(name: EntryName): Promise<ToolWrapper> {
+      const cached = wrapperPromises.get(name);
+      if (cached !== undefined) return cached;
+      const factory = wrappers.get(name);
+      const promise =
+        factory === undefined
+          ? Promise.reject(new Error(`Wrapper is not registered: ${name}`))
+          : Promise.resolve().then(factory);
+      wrapperPromises.set(name, promise);
+      return promise;
+    }
+
+    function wrapperFailure(name: EntryName): ToolResult {
+      return failure("tool.wrapper_invalid", `Invalid tool wrapper: ${name}`);
+    }
+
     function selected(selection: SelectionState): ToolDeclaration[] {
       const names = new Set(selection);
       return [...names]
@@ -77,9 +135,50 @@ export function createTools(options: ToolsOptions = {}): Tools {
       );
       if (selectedTool === undefined)
         return failure("tool.failed", `Tool is not selected: ${call.name}`);
-      if (selectedTool.execute === undefined)
+
+      const baseline = {
+        id: selectedTool.id,
+        source: selectedTool.source,
+        name: selectedTool.name,
+        description: selectedTool.description,
+        parameters: structuredClone(selectedTool.parameters),
+      };
+      const wrapperNames = [...new Set(selection)]
+        .filter((name) => !unavailable.has(name) && isWrapper(name))
+        .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+      let wrapped = selectedTool;
+      for (const wrapperName of wrapperNames) {
+        let wrapper: ToolWrapper;
+        try {
+          wrapper = await loadWrapper(wrapperName);
+        } catch {
+          return wrapperFailure(wrapperName);
+        }
+        try {
+          const candidate = wrapper(wrapped);
+          if (
+            !isToolDeclaration(candidate) ||
+            candidate.id !== baseline.id ||
+            candidate.source !== baseline.source ||
+            candidate.name !== baseline.name ||
+            candidate.description !== baseline.description ||
+            !jsonEqual(candidate.parameters, baseline.parameters)
+          )
+            return wrapperFailure(wrapperName);
+          wrapped = candidate;
+        } catch {
+          return wrapperFailure(wrapperName);
+        }
+      }
+
+      if (wrapped.execute === undefined)
         return failure("tool.failed", `Tool has no execute function: ${call.name}`);
-      return selectedTool.execute(call.arguments, context);
+      try {
+        return structuredClone(await wrapped.execute(call.arguments, context));
+      } catch (error) {
+        if (error instanceof ToolDeniedError) return failure("tool.denied", messageOf(error));
+        return failure("tool.failed", messageOf(error));
+      }
     }
 
     return {
@@ -95,6 +194,7 @@ export function createTools(options: ToolsOptions = {}): Tools {
       },
       registerWrapper(name: EntryName, factory: () => ToolWrapper): void {
         registerWireName(name);
+        wrapperPromises.delete(name);
         wrappers.set(name, factory);
       },
       selected,
