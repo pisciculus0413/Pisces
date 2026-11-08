@@ -541,7 +541,7 @@ interface QueueEditParams {
 - `declaration` 必须由 daemon 附加 definition；客户端内联 definition 被拒绝。`Context.enqueue` 是内部可信边界，接受已附完整 definitions 并校验结构，不从实时 Tools 重新获取定义。
 - 当前 daemon 没有扩展清点与 definition 来源，因此客户端提交的 `kind=control` 条目（包括 `declaration`）一律以 `queue.invalid_control` 拒绝；`queue.edit`、`queue.remove`、`queue.clear` 尚未路由。
 - 队列按入队顺序排列；不提供重排方法。
-- `queue.edit` 只允许未确认的 `kind=agent` 条目；已确认条目返回 `queue.entry_locked`，`data.reason=confirmed`。
+- `queue.edit` 尚未路由（目标设计）；Core 内部编辑未确认的 `kind=agent` 条目，已确认时抛 `queue.entry_locked` 并在内部 `PiscesError.data` 带 `reason="confirmed"`；本阶段线上响应不透传 `data`。
 - `queue.remove` 可删除任意尚未装配的条目，包括已确认未装配条目。
 - `queue.clear` 清除全部尚未装配条目并返回完整 ids；有活跃 turn 时整个请求返回 `queue.entry_locked`，不部分清除。
 - 所有不在当前队列中的 id（包括已装配、已删除）在 `edit`/`remove` 时返回 `queue.entry_not_found`；不保留已装配 id 墓碑。
@@ -777,7 +777,7 @@ type ProtocolEvent =
 | 会话 | `session.invalid_workspace` | 工作区不存在、不是目录或不可写 |
 | 会话 | `session.node_not_found` | `nodeId` 不属于该会话 |
 | 队列 | `queue.entry_not_found` | id 不在当前队列中，包括已出队或已删除 |
-| 队列 | `queue.entry_locked` | 已确认条目不能编辑（`data.reason=confirmed`）；活跃 turn 时不能 clear |
+| 队列 | `queue.entry_locked` | 已确认条目不能编辑、活跃 turn 时不能 clear（均为未路由目标方法）；内部 `PiscesError.data.reason="confirmed"` 不透传到线上 |
 | 队列 | `queue.invalid_control` | 控制消息载荷不合法或客户端提交 compaction/cancel |
 | 队列 | `queue.duplicate_name` | `toggle` 中名称重复 |
 | 队列 | `queue.entry_too_large` | 单条队列入队内容超过 `MAX_ENTRY_BYTES` |
@@ -787,8 +787,8 @@ type ProtocolEvent =
 | turn | `turn.empty` | 最终无任何可见 kind=agent 消息；通过 turn.ended.error 表达 |
 | 上下文 | `context.selection_too_large` | 待提交完整选择集合的 EngineEvent 或对应协议封装超过 4 MiB；写库前原子拒绝 |
 | 上下文 | `context.source_failed` | 上下文来源/技能解析失败或文本安全截断后 content 仍超过 256 KiB |
-| 上下文 | `context.changed` | 声明选择或默认 head 在一次重跑后仍变化；data.retryable=true |
-| 上下文 | `context.pending_commit` | 提交结果仍无法读清时尝试其他修改；data.retryable=true |
+| 上下文 | `context.changed` | 声明选择或默认 head 在一次重跑后仍变化；内部 `PiscesError.data.retryable=true`，不透传到线上 |
+| 上下文 | `context.pending_commit` | 提交结果仍无法读清时尝试其他修改；内部 `PiscesError.data.retryable=true`，不透传到线上 |
 | 上下文 | `context.window_exceeded` | 裁剪后仍超出模型窗口 |
 | 存储 | `storage.io` | 持久化 I/O 失败 |
 | 存储 | `storage.corrupt` | 记录、meta 或 definition 损坏 |
@@ -815,7 +815,7 @@ type ProtocolEvent =
 - 内部错误码 `daemon.peer_credentials_unavailable`/`daemon.peer_credentials_failed`/`daemon.peer_credentials_invalid` 只在 daemon 内部使用，启动时归一化为 `daemon.native_unavailable`、`daemon.peercred_probe_failed` 或 `daemon.start_failed`，不发给客户端。
 - turn 进行中的供应商或工具错误通过 `turn.ended.error` 或工具结果回填，不伪造成请求错误。
 - `event.publish_failed` 表示同步事件 handler 失败；Context 与 driver 的事件发布适配器都保留原异常为 `cause`，不重试、不回滚已提交状态。driver 中通过 `turn.ended.reason="failed"` 与 `TurnResult.error` 结束 turn。
-- 错误消息不得包含凭据；需要附加结构化信息时使用 `data`。
+- 错误消息不得包含凭据。Core 内部 `PiscesError.data` 可保存结构化原因或重试提示；本阶段 `Gateway` 的 `Response.error` 仅映射 `code` 与 `message`，不转发 `data`/`cause`。结构化线上错误详情仅为未来目标，不应依赖。
 
 ### 3.10 校验、并发与一致性
 
@@ -1007,7 +1007,7 @@ interface SessionEventClock {
 - `selection`：已持久化记录的声明选择缓存；
 - `meta`：当前会话元数据。
 
-提交结果无法读清时，额外保留仅含本批不可变 drafts 副本、队列 ids、父节点/水位、first、最终 selection 和原 `storage.io` 对象的内存 pending 状态（§4.2.7），不保存整树，恢复后清除。这是常态状态限制的受限例外；不写磁盘、不设计 WAL，进程重启后队列仍丢失，只依赖 Store 的真实提交事实。pending 期间 `snapshot` 可读旧缓存；enqueue/edit/remove/clear/confirm/unconfirm/updateMeta 在改变任何状态前拒绝 `context.pending_commit`，`data.retryable=true`。
+提交结果无法读清时，额外保留仅含本批不可变 drafts 副本、队列 ids、父节点/水位、first、最终 selection 和原 `storage.io` 对象的内存 pending 状态（§4.2.7），不保存整树，恢复后清除。这是常态状态限制的受限例外；不写磁盘、不设计 WAL，进程重启后队列仍丢失，只依赖 Store 的真实提交事实。pending 期间 `snapshot` 可读旧缓存；enqueue/edit/remove/clear/confirm/unconfirm/updateMeta 在改变任何状态前拒绝 `context.pending_commit`，内部 `PiscesError.data.retryable=true`（当前响应不转发）。
 
 事件序号仅由同会话 Context、未来 driver 与 Gateway 共享的 `SessionEventClock` 维护；发布每个事件时在会话锁内调用 `next()`，快照取 `current()`，Context 不维护第二份计数。clock 返回非负安全整数且分配值单调增加；`ContextDeps.now` 返回恰为 24 ASCII 字节的 RFC3339 UTC 毫秒时间戳。只注入事件发布端，不依赖 EventBus 订阅或实现。
 
@@ -1061,7 +1061,7 @@ interface SessionEventClock {
 
 **C. 锁内提交**
 
-11. 重校验：若已确认队列条目在锁外被删除、取消确认或确认代际变化，从本批剔除；不新增本次窗口之后确认的条目。消息、工具、来源、预算及 compaction 均按最终幸存批次重新计算。若声明选择或省略 nodeId 时的默认 head 变化，丢弃本次 resolve 结果并从 A 重跑一次；仍变化返回 `context.changed`，`data.retryable=true`。仅 definitions 变化时也按最终分支与幸存声明重新投影工具；此纯投影不得在锁内触发来源解析。来源结果只保留最终选择中且当前分支尚无对应 source 的内容。
+11. 重校验：若已确认队列条目在锁外被删除、取消确认或确认代际变化，从本批剔除；不新增本次窗口之后确认的条目。消息、工具、来源、预算及 compaction 均按最终幸存批次重新计算。若声明选择或省略 nodeId 时的默认 head 变化，丢弃本次 resolve 结果并从 A 重跑一次；仍变化返回 `context.changed`，内部 `PiscesError.data.retryable=true`（当前响应不转发）。仅 definitions 变化时也按最终分支与幸存声明重新投影工具；此纯投影不得在锁内触发来源解析。来源结果只保留最终选择中且当前分支尚无对应 source 的内容。
 12. B 段每次 await 返回后、C 段写入前均调用 `signal?.throwIfAborted()`；即使来源忽略 signal 并返回也必须拦住取消。取消不持久化、不出队、不增加 `seq`、不写 `session.updated`，本次未发送草稿丢弃。
 13. 计算最终可见消息；若没有任何可见 `kind=agent` 消息，返回 `turn.empty`，不调用 `Sessions.create`；仅 user 消息也有效，不要求 system。
 14. 写前读取默认分支末端作为追加顺序水位（可复用 C 段刚读出的默认分支），显式旧 `headId` 仅作 parent，不能作水位；临时会话无水位。首次持久化使用 `Sessions.create(meta, drafts, options)`；已有节点时使用 `Sessions.append(sessionId, drafts, headId, options)`；`drafts` 为空时跳过写入。options.validate 预检完整节点事件；需发布的最终完整 selection 同样在不可逆写入前预检（§4.2.7）。正常成功路径不调用 readTree。
@@ -1809,24 +1809,23 @@ interface ClientRegistry {
 
 ### 6.1 新建会话与首次落盘
 
-1. 客户端发送 `session.create`，可带 `workspace`、`templateId`、`model`、`provider`、`systemPrompt`、`extensions`。
-2. `Gateway` 校验 provider/model 与扩展名称；`workspace` 省略时读取全局 `defaultWorkspace`，校验路径为绝对、存在且可写；失败则不创建临时会话。通过后创建临时 `SessionMeta`、`Context`（`persisted=false`）与空队列。
-3. `systemPrompt` 的每个元素转成一条 `kind=agent`、`role=system`、`source="create"` 的队列条目；`extensions` 与默认选择转成一条 `role=declaration` 的队列条目，`toggle` 为 `package#name`。
-4. 返回临时 `SessionMeta`；不写盘，不进入 `session.list`。
-5. 客户端直接用临时 `SessionMeta` 显示空会话；打开条目面板时调用 `entries.snapshot`，临时会话的 `selection` 为空，客户端按队列中的声明 delta 计算显示状态。
-6. 用户入队首条消息并发送 `turn.start`；`Gateway` 生成 `turnId`，注册活跃 turn，调用 `AgentLoopDriver.run`。
-7. `Context.assemble` 读取空分支、应用队列声明、物化队列节点、解析选中的上下文来源与技能；没有节点时返回 `turn.empty`。
-8. 首次持久化调用 `Sessions.create(meta, nodes)`；`SessionStore` 原子写入 `meta.json` 与 `events.jsonl`。
-9. 持久化成功后 `Context` 出队并更新选择；`session.updated` 推送首批节点；turn 开始请求供应商。
-10. 之后 assistant 回复、工具结果由 `AgentLoopDriver` 使用 `Sessions.append` 追加。
-11. 此时会话才出现在 `session.list`；临时会话与队列已转为已落盘记录/空队列。
+本阶段已路由的路径如下；模板、扩展清点、`session.list` 和 `entries.snapshot` 是未来目标方法（§3.3），不能作为现有客户端流程。
+
+1. 客户端调用 `session.create`，显式提供绝对、存在且可写的 `workspace` 和有效的 `(provider, model)`，或由调用方传入 `startDaemon` 的 `defaults` 补全；本阶段没有配置加载器。可选的 `systemPrompt` 是字符串数组。出现 `templateId` 即返回 `protocol.invalid_request`；显式或默认 `extensions` 非空即返回 `queue.invalid_control`，不创建临时会话。
+2. `Gateway` 校验后在内存中创建临时 `SessionMeta`、`Context` 与队列；`systemPrompt` 的每个元素转成 `kind=agent`、`role=system`、`source="create"` 的队列条目。空 `extensions` 不生成声明。
+3. 返回临时 `SessionMeta`，尚不写盘；客户端可用返回的 id 调用 `session.read` 取得空记录、队列和空选择，也可按连接 `session.subscribe`。`session.list`/`entries.snapshot` 当前返回 `protocol.unknown_method`。
+4. 客户端通过 `queue.enqueue` 添加 agent 消息（客户端控制条目均以 `queue.invalid_control` 拒绝），再调用 `turn.start`；`Gateway` 注册 turn，并在释放会话锁后启动 `AgentLoopDriver.run`。临时会话先在内存中暂存标记，不在 `turn.start` 时写盘。
+5. `Context.assemble` 装配已确认的队列消息；若最终没有可见 agent 消息，turn 以 `turn.ended.error` 报 `turn.empty`，不落盘。
+6. 首次持久化调用 `Sessions.create(meta, nodes)`；`SessionStore` 写入 `meta.json` 与 `events.jsonl`。提交成功后 `Gateway` 补写 `active-turn.json` 标记，**然后**才可发起供应商请求；补写失败以 `storage.io` 终止 turn，已提交节点不回滚。
+7. `Context` 出队并更新选择；已订阅连接收到 `session.updated`（事件不重放）；之后 assistant 回复、工具结果由 `AgentLoopDriver` 使用 `Sessions.append` 追加。
+8. 首次提交后会话已落盘，后续可由 `session.read` 按 id 读取；`session.list` 本阶段仍未路由，不能用于查找会话。
 
 失败边界：
 
 - `Sessions.create` 提交点前失败：不写 meta/nodes，队列保留，临时会话仍在内存。提交点后 storage.io 按 §4.2.7 协调：整批已提交则按事实完成状态并仍抛原错误，读不清则保留 pending。
 - 首次 turn 没有产生节点：`turn.empty`，不落盘，队列保留。
 - 首次落盘后供应商请求失败：会话已落盘，turn 失败，队列已清空。
-- daemon 在首次落盘前退出：临时 meta 与队列丢失，磁盘无空会话。
+- daemon 在首次落盘前退出：临时 meta 与队列丢失，磁盘无空会话。首次 `Sessions.create` 已提交到 `active-turn.json` 补写之间的崩溃窗口仍未覆盖：即使有已落盘节点，也可能没有可供重启恢复的活跃 turn 标记；本阶段不承诺恢复该窗口。
 
 ### 6.2 读取会话与选择条目
 
@@ -1836,8 +1835,8 @@ interface ClientRegistry {
 4. `queue`/`selection` 只在首屏返回；`selection` 只含已持久化记录，不含队列中的声明 delta。
 5. `records` 可能保留已取消选择的来源/技能节点；`selection` 表示当前是否启用。客户端不应以节点存在推断选中，`Context` 装配时按同一选择过滤请求内容。
 6. `session.read` 不改变活动分支；分支由后续 `turn.start.nodeId` 选择。
-7. 客户端用 `entries.snapshot` 取得可用条目与已持久化选择，再按队列中的声明 delta 计算界面显示状态。
-8. 客户端选择/取消条目时，通过 `queue.enqueue` 入队新的声明类控制消息；`queue.updated` 推送完整队列。
+7. 本阶段 `entries.snapshot` 未路由；客户端使用 `session.read.selection` 查看已持久化选择，不可通过该方法获取可用条目清单。
+8. 本阶段客户端通过 `queue.enqueue` 提交声明类控制消息会被拒绝（`queue.invalid_control`），因此选择/取消条目的客户端流程仍是目标设计；有效 agent 条目入队后可向已订阅连接推送 `queue.updated`。
 9. 订阅后，`queue.updated`、`selection.updated`、`session.updated` 与 turn 事件按 `sessionId` 推送。
 
 临时会话：`records` 为空，`selection` 为空，`nodeId` 返回 `session.node_not_found`。

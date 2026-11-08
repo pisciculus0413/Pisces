@@ -89,7 +89,7 @@ await host.stop();
 - NDJSON，仅字面 `LF` 分帧；`\r` 属于帧内数据。帧上限 8 MiB（含结尾 LF）。
 - 响应与事件序列化负载各上限 4 MiB；单连接出站队列默认上限 8 MiB。
 - 握手前最多同时 64 个连接，每个连接 5 秒内必须完成 `protocol.hello`；认证后的流式 turn
-  没有空闲超时。`protocol.hello` 必须是首帧，版本不匹配的错误刷出后关闭连接。
+  没有空闲超时。任何业务方法成功分派前必须先完成 `protocol.hello`；握手前发送其他方法会收到 `protocol.hello_required`，连接仍可随后握手。版本不匹配的错误刷出后关闭连接。
 - 无法关联 `id` 的错误响应使用 `id: ""` 哨兵；不回显原始输入。
 - 订阅是连接级的：`session.subscribe` 在校验会话后才安装订阅，`session.unsubscribe` 只移除
   当前连接；断线或退订不中止 turn。事件不重放，客户端先订阅再 `session.read`，以首个
