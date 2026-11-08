@@ -45,3 +45,10 @@ test("rejects initial values that are not nonnegative safe integers", () => {
   expect(() => createSessionEventClock(1.5)).toThrow(TypeError);
   expect(() => createSessionEventClock(Number.MAX_SAFE_INTEGER + 1)).toThrow(TypeError);
 });
+
+test("exports the runtime foundations from the daemon package", async () => {
+  const daemon = await import("../src/index.js");
+  expect(daemon.createConcurrency).toBeTypeOf("function");
+  expect(daemon.createEventBus).toBeTypeOf("function");
+  expect(daemon.createSessionEventClock).toBeTypeOf("function");
+});
