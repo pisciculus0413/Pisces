@@ -318,6 +318,68 @@ test("publishes only a cancelled step when cancellation follows a no-tool assist
   ).toEqual([{ turnId: "t1", step: 1, stopReason: "cancelled" }]);
 });
 
+test("uses the committed assistant head when publication fails after cancellation", async () => {
+  const h = createLoopHarness();
+  await h.enqueueAndConfirm([user("hello")]);
+  const { adapter, execute } = adapterFor([
+    [
+      { type: "content", delta: "partial" },
+      { type: "stop", reason: "stop" },
+    ],
+  ]);
+  const cancellations: Promise<boolean>[] = [];
+  let triggered = false;
+  h.events.subscribe((event) => {
+    if (triggered || event.type !== "session.updated") return;
+    const nodes = (event.data as unknown as { nodes: SessionNode[] }).nodes;
+    if (!nodes.some((node) => node.role === "assistant")) return;
+    triggered = true;
+    cancellations.push(h.driver.cancel("t1" as TurnId));
+    throw new Error("subscriber failed");
+  });
+
+  expect(await run(h, adapter, execute)).toMatchObject({
+    reason: "failed",
+    error: { code: "event.publish_failed" },
+  });
+  await Promise.all(cancellations);
+  const nodes = await tree(h);
+  expect(nodes.map((node) => node.role)).toEqual(["user", "assistant", "cancel"]);
+  expect(nodes[2]?.parentId).toBe(nodes[1]?.id);
+});
+
+test("uses the committed tool-result head when publication fails after cancellation", async () => {
+  const h = createLoopHarness({
+    tools: toolsWithInvoke(async () => ({ content: [{ type: "text", text: "ok" }] })),
+  });
+  await h.enqueueAndConfirm([user("hello")]);
+  const { adapter, execute } = adapterFor([
+    [
+      { type: "toolCall", call: { id: "call-1", name: name("one"), arguments: null } },
+      { type: "stop", reason: "toolCall" },
+    ],
+  ]);
+  const cancellations: Promise<boolean>[] = [];
+  let triggered = false;
+  h.events.subscribe((event) => {
+    if (triggered || event.type !== "session.updated") return;
+    const nodes = (event.data as unknown as { nodes: SessionNode[] }).nodes;
+    if (!nodes.some((node) => node.role === "tool")) return;
+    triggered = true;
+    cancellations.push(h.driver.cancel("t1" as TurnId));
+    throw new Error("subscriber failed");
+  });
+
+  expect(await run(h, adapter, execute)).toMatchObject({
+    reason: "failed",
+    error: { code: "event.publish_failed" },
+  });
+  await Promise.all(cancellations);
+  const nodes = await tree(h);
+  expect(nodes.map((node) => node.role)).toEqual(["user", "assistant", "tool", "cancel"]);
+  expect(nodes[3]?.parentId).toBe(nodes[2]?.id);
+});
+
 test("waits for launched tools, preserves result order, and stops before another step", async () => {
   const bothStarted = gate();
   const releaseTools = gate();

@@ -360,6 +360,28 @@ test("redacts EventBus failures and never retries committed state", async () => 
   }
 });
 
+test("normalizes a forged event.publish_failed message", async () => {
+  const h = createLoopHarness();
+  await h.enqueueAndConfirm([user("hello")]);
+  const { adapter, execute } = adapterFor([
+    [
+      { type: "content", delta: "hello" },
+      { type: "stop", reason: "stop" },
+    ],
+  ]);
+  h.events.subscribe((event) => {
+    if (event.type === "turn.started")
+      throw new PiscesError("event.publish_failed", "token=secret");
+  });
+
+  const result = await run(h, adapter, execute);
+  expect(result.error).toEqual({
+    code: "event.publish_failed",
+    message: "Event publication failed",
+  });
+  expect(JSON.stringify(h.published)).not.toContain("secret");
+});
+
 test("stops at each driver storage append boundary", async () => {
   const io = () => new PiscesError("storage.io", "append failed");
 

@@ -96,7 +96,6 @@ export function eventBytes(value: unknown): number {
 }
 
 export function normalizePublishFailure(cause: unknown): PiscesError {
-  if (cause instanceof PiscesError && cause.code === "event.publish_failed") return cause;
   return new PiscesError("event.publish_failed", "Event publication failed", { cause });
 }
 

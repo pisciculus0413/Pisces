@@ -1,6 +1,6 @@
 import { createEventPublisher, type EngineEventPublisher } from "../events.js";
 import type { ContentBlock, StopReason, Usage } from "../messages.js";
-import type { NodeId, SessionNodeDraft } from "../sessions/types.js";
+import type { NodeId, SessionNode, SessionNodeDraft } from "../sessions/types.js";
 import { PiscesError } from "../types.js";
 import { limitDriverContent } from "./content.js";
 import type {
@@ -163,6 +163,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     events: EngineEventPublisher,
     parentId: RunTurnInput["nodeId"],
     drafts: SessionNodeDraft[],
+    onCommitted?: (nodes: SessionNode[]) => void,
   ) {
     return options.runExclusive(input.sessionId, async () => {
       const nodes = await input.sessions.append(input.sessionId, drafts, parentId, {
@@ -180,6 +181,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
           }
         },
       });
+      onCommitted?.(nodes);
       events.publishSession(nodes);
       return nodes;
     });
@@ -215,45 +217,62 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     input: RunTurnInput,
     events: EngineEventPublisher,
     progress: TurnProgress,
+    terminalError?: unknown,
   ): Promise<TurnResult> {
     if (!progress.assistantPersisted && progress.blocks.length) {
-      const assistant = await append(input, events, progress.headId, [
-        {
-          kind: "agent",
-          role: "assistant",
-          source: "assistant",
-          content: limitDriverContent(progress.blocks),
+      await append(
+        input,
+        events,
+        progress.headId,
+        [
+          {
+            kind: "agent",
+            role: "assistant",
+            source: "assistant",
+            content: limitDriverContent(progress.blocks),
+          },
+        ],
+        (nodes) => {
+          progress.headId = nodes.at(-1)?.id;
+          progress.assistantPersisted = true;
         },
-      ]);
-      progress.headId = assistant.at(-1)?.id;
-      progress.assistantPersisted = true;
+      );
     }
     await clearConfirmations(input);
     if (progress.headId) {
-      const cancel = await append(input, events, progress.headId, [
-        {
-          kind: "control",
-          role: "cancel",
-          source: "driver",
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                turnId: input.turnId,
-                reason: "cancelled",
-                at: progress.headId,
-              }),
-            },
-          ],
+      await append(
+        input,
+        events,
+        progress.headId,
+        [
+          {
+            kind: "control",
+            role: "cancel",
+            source: "driver",
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  turnId: input.turnId,
+                  reason: "cancelled",
+                  at: progress.headId,
+                }),
+              },
+            ],
+          },
+        ],
+        (nodes) => {
+          progress.headId = nodes.at(-1)?.id;
         },
-      ]);
-      progress.headId = cancel.at(-1)?.id;
+      );
     }
     if (progress.step !== undefined && !progress.stepPublished) {
       await publishStep(input, events, progress.step, "cancelled", progress.usage);
       progress.stepPublished = true;
     }
-    return end(input, events, "cancelled");
+    return terminalError
+      ? finalizeFailure(input, events, terminalError)
+      : end(input, events, "cancelled");
   }
 
   async function completeIfIdle(
@@ -419,16 +438,23 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
               "Provider returned cancelled stop without cancellation",
             );
 
-          const assistant = await append(input, events, progress.headId, [
-            {
-              kind: "agent",
-              role: "assistant",
-              source: "assistant",
-              content: limitDriverContent(progress.blocks),
+          await append(
+            input,
+            events,
+            progress.headId,
+            [
+              {
+                kind: "agent",
+                role: "assistant",
+                source: "assistant",
+                content: limitDriverContent(progress.blocks),
+              },
+            ],
+            (nodes) => {
+              progress.assistantPersisted = true;
+              progress.headId = nodes.at(-1)?.id;
             },
-          ]);
-          progress.assistantPersisted = true;
-          progress.headId = assistant.at(-1)?.id;
+          );
           if (controller.signal.aborted) return await finishCancelled(input, events, progress);
 
           if (calls.length) {
@@ -460,8 +486,9 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
                 ],
               };
             });
-            const toolNodes = await append(input, events, progress.headId, drafts);
-            progress.headId = toolNodes.at(-1)?.id;
+            await append(input, events, progress.headId, drafts, (nodes) => {
+              progress.headId = nodes.at(-1)?.id;
+            });
             if (controller.signal.aborted) return await finishCancelled(input, events, progress);
             if (
               !(await publishStep(
@@ -506,8 +533,12 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
         if (error instanceof PiscesError && error.code === "turn.active") throw error;
         if (active?.state === "ended") return await finalizeFailure(input, events, error);
         if (active?.state === "cancelling" || controller.signal.aborted) {
+          const terminalError =
+            error instanceof PiscesError && error.code === "event.publish_failed"
+              ? error
+              : undefined;
           try {
-            return await finishCancelled(input, events, progress);
+            return await finishCancelled(input, events, progress, terminalError);
           } catch (finalizationError) {
             return await finalizeFailure(input, events, finalizationError);
           }
