@@ -112,6 +112,28 @@ describe("createNdjsonDecoder", () => {
     expect(lines).toHaveLength(0);
   });
 
+  it("keeps retained heap proportional to frame bytes under tiny fragments", () => {
+    const { decoder, lines } = collectLines();
+    const fragmentCount = 500_000;
+    const fragment = new Uint8Array([FILLER]);
+
+    const before = process.memoryUsage().heapUsed;
+    for (let index = 0; index < fragmentCount; index += 1) {
+      decoder.push(fragment);
+    }
+    const retained = process.memoryUsage().heapUsed - before;
+
+    expect(retained).toBeLessThan(8 * 1024 * 1024);
+    expect(lines).toHaveLength(0);
+
+    decoder.push(new Uint8Array([LF]));
+    decoder.finish();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.byteLength).toBe(fragmentCount);
+    expect(lines[0]?.[0]).toBe(FILLER);
+    expect(lines[0]?.[fragmentCount - 1]).toBe(FILLER);
+  });
+
   it("fails finish for an incomplete trailing line", () => {
     const { decoder } = collectLines();
     decoder.push(utf8("complete\npartial"));

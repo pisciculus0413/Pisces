@@ -14,6 +14,9 @@ export const MAX_EVENT_BYTES = MAX_RESPONSE_BYTES;
 const LF = 0x0a;
 const UTF8_ENCODER = new TextEncoder();
 
+/** 单行累计缓冲的初始容量；按需翻倍增长，最多到 {@link MAX_FRAME_BYTES}。 */
+const INITIAL_LINE_BYTES = 1024;
+
 /** 帧（含结尾 LF）超过 {@link MAX_FRAME_BYTES}。 */
 export class FrameTooLarge extends Error {
   constructor() {
@@ -33,33 +36,33 @@ export interface NdjsonDecoder {
  * 流结束时仍有未终止的字节则在 `finish` 抛错。
  */
 export function createNdjsonDecoder(onLine: (line: Uint8Array) => void): NdjsonDecoder {
-  const parts: Uint8Array[] = [];
-  let pendingBytes = 0;
+  let buffer = new Uint8Array(INITIAL_LINE_BYTES);
+  let length = 0;
   let failed = false;
 
   const overflow = (): never => {
     failed = true;
-    parts.length = 0;
-    pendingBytes = 0;
+    buffer = new Uint8Array(0);
+    length = 0;
     throw new FrameTooLarge();
   };
 
-  const join = (tail: Uint8Array): Uint8Array => {
-    if (parts.length === 0) {
-      return new Uint8Array(tail);
+  /** Grows to fit `length + additional` content bytes; never above the frame cap. */
+  const reserve = (additional: number): void => {
+    const required = length + additional;
+    if (required >= MAX_FRAME_BYTES) {
+      overflow();
     }
-    let total = tail.byteLength;
-    for (const part of parts) {
-      total += part.byteLength;
+    if (required <= buffer.byteLength) {
+      return;
     }
-    const line = new Uint8Array(total);
-    let offset = 0;
-    for (const part of parts) {
-      line.set(part, offset);
-      offset += part.byteLength;
+    let capacity = buffer.byteLength === 0 ? INITIAL_LINE_BYTES : buffer.byteLength;
+    while (capacity < required) {
+      capacity *= 2;
     }
-    line.set(tail, offset);
-    return line;
+    const grown = new Uint8Array(capacity);
+    grown.set(buffer.subarray(0, length));
+    buffer = grown;
   };
 
   return {
@@ -71,27 +74,24 @@ export function createNdjsonDecoder(onLine: (line: Uint8Array) => void): NdjsonD
       for (;;) {
         const lf = chunk.indexOf(LF, start);
         if (lf === -1) {
-          const tail = chunk.slice(start);
-          if (tail.byteLength === 0) {
+          const tailLength = chunk.byteLength - start;
+          if (tailLength === 0) {
             return;
           }
-          if (pendingBytes + tail.byteLength >= MAX_FRAME_BYTES) {
-            overflow();
-          }
-          parts.push(tail);
-          pendingBytes += tail.byteLength;
+          reserve(tailLength);
+          buffer.set(chunk.subarray(start), length);
+          length += tailLength;
           return;
         }
-        const segment = chunk.subarray(start, lf);
-        if (pendingBytes + segment.byteLength >= MAX_FRAME_BYTES) {
-          overflow();
-        }
-        const line = join(segment);
-        parts.length = 0;
-        pendingBytes = 0;
+        const segmentLength = lf - start;
+        reserve(segmentLength);
+        buffer.set(chunk.subarray(start, lf), length);
+        length += segmentLength;
+        const line = buffer.slice(0, length);
+        length = 0;
         onLine(line);
         start = lf + 1;
-        if (start >= chunk.length) {
+        if (start >= chunk.byteLength) {
           return;
         }
       }
@@ -100,7 +100,7 @@ export function createNdjsonDecoder(onLine: (line: Uint8Array) => void): NdjsonD
       if (failed) {
         throw new FrameTooLarge();
       }
-      if (parts.length > 0 || pendingBytes > 0) {
+      if (length > 0) {
         throw new Error("Incomplete frame: stream ended before LF");
       }
     },
