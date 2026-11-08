@@ -4,5 +4,14 @@
  * 见 docs/0-module.md。
  */
 
-/** 协议版本，用于客户端与 daemon 的版本协商。 */
-export const PROTOCOL_VERSION = "0.0.1";
+export {
+  createNdjsonDecoder,
+  encodeFrame,
+  FrameTooLarge,
+  MAX_EVENT_BYTES,
+  MAX_FRAME_BYTES,
+  MAX_RESPONSE_BYTES,
+  type NdjsonDecoder,
+} from "./codec.js";
+export type { JsonValue, ProtocolError, ProtocolEvent, Request, Response } from "./types.js";
+export { negotiateVersion, PROTOCOL_VERSION } from "./version.js";
