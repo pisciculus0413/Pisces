@@ -3,6 +3,7 @@ import {
   createOpenAiChatAdapter,
   createProviderManagement,
   type LlmEvent,
+  PiscesError,
   type ProviderDescriptor,
   type WireRequest,
 } from "@pisces/core";
@@ -79,6 +80,20 @@ async function collect<T>(values: AsyncIterable<T>): Promise<T[]> {
   const result: T[] = [];
   for await (const value of values) result.push(value);
   return result;
+}
+
+async function raceWithin<T>(promise: Promise<T>, timeoutMs = 500): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("test timed out")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function sseResponse(...frames: string[]): Response {
@@ -239,6 +254,63 @@ test("refreshes missing or expired OAuth credentials but not a fresh OAuth crede
   expect(fresh.refresh).not.toHaveBeenCalled();
 });
 
+test("preserves cancellation while credential lookup or refresh is pending", async () => {
+  let getStartedResolve!: () => void;
+  const getStarted = new Promise<void>((resolve) => {
+    getStartedResolve = resolve;
+  });
+  const getHost = createProviderHost(
+    hostOptions({
+      credentials: {
+        get: async () => {
+          getStartedResolve();
+          return new Promise<Credential | undefined>(() => {});
+        },
+        refresh: async () => {
+          throw new Error("unexpected refresh");
+        },
+      },
+    }),
+  );
+  const getController = new AbortController();
+  const getNext = getHost
+    .execute("p")(request(), getController.signal)
+    [Symbol.asyncIterator]()
+    .next();
+  await getStarted;
+  getController.abort("stop during get");
+  await expect(raceWithin(getNext)).rejects.toBe("stop during get");
+
+  let refreshStartedResolve!: () => void;
+  const refreshStarted = new Promise<void>((resolve) => {
+    refreshStartedResolve = resolve;
+  });
+  const refreshHost = createProviderHost(
+    hostOptions({
+      providers: providersWith(descriptor({ auth: { type: "oauth", credentialRef: "ref" } })),
+      credentials: {
+        get: async () => ({
+          type: "oauth",
+          value: "expired",
+          expiresAt: "2020-01-01T00:00:00.000Z",
+        }),
+        refresh: async () => {
+          refreshStartedResolve();
+          return new Promise<Credential>(() => {});
+        },
+      },
+    }),
+  );
+  const refreshController = new AbortController();
+  const refreshNext = refreshHost
+    .execute("p")(request(), refreshController.signal)
+    [Symbol.asyncIterator]()
+    .next();
+  await refreshStarted;
+  refreshController.abort("stop during refresh");
+  await expect(raceWithin(refreshNext)).rejects.toBe("stop during refresh");
+});
+
 test("retries 429 and 5xx before accepting a stream with deterministic backoff", async () => {
   const sleeps: number[] = [];
   const bodies: Array<string | undefined> = [];
@@ -305,6 +377,53 @@ test("does not retry 4xx or exhausted status responses and redacts their bodies"
   });
   expect(attempts).toBe(3);
   expect(sleeps).toEqual([250, 500]);
+});
+
+test("does not await never-settling status response cleanup", async () => {
+  let retryCancelCalls = 0;
+  let attempts = 0;
+  const retrying = createProviderHost(
+    hostOptions({
+      maxAttempts: 2,
+      sleep: async () => {},
+      fetch: async () => {
+        attempts++;
+        if (attempts === 1) {
+          const body = new ReadableStream<Uint8Array>({
+            cancel() {
+              retryCancelCalls++;
+              return new Promise<void>(() => {});
+            },
+          });
+          return new Response(body, { status: 429 });
+        }
+        return new Response("ok");
+      },
+    }),
+  );
+  await expect(raceWithin(collect(executeFor(retrying)))).resolves.toEqual(["ok"]);
+  expect(retryCancelCalls).toBe(1);
+  expect(attempts).toBe(2);
+
+  let terminalCancelCalls = 0;
+  const terminal = createProviderHost(
+    hostOptions({
+      fetch: async () => {
+        const body = new ReadableStream<Uint8Array>({
+          cancel() {
+            terminalCancelCalls++;
+            return new Promise<void>(() => {});
+          },
+        });
+        return new Response(body, { status: 400 });
+      },
+    }),
+  );
+  await expect(raceWithin(collect(executeFor(terminal)))).rejects.toMatchObject({
+    code: "provider.invalid_response",
+    message: "Provider returned an invalid HTTP response",
+  });
+  expect(terminalCancelCalls).toBe(1);
 });
 
 test("preserves cancellation during retry backoff and does not fetch again", async () => {
@@ -377,6 +496,61 @@ test("distinguishes timeout from outer cancellation and redacts fetch failures",
   });
   expect(failure.cause).toBeUndefined();
   expect(JSON.stringify(failure)).not.toContain("secret-key");
+});
+
+test("redacts PiscesError messages thrown by fetch", async () => {
+  const host = createProviderHost(
+    hostOptions({
+      fetch: async () => {
+        throw new PiscesError("provider.transport", "fetch secret");
+      },
+    }),
+  );
+  const failure = await collect(executeFor(host)).catch((error) => error);
+  expect(failure).toMatchObject({
+    code: "provider.transport",
+    message: "Provider transport failed",
+    cause: undefined,
+  });
+  expect(JSON.stringify(failure)).not.toContain("fetch secret");
+});
+
+test("redacts PiscesError messages thrown while reading a response body", async () => {
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.error(new PiscesError("provider.transport", "body secret"));
+    },
+  });
+  const host = createProviderHost(
+    hostOptions({
+      fetch: async () => new Response(stream),
+    }),
+  );
+  const failure = await collect(executeFor(host)).catch((error) => error);
+  expect(failure).toMatchObject({
+    code: "provider.transport",
+    message: "Provider transport failed",
+    cause: undefined,
+  });
+  expect(JSON.stringify(failure)).not.toContain("body secret");
+});
+
+test("redacts PiscesError messages thrown during retry backoff", async () => {
+  const host = createProviderHost(
+    hostOptions({
+      fetch: async () => new Response("busy", { status: 429 }),
+      sleep: async () => {
+        throw new PiscesError("provider.transport", "sleep secret");
+      },
+    }),
+  );
+  const failure = await collect(executeFor(host)).catch((error) => error);
+  expect(failure).toMatchObject({
+    code: "provider.transport",
+    message: "Provider transport failed",
+    cause: undefined,
+  });
+  expect(JSON.stringify(failure)).not.toContain("sleep secret");
 });
 
 test("a fetch which ignores abort cannot yield a response after cancellation", async () => {

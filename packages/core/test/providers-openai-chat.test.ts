@@ -171,6 +171,51 @@ test("builds Chat Completions messages, tools, and parameters without stored rea
   expect(replay.tools[0].function.parameters.properties.text).toEqual({ type: "string" });
 });
 
+test("serializes empty or reasoning-only assistant history with non-null content", async () => {
+  const { createOpenAiChatAdapter } = await import("../src/index.js");
+  const adapter = createOpenAiChatAdapter();
+
+  for (const content of [
+    [],
+    [{ type: "reasoning", text: "stored reasoning" } satisfies ContentBlock],
+  ]) {
+    const wire = adapter.buildRequest({
+      model: "m",
+      messages: [{ role: "assistant", content }],
+    });
+    expect(JSON.parse(wire.body).messages).toEqual([{ role: "assistant", content: "" }]);
+  }
+
+  const toolName = "pkg#echo" as EntryName;
+  const toolOnly = adapter.buildRequest({
+    model: "m",
+    messages: [
+      message("assistant", {
+        type: "toolCall",
+        id: "call_1",
+        name: toolName,
+        arguments: {},
+      }),
+      message("tool", {
+        type: "toolResult",
+        toolCallId: "call_1",
+        content: [text("ok")],
+      }),
+    ],
+  });
+  expect(JSON.parse(toolOnly.body).messages[0]).toEqual({
+    role: "assistant",
+    content: null,
+    tool_calls: [
+      {
+        id: "call_1",
+        type: "function",
+        function: { name: encodeWireName(toolName), arguments: "{}" },
+      },
+    ],
+  });
+});
+
 test("rejects an over-limit wire name before returning a request", async () => {
   const { createOpenAiChatAdapter } = await import("../src/index.js");
   const adapter = createOpenAiChatAdapter({ maxToolNameLength: 8 });
@@ -201,6 +246,7 @@ test("rejects invalid options and unsupported request shapes safely", async () =
   for (const options of [
     { path: "chat" },
     { path: "//evil.test/chat" },
+    { path: "/chat#fragment" },
     { maxToolNameLength: 0 },
     { maxToolNameLength: 1.5 },
   ]) {
@@ -288,20 +334,17 @@ test("rejects tool results that do not match outstanding assistant calls exactly
 
 test("exports the built-in dialect and a reusable factory", async () => {
   const core = await import("../src/index.js");
-  const first = core.openAiChatAdapterFactory({
+  const providers = core.createProviderManagement();
+  providers.registerProvider({
     id: "p",
     dialect: core.OPENAI_CHAT_DIALECT,
     baseUrl: "https://example.test/v1",
     auth: { type: "apiKey", credentialRef: "ref" },
     models: [],
   });
-  const second = core.openAiChatAdapterFactory({
-    id: "p",
-    dialect: core.OPENAI_CHAT_DIALECT,
-    baseUrl: "https://example.test/v1",
-    auth: { type: "apiKey", credentialRef: "ref" },
-    models: [],
-  });
+  providers.registerDialect(core.OPENAI_CHAT_DIALECT, core.openAiChatAdapterFactory);
+  const first = providers.createAdapter("p");
+  const second = providers.createAdapter("p");
 
   expect(core.OPENAI_CHAT_DIALECT).toBe("openai-chat");
   expect(first.dialect).toBe(core.OPENAI_CHAT_DIALECT);

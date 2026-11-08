@@ -21,6 +21,12 @@ const TRANSPORT_FAILURE = "Provider transport failed";
 const TIMEOUT_FAILURE = "Provider request timed out";
 const CREDENTIAL_FAILURE = "Provider credential is unavailable";
 
+class StatusResponseError extends PiscesError {
+  constructor() {
+    super("provider.invalid_response", INVALID_HTTP_RESPONSE);
+  }
+}
+
 export interface ProviderHost {
   execute(providerId: string): ExecuteProvider;
   ready(providerId: string): Promise<boolean>;
@@ -61,7 +67,7 @@ function invalidHeaders(): never {
 }
 
 function invalidHttpResponse(): never {
-  throw new PiscesError("provider.invalid_response", INVALID_HTTP_RESPONSE);
+  throw new StatusResponseError();
 }
 
 function transportFailure(): PiscesError {
@@ -128,6 +134,28 @@ function defaultSleep(delayMs: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+function waitForAbort<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
+}
+
 function createAttemptSignal(outer: AbortSignal | undefined, timeoutMs: number): AttemptSignal {
   const controller = new AbortController();
   let timedOut = false;
@@ -188,11 +216,16 @@ async function resolveCredential(
   descriptor: ProviderDescriptor,
   credentials: Credentials,
   now: () => number,
+  signal?: AbortSignal,
 ): Promise<Credential> {
   let credential: unknown;
   try {
-    credential = await credentials.get(descriptor.auth.credentialRef);
+    credential = await waitForAbort(
+      Promise.resolve(credentials.get(descriptor.auth.credentialRef)),
+      signal,
+    );
   } catch {
+    if (signal?.aborted) throw signal.reason;
     credentialFailure();
   }
 
@@ -207,10 +240,14 @@ async function resolveCredential(
   if (!shouldRefresh) credentialFailure();
 
   try {
-    const refreshed: unknown = await credentials.refresh(descriptor.auth.credentialRef);
+    const refreshed: unknown = await waitForAbort(
+      Promise.resolve(credentials.refresh(descriptor.auth.credentialRef)),
+      signal,
+    );
     if (!usableCredential(refreshed, descriptor, now())) credentialFailure();
     return refreshed;
   } catch {
+    if (signal?.aborted) throw signal.reason;
     credentialFailure();
   }
 }
@@ -305,9 +342,9 @@ function requestHeaders(
   return headers;
 }
 
-async function cancelResponse(response: Response): Promise<void> {
+function cancelResponse(response: Response): void {
   try {
-    await response.body?.cancel();
+    void response.body?.cancel().catch(() => {});
   } catch {
     // Status and transport decisions do not depend on cleanup success.
   }
@@ -391,8 +428,9 @@ function cancellableBody(body: ReadableStream<Uint8Array>, signal: AbortSignal):
   };
 }
 
-function normalizedTransportError(error: unknown): PiscesError {
-  return error instanceof PiscesError ? error : transportFailure();
+function normalizeExecutionError(error: unknown): never {
+  if (error instanceof StatusResponseError) invalidHttpResponse();
+  throw transportFailure();
 }
 
 function isSse(response: Response): boolean {
@@ -466,7 +504,7 @@ export function createProviderHost(options: ProviderHostOptions): ProviderHost {
         if (outerSignal?.aborted) throw outerSignal.reason;
         const descriptor = providers.get(providerId);
         if (!descriptor) invalidConfiguration();
-        const credential = await resolveCredential(descriptor, credentials, now);
+        const credential = await resolveCredential(descriptor, credentials, now, outerSignal);
         if (outerSignal?.aborted) throw outerSignal.reason;
 
         const url = providerUrl(descriptor.baseUrl, request.path);
@@ -486,22 +524,22 @@ export function createProviderHost(options: ProviderHostOptions): ProviderHost {
                 body: request.body,
                 signal: attempt.signal,
               });
-            } catch (error) {
+            } catch {
               attempt.throwIfInterrupted();
-              throw normalizedTransportError(error);
+              throw transportFailure();
             }
             if (attempt.signal.aborted) {
-              await cancelResponse(response);
+              cancelResponse(response);
               attempt.throwIfInterrupted();
             }
 
             if (response.status === 429 || (response.status >= 500 && response.status <= 599)) {
-              await cancelResponse(response);
+              cancelResponse(response);
               attempt.throwIfInterrupted();
               retry = attemptNumber < maxAttempts;
               if (!retry) invalidHttpResponse();
             } else if (response.status < 200 || response.status > 299) {
-              await cancelResponse(response);
+              cancelResponse(response);
               attempt.throwIfInterrupted();
               invalidHttpResponse();
             } else {
@@ -510,7 +548,7 @@ export function createProviderHost(options: ProviderHostOptions): ProviderHost {
             }
           } catch (error) {
             attempt.throwIfInterrupted();
-            throw normalizedTransportError(error);
+            normalizeExecutionError(error);
           } finally {
             attempt.dispose();
           }
@@ -519,9 +557,9 @@ export function createProviderHost(options: ProviderHostOptions): ProviderHost {
             const delayMs = retryBaseDelayMs * 2 ** (attemptNumber - 1);
             try {
               await sleep(delayMs, outerSignal);
-            } catch (error) {
+            } catch {
               if (outerSignal?.aborted) throw outerSignal.reason;
-              throw normalizedTransportError(error);
+              throw transportFailure();
             }
             if (outerSignal?.aborted) throw outerSignal.reason;
           }

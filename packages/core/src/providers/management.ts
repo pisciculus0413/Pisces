@@ -142,10 +142,11 @@ function sortedCloneDescriptor(value: ProviderDescriptor): ProviderDescriptor {
   return clone;
 }
 
-function validateAdapter(value: unknown): asserts value is LlmAdapter {
+function validateAdapter(value: unknown, dialect: string): asserts value is LlmAdapter {
   if (!isRecord(value)) invalid();
   if (
     !isNonEmptyString(value.dialect) ||
+    value.dialect !== dialect ||
     typeof value.buildRequest !== "function" ||
     typeof value.parseChunk !== "function"
   )
@@ -191,7 +192,7 @@ export function createProviderManagement(): ProviderManagement {
       if (!factory) invalid();
       try {
         const adapter: unknown = factory(cloneDescriptor(descriptor));
-        validateAdapter(adapter);
+        validateAdapter(adapter, descriptor.dialect);
         return adapter;
       } catch {
         invalid();

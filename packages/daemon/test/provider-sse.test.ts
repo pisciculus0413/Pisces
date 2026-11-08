@@ -69,14 +69,10 @@ test("dispatches a final data event at EOF without a blank line", async () => {
 
 test("handles CRLF split between carriage return and line feed", async () => {
   const bytes = encoder.encode("data: value\r\n\r\n");
-  const trailingCarriageReturn = bytes.slice(0, bytes.length - 2);
+  const split = bytes.indexOf(0x0d) + 1;
 
   await expect(
-    collect(
-      parseSseStream(
-        streamOf([trailingCarriageReturn, bytes.slice(trailingCarriageReturn.length)]),
-      ),
-    ),
+    collect(parseSseStream(streamOf([bytes.slice(0, split), bytes.slice(split)]))),
   ).resolves.toEqual(["value"]);
 });
 

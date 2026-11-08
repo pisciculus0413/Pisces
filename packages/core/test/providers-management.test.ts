@@ -229,15 +229,20 @@ test("creates a fresh adapter for every call without exposing descriptor mutatio
 });
 
 test("validates dialect registration and provider lookup", () => {
+  const mismatched = createProviderManagement();
+  mismatched.registerProvider(descriptor({ dialect: "later" }));
+
+  expectInvalid(() => mismatched.createAdapter("p"));
+  expectInvalid(() => mismatched.createAdapter("missing"));
+  expectInvalid(() => mismatched.registerDialect("", () => fakeAdapter()));
+
+  mismatched.registerDialect("later", () => fakeAdapter());
+  expectInvalid(() => mismatched.createAdapter("p"));
+
   const providers = createProviderManagement();
   providers.registerProvider(descriptor({ dialect: "later" }));
-
-  expectInvalid(() => providers.createAdapter("p"));
-  expectInvalid(() => providers.createAdapter("missing"));
-  expectInvalid(() => providers.registerDialect("", () => fakeAdapter()));
-
-  providers.registerDialect("later", () => fakeAdapter());
-  expect(providers.createAdapter("p")).toMatchObject({ dialect: "d" });
+  providers.registerDialect("later", () => ({ ...fakeAdapter(), dialect: "later" }));
+  expect(providers.createAdapter("p")).toMatchObject({ dialect: "later" });
   expectInvalid(() => providers.registerDialect("later", () => fakeAdapter()));
 });
 

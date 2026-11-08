@@ -49,7 +49,7 @@ function invalidResponse(): never {
 function hasInvalidPathCharacter(value: string): boolean {
   for (const character of value) {
     const code = character.charCodeAt(0);
-    if (code <= 0x20 || code === 0x7f || character === "\\") return true;
+    if (code <= 0x20 || code === 0x7f || character === "\\" || character === "#") return true;
   }
   return false;
 }
@@ -199,7 +199,7 @@ function mapMessage(message: Message, maxToolNameLength: number): WireMessage[] 
     return [
       {
         role: "assistant",
-        content: content.length ? content : null,
+        content: content.length ? content : calls.length ? null : "",
         ...(calls.length ? { tool_calls: calls } : {}),
       },
     ];
