@@ -246,6 +246,23 @@ test("real lifecycle preserves branch snapshots and reuses source and skill hist
   expect(second.request.tools?.[0]?.description).toBe("new-main");
   expect(await h.runExclusive(() => h.context.selectionFor(first.headId))).toEqual(SELECTION);
 
+  // A read of the old enabled branch must leave the disabled/default branch on disk.
+  const beforeRead = h.context.snapshot();
+  const eventCount = h.events.length;
+  const bytesBeforeRead = await fs.readFile(path("events.jsonl"));
+  const commitBeforeRead = await fs.readFile(path("events.commit"));
+  const oldRead = await h.context.assemble({ ...OPTIONS, nodeId: first.headId });
+  expect(oldRead.nodes).toEqual([]);
+  expect(oldRead.headId).toBe(first.headId);
+  expect(oldRead.selection).toEqual(SELECTION);
+  expect(oldRead.request).toEqual(first.request);
+  expect(h.context.snapshot()).toEqual(beforeRead);
+  expect(h.events).toHaveLength(eventCount);
+  expect(await h.runExclusive(() => h.context.selectionFor())).toEqual([TOOL]);
+  expect((await collect(h.store.readBranch(META.id))).at(-1)?.id).toBe(second.headId);
+  expect(await fs.readFile(path("events.jsonl"))).toEqual(bytesBeforeRead);
+  expect(await fs.readFile(path("events.commit"))).toEqual(commitBeforeRead);
+
   await enqueue(h, [instruction("分支指令"), user("分支")]);
   const branch = await h.context.assemble({ ...OPTIONS, nodeId: first.headId });
   expect(branch.nodes).toHaveLength(2);

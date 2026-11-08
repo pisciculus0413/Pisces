@@ -154,6 +154,8 @@ test("appends to explicit old parent with that branch's frozen definitions; defa
   await enqueue(h, [user("branch")]);
   const branch = await h.context.assemble({ ...OPTIONS, nodeId: root.headId });
   expect(branch.nodes[0]?.parentId).toBe(root.headId);
+  expect(h.context.snapshot().selection).toEqual([name("tool")]);
+  expect(await h.context.selectionFor()).toEqual([name("tool")]);
   expect(branch.request.tools).toEqual([{ name: "pkg#tool", description: "old", parameters: {} }]);
   expect(branch.request.messages.map((message) => message.content)).toEqual([
     text("root"),
@@ -165,6 +167,59 @@ test("appends to explicit old parent with that branch's frozen definitions; defa
       (message) => message.content,
     ),
   ).toEqual([text("root"), text("sibling")]);
+});
+
+// Empty historical reads must not replace the default branch's persisted selection.
+test("reading an enabled old branch without nodes preserves the disabled default", async () => {
+  const h = createContextHarness({ entries: { kind: () => "tool" } });
+  await enqueue(h, [
+    user("root"),
+    declaration({ toggle: [name("tool")], definitions: [definition("old")] }),
+  ]);
+  const old = await h.context.assemble(OPTIONS);
+  await enqueue(h, [declaration({ toggle: [name("tool")] })]);
+  const latest = await h.context.assemble(OPTIONS);
+  const before = h.context.snapshot();
+  const tree = await collect(h.repository.readTree(META.id));
+  const eventCount = h.events.length;
+  const result = await h.context.assemble({ ...OPTIONS, nodeId: old.headId });
+  expect(result.nodes).toEqual([]);
+  expect(result.headId).toBe(old.headId);
+  expect(result.selection).toEqual([name("tool")]);
+  expect(result.request.tools).toEqual([{ name: "pkg#tool", description: "old", parameters: {} }]);
+  expect(result.request.messages).toEqual([{ role: "user", content: text("root") }]);
+  expect(h.context.snapshot()).toEqual(before);
+  expect(h.events).toHaveLength(eventCount);
+  expect(await h.context.selectionFor()).toEqual([]);
+  expect(await collect(h.repository.readTree(META.id))).toEqual(tree);
+  expect((await collect(h.repository.readBranch(META.id))).at(-1)?.id).toBe(latest.headId);
+});
+
+test("compaction alone on an old branch advances the default selection", async () => {
+  const h = createContextHarness({ entries: { kind: () => "tool" } });
+  await enqueue(h, [
+    declaration({ toggle: [name("tool")], definitions: [definition("old")] }),
+    user("x".repeat(1200)),
+    user("y".repeat(2400)),
+  ]);
+  const old = await h.context.assemble(OPTIONS);
+  await enqueue(h, [declaration({ toggle: [name("tool")] })]);
+  await h.context.assemble(OPTIONS);
+  const start = h.events.length;
+  const result = await h.context.assemble({
+    contextWindow: 1024,
+    maxOutput: 0,
+    nodeId: old.headId,
+  });
+  expect(result.nodes.map((node) => node.role)).toEqual(["compaction"]);
+  expect(result.nodes[0]?.parentId).toBe(old.headId);
+  expect(h.context.snapshot().selection).toEqual([name("tool")]);
+  expect(await h.context.selectionFor()).toEqual([name("tool")]);
+  expect((await collect(h.repository.readBranch(META.id))).at(-1)?.id).toBe(result.headId);
+  expect(h.events.slice(start).map((event) => event.type)).toEqual([
+    "session.updated",
+    "selection.updated",
+  ]);
 });
 
 test("explicit parent in a temporary session fails without creating", async () => {

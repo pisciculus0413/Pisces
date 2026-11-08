@@ -229,6 +229,8 @@ export function createContext(deps: ContextDeps): Context {
           let nodes: SessionNode[] = [];
           let storageError: PiscesError | undefined;
           if (batch.length) {
+            if (JSON.stringify(selection) !== JSON.stringify(final.selection))
+              notifications.validateSelection(final.selection);
             const writeDrafts = structuredClone([...commit.drafts]);
             const writeMeta = structuredClone(state.meta);
             const writeOptions = {
@@ -268,10 +270,12 @@ export function createContext(deps: ContextDeps): Context {
             headId: nextHead,
             first,
           };
-          try {
-            completeCommit(commit, nodes);
-          } catch (error) {
-            throw storageError ?? error;
+          if (nodes.length) {
+            try {
+              completeCommit(commit, nodes);
+            } catch (error) {
+              throw storageError ?? error;
+            }
           }
           if (storageError) throw storageError;
           return assembled;

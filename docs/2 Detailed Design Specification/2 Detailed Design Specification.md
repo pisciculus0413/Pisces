@@ -348,7 +348,7 @@ interface Event<E = JsonValue> {
   - `MAX_EVENT_BYTES = 4 MiB`
   - `MAX_FRAME_BYTES = 8 MiB`
 - 关系为 `MAX_ENTRY_BYTES ≤ MAX_NODE_CONTENT_BYTES < MAX_QUEUE_BYTES < MAX_RESPONSE_BYTES = MAX_EVENT_BYTES < MAX_FRAME_BYTES`。
-- 请求帧、响应帧、事件帧分别受 `MAX_FRAME_BYTES` 限制；发送侧保证响应不超过 `MAX_RESPONSE_BYTES`、事件不超过 `MAX_EVENT_BYTES`。
+- 请求帧、响应帧、事件帧分别受 `MAX_FRAME_BYTES` 限制；发送侧保证响应不超过 `MAX_RESPONSE_BYTES`、事件不超过 `MAX_EVENT_BYTES`。完整选择事件不得分片；累计选择导致待发送事件超限时，C 段写库前以 `context.selection_too_large` 原子拒绝（§4.2.7）。
 - 队列大小按完整 `QueueEntry` JSON 的 UTF-8 字节计：单条上限 262144，完整队列数组（含数组标点）上限 1048576；分别返回 `queue.entry_too_large`、`queue.too_large`。入队、编辑及确认均先计算完整候选队列，再原子替换；队列和声明不静默截断。
 - `Context` 的 `session.updated` 按完整 `EngineEvent` JSON 的 UTF-8 字节预算 4194304 拆为多个事件，每帧独立分配 `seq`；客户端按 `id`/`parentId` 合并。队列与选择通知各按最终状态发布一次。
 - 来源/技能单节点 `content` JSON 的 UTF-8 字节上限为 262144：仅截断 `text`/`reasoning`（包括 `toolResult` 内文本），保留 Unicode code point 边界，末尾追加可见标记 `\n[truncated]`；`toolCall.arguments` 永不截断。文本安全截断后 `content` 仍超过 262144 字节，以 `context.source_failed` 失败，不允许原样保留 256 KiB 至 4 MiB 的不可裁内容，不写入半截节点。
@@ -704,7 +704,7 @@ type ProtocolEvent =
 - 每会话单调 `seq` 在同一会话锁内分配；`session.read` 与所有会话事件携带 `seq`，客户端丢弃小于已应用值的旧事件；分页响应仅首屏建立水位，后续页不提升水位（§3.4.3）。
 - `session.updated` 携带本批追加节点；超过事件字节预算时拆分为多个事件；`meta` 变化时 `nodes` 可为空。
 - `queue.updated` 携带当前完整队列；客户端整体替换本地队列。
-- `selection.updated` 携带已持久化记录的完整名称集合；队列声明 delta 通过 `queue.updated` 传递，客户端自行叠加。
+- `selection.updated` 携带已持久化记录的完整名称集合，不分片；若本次写入需通知的新集合超过双封装事件预算，在 C 段写库前以 `context.selection_too_large` 原子拒绝（§4.2.7）。队列声明 delta 通过 `queue.updated` 传递，客户端自行叠加。
 - `turn.started` 在首次 assemble 之前发布，且不携带 `mode`；`mode` 只在 `TurnStartResult` 中出现。
 - `turn.step` 的 `step` 从 1 开始；`usage` 在供应商提供时出现。
 - `turn.ended.reason` 为 `failed` 时带 `error`。
@@ -738,6 +738,7 @@ type ProtocolEvent =
 | turn | `turn.node_id_forbidden` | 活跃 turn 的 `turn.start` 带 `nodeId` |
 | turn | `turn.active` | 活跃 turn 中调用 `session.configure` |
 | turn | `turn.empty` | 最终无任何可见 kind=agent 消息；通过 turn.ended.error 表达 |
+| 上下文 | `context.selection_too_large` | 待提交完整选择集合的 EngineEvent 或对应协议封装超过 4 MiB；写库前原子拒绝 |
 | 上下文 | `context.source_failed` | 上下文来源/技能解析失败或文本安全截断后 content 仍超过 256 KiB |
 | 上下文 | `context.changed` | 声明选择或默认 head 在一次重跑后仍变化；data.retryable=true |
 | 上下文 | `context.pending_commit` | 提交结果仍无法读清时尝试其他修改；data.retryable=true |
@@ -1009,8 +1010,8 @@ interface SessionEventClock {
 11. 重校验：若已确认队列条目在锁外被删除、取消确认或确认代际变化，从本批剔除；不新增本次窗口之后确认的条目。消息、工具、来源、预算及 compaction 均按最终幸存批次重新计算。若声明选择或省略 nodeId 时的默认 head 变化，丢弃本次 resolve 结果并从 A 重跑一次；仍变化返回 `context.changed`，`data.retryable=true`。仅 definitions 变化时也按最终分支与幸存声明重新投影工具；此纯投影不得在锁内触发来源解析。来源结果只保留最终选择中且当前分支尚无对应 source 的内容。
 12. B 段每次 await 返回后、C 段写入前均调用 `signal?.throwIfAborted()`；即使来源忽略 signal 并返回也必须拦住取消。取消不持久化、不出队、不增加 `seq`、不写 `session.updated`，本次未发送草稿丢弃。
 13. 计算最终可见消息；若没有任何可见 `kind=agent` 消息，返回 `turn.empty`，不调用 `Sessions.create`；仅 user 消息也有效，不要求 system。
-14. 写前读取默认分支末端作为追加顺序水位（可复用 C 段刚读出的默认分支），显式旧 `headId` 仅作 parent，不能作水位；临时会话无水位。首次持久化使用 `Sessions.create(meta, drafts, options)`；已有节点时使用 `Sessions.append(sessionId, drafts, headId, options)`；`drafts` 为空时跳过写入。options.validate 预检完整节点事件（§4.2.7），正常成功路径不调用 readTree。
-15. 持久化成功或失败后重读确认完整已提交时，先从队列移除本批条目，更新 `selection`、`persisted` 并清除 pending；再依次发布 session.updated 各帧、selection.updated（仅变化）及 queue.updated（仅消费非空队列）。同一临界区内每帧分配 seq，空批无变化无通知；每个通知回调独立尝试，失败继续后续通知，最终抛首个通知错误。原 storage.io 若存在则优先原样抛出。回调错误不得进入存储 catch、触发重读/重写或恢复已出队条目。
+14. 写前读取默认分支末端作为追加顺序水位（可复用 C 段刚读出的默认分支），显式旧 `headId` 仅作 parent，不能作水位；临时会话无水位。首次持久化使用 `Sessions.create(meta, drafts, options)`；已有节点时使用 `Sessions.append(sessionId, drafts, headId, options)`；`drafts` 为空时跳过写入。options.validate 预检完整节点事件；需发布的最终完整 selection 同样在不可逆写入前预检（§4.2.7）。正常成功路径不调用 readTree。
+15. 持久化成功或失败后重读确认完整已提交时，先从队列移除本批条目，更新 `selection`、`persisted` 并清除 pending；再依次发布 session.updated 各帧、selection.updated（仅变化）及 queue.updated（仅消费非空队列）。同一临界区内每帧分配 seq。空批不执行提交状态转换：即使显式读取旧分支，也只返回该分支的 request/selection/headId，保留默认 selection 缓存、seq 与默认末端，不通知；有实际追加（包括纯 compaction）时按新默认末端更新缓存。每个通知回调独立尝试，失败继续后续通知，最终抛首个通知错误。原 storage.io 若存在则优先原样抛出。回调错误不得进入存储 catch、触发重读/重写或恢复已出队条目。
 16. 若本批写入节点非空，将 `headId` 推进为本批最后一个节点的 id；否则保留原端点。返回 `LlmRequest`、选择、写入节点、提交后的 `headId` 与 `first`。
 
 追加的 `parentId` 为提交前的 `headId`；首次创建由 `Sessions.create` 生成根节点。
@@ -1078,6 +1079,7 @@ interface Skills {
 - 协调读取本身失败也保留 pending。initialize 或 assemble 必须先重读协调：absent 释放阻塞再继续，committed 先完成内部状态并清 pending 再通知。重复 initialize 不重复出队/通知；恢复通知失败仍以保存的原 storage.io 优先，通知正常则不重新抛已报告的旧错误。
 - 事件 `data` 只携带领域 payload，不重复 sessionId/seq/at；首次 session.updated 含 meta。同时满足完整 EngineEvent 与 Gateway 对应协议 `{event,data:{sessionId,seq,at,...payload}}` 的 JSON UTF-8 大小各不超过 4194304 字节，再拆整节点帧，每帧独立 seq，不分片节点。对应协议把顶层字段移入 data，标点字节数相同；type 键改为 event 精确增加 1 字节，故核心按 EngineEvent 最大 4194303 字节计量，无需依赖协议模块。必要时先发含 meta、nodes=[] 的独立帧，再发节点。
 - `Sessions` 的写前 validate 使用真实完整节点预检单节点帧及 meta 独立帧，按上述双封装预算，超限以 context.source_failed 拒绝、不写库、不分配 seq；预检 seq 使用 Number.MAX_SAFE_INTEGER 的最坏宽度，at 使用契约规定的 24 字节时间戳。实际分帧仍计当前分配的 seq/at 等完整封装，不能只计 content。来源/技能的 256 KiB 内容限制仍独立生效。
+- C 段最终批次非空且最终 selection 与默认缓存不同时，必须在调用 Sessions 不可逆写入前按完整 `selection.updated` 预检 EngineEvent 与对应协议封装，各不超过 4194304 字节；预检使用 16 位安全整数 seq 最坏宽度及 24 字节 ASCII RFC3339 UTC 毫秒时间戳。超限抛 `context.selection_too_large`，不写库、不出队、不更新缓存、不分配 seq；完整 selection 不分片。空批读取旧分支不产生选择变化通知，故不做该变更通知预检。通用 publish 仍按实际完整封装检查预算，超限不交付发布端，使用既有 context.source_failed。
 - 所有内部提交状态先完成后才调用发布端；即使某帧失败，其余 session 帧及选择/队列通知仍各自尝试。事件不是可靠日志，已分配 seq 允许间隙，重连通过 read 恢复。事件抛 storage.io 也不是存储失败，不重读、不重写、不回滚。
 - `Context` 不直接写文件；只调用 `Sessions`。临时会话首次落盘后 persisted=true；SessionMeta 由服务层提供。updateMeta 由 Gateway 在 SessionStore.updateMeta 成功后调用；assemble 使用最新 meta.model。
 

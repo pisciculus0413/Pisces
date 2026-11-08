@@ -1,4 +1,5 @@
 import { expect, test, vi } from "vitest";
+import { createContextEvents } from "../src/context/events.js";
 import {
   type ContextEvent,
   type EntryName,
@@ -493,4 +494,135 @@ test("abort during explicit-branch watermark read prevents append", async () => 
   expect(outcome).toBe(reason);
   expect(h.context.snapshot()).toEqual(before);
   expect(await collect(h.repository.readTree(META.id))).toHaveLength(1);
+});
+
+const eventBytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
+const protocolEvent = (event: ContextEvent) => ({
+  event: event.type,
+  data: { sessionId: event.sessionId, seq: event.seq, at: event.at, ...(event.data as object) },
+});
+
+// Each queued declaration and generated node fits; only the accumulated selection overflows.
+test.each([
+  { extra: 0, wideSeq: true },
+  { extra: 1, wideSeq: true },
+  { extra: 1, wideSeq: false },
+])(
+  "preflights cumulative selection at the dual envelope boundary + $extra byte (wideSeq=$wideSeq)",
+  async ({ extra, wideSeq }) => {
+    let seq = 0;
+    const h = createContextHarness({
+      entries: { kind: () => "context" },
+      sources: { get: (id) => ({ id, resolve: async () => [] }) },
+      eventClock: { current: () => seq, next: () => ++seq },
+    });
+    await enqueue(h);
+    await h.context.assemble(OPTIONS);
+    const selected: EntryName[] = [];
+    for (let i = 0; i < 16; i++) {
+      const name = `pkg#${i}${"x".repeat(250000)}` as EntryName;
+      selected.push(name);
+      await enqueue(h, [declaration({ toggle: [name] })]);
+      await h.context.assemble(OPTIONS);
+    }
+    const base: ContextEvent = {
+      type: "selection.updated",
+      sessionId: META.id,
+      seq: Number.MAX_SAFE_INTEGER,
+      at: META.createdAt,
+      data: { selection: [...selected, "pkg#last"] },
+    };
+    const padding = 4194304 - eventBytes(protocolEvent(base));
+    const last =
+      `pkg#last${"汉".repeat(Math.floor(padding / 3))}${"x".repeat((padding % 3) + extra)}` as EntryName;
+    const finalSelection = [...selected, last].sort();
+    const candidate = { ...base, data: { selection: finalSelection } };
+    expect(eventBytes(candidate)).toBe(4194303 + extra);
+    expect(eventBytes(protocolEvent(candidate))).toBe(4194304 + extra);
+    if (wideSeq) seq = Number.MAX_SAFE_INTEGER - 5;
+    await enqueue(h, [declaration({ toggle: [last] })]);
+    const before = h.context.snapshot();
+    const eventCount = h.events.length;
+    const ids = (await collect(h.repository.readTree(META.id))).map((node) => node.id);
+    const append = vi.spyOn(h.repository, "append");
+    if (extra) {
+      const error = await h.context.assemble(OPTIONS).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(error).toBeInstanceOf(PiscesError);
+      expect((error as PiscesError).code).toBe("context.selection_too_large");
+      expect(append).not.toHaveBeenCalled();
+      expect(h.context.snapshot()).toEqual(before);
+      expect(h.events).toHaveLength(eventCount);
+      expect((await collect(h.repository.readTree(META.id))).map((node) => node.id)).toEqual(ids);
+      expect(await h.context.selectionFor()).toEqual([...selected].sort());
+    } else {
+      const result = await h.context.assemble(OPTIONS);
+      expect(result.nodes).toHaveLength(1);
+      expect(h.context.snapshot().queue).toEqual([]);
+      expect(h.context.snapshot().selection).toEqual(finalSelection);
+      const event = h.events.slice(eventCount).find((event) => event.type === "selection.updated");
+      expect(eventBytes(event)).toBe(4194303);
+      expect(eventBytes(protocolEvent(event as ContextEvent))).toBe(4194304);
+    }
+    for (const event of h.events) {
+      expect(eventBytes(event)).toBeLessThanOrEqual(4194304);
+      expect(eventBytes(protocolEvent(event))).toBeLessThanOrEqual(4194304);
+    }
+  },
+);
+
+test.each([0, 1])("generic publish guards the actual dual envelope boundary + %s byte", (extra) => {
+  let seq = Number.MAX_SAFE_INTEGER - 1;
+  const h = createContextHarness({ eventClock: { current: () => seq, next: () => ++seq } });
+  const events = createContextEvents(h.deps);
+  const base: ContextEvent = {
+    type: "selection.updated",
+    sessionId: META.id,
+    seq: Number.MAX_SAFE_INTEGER,
+    at: META.createdAt,
+    data: { selection: ["pkg#x"] },
+  };
+  const padding = 4194304 - eventBytes(protocolEvent(base));
+  const data = { selection: [`pkg#x${"x".repeat(padding + extra)}`] };
+  if (extra) {
+    expect(() => events.publish("selection.updated", data)).toThrow(
+      expect.objectContaining({ code: "context.source_failed" }),
+    );
+    expect(h.events).toEqual([]);
+  } else {
+    events.publish("selection.updated", data);
+    expect(h.events).toHaveLength(1);
+    expect(eventBytes(h.events[0])).toBe(4194303);
+    expect(eventBytes(protocolEvent(h.events[0] as ContextEvent))).toBe(4194304);
+  }
+});
+
+// No selection event is needed for an empty historical read, even for oversized legacy state.
+test("empty old-branch reads do not preflight or publish oversized stored selection", async () => {
+  const h = createContextHarness({
+    persisted: true,
+    entries: { kind: () => "context" },
+    sources: { get: (id) => ({ id, resolve: async () => [] }) },
+  });
+  const selected = Array.from(
+    { length: 17 },
+    (_, i) => `pkg#${i}${"x".repeat(250000)}` as EntryName,
+  );
+  const nodes = await h.sessions.create(META, [
+    user(),
+    ...selected.map((name) => declaration({ toggle: [name] })),
+  ]);
+  const oldHead = nodes.at(-1)?.id as NodeId;
+  await h.sessions.append(META.id, [declaration({ toggle: [selected[16] as EntryName] })]);
+  await h.runExclusive(() => h.context.initialize());
+  const before = h.context.snapshot();
+  const result = await h.context.assemble({ ...OPTIONS, nodeId: oldHead });
+  expect(result.nodes).toEqual([]);
+  expect(result.headId).toBe(oldHead);
+  expect(result.selection).toEqual([...selected].sort());
+  expect(h.context.snapshot()).toEqual(before);
+  expect(h.events).toEqual([]);
+  expect(await h.context.selectionFor()).toEqual(before.selection);
 });
