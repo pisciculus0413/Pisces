@@ -129,7 +129,7 @@ export function createTools(options: ToolsOptions = {}): Tools {
     }
 
     function isWrapper(name: EntryName): boolean {
-      return binding === undefined || binding.types.get(name) === "wrapper";
+      return binding === undefined ? wrappers.has(name) : binding.types.get(name) === "wrapper";
     }
 
     function loadWrapper(name: EntryName): Promise<ToolWrapper> {

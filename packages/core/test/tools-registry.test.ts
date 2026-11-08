@@ -61,6 +61,23 @@ test("filters selected tools by bound inventory type and returns sorted declarat
   expect(catalog.forInventory({ hash: "h2", entries: [] }).selected(selection)).toEqual([]);
 });
 
+test("does not treat an unbound registered tool as a wrapper", async () => {
+  const catalog = createTools();
+  catalog.registerTool(tool("pkg#echo"));
+
+  expect(
+    await catalog.invoke(
+      { id: "call-1", name: name("pkg#echo"), arguments: null },
+      ["pkg#echo"] as SelectionState,
+      {
+        sessionId: "s1" as SessionId,
+        workspace: "/workspace",
+        signal: new AbortController().signal,
+      },
+    ),
+  ).toEqual({ content: [{ type: "text", text: "pkg#echo" }] });
+});
+
 test("marks both colliding tools unavailable and reports the collision", async () => {
   const catalog = createTools({ encodeWireName: () => "t_same" });
   catalog.registerTool(tool("a#first"));
