@@ -4,6 +4,11 @@
  * 见 docs/0-module.md。
  */
 export {
+  createProviderHost,
+  type ProviderHost,
+  type ProviderHostOptions,
+} from "./provider/provider-host.js";
+export {
   createSessionStore,
   type RecoveryIssue,
   type SessionStore,
