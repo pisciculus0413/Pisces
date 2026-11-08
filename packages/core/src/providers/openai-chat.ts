@@ -144,11 +144,8 @@ function mapToolResult(block: Extract<ContentBlock, { type: "toolResult" }>): Wi
     let content = "";
     for (const nested of blocks) {
       if (!isRecord(nested) || typeof nested.type !== "string") invalidRequest();
-      if (
-        (nested.type === "text" || nested.type === "reasoning") &&
-        typeof nested.text === "string"
-      )
-        content += nested.text;
+      if (nested.type === "text" && typeof nested.text === "string") content += nested.text;
+      else if (nested.type === "reasoning" && typeof nested.text === "string") continue;
       else if (nested.type === "toolResult" && Array.isArray(nested.content))
         content += flatten(nested.content);
       else invalidRequest();
@@ -176,6 +173,7 @@ function mapMessage(message: Message, maxToolNameLength: number): WireMessage[] 
     let content = "";
     const calls: JsonValue[] = [];
     for (const block of message.content) {
+      if (!isRecord(block)) invalidRequest();
       const candidate = block as unknown as Record<string, unknown>;
       if (typeof candidate.type !== "string") invalidRequest();
       if (candidate.type === "text" && typeof candidate.text === "string")
@@ -214,6 +212,54 @@ function mapMessage(message: Message, maxToolNameLength: number): WireMessage[] 
     });
   }
   invalidRequest();
+}
+
+function assistantToolCallIds(message: Message): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const block of message.content) {
+    if (!isRecord(block)) invalidRequest();
+    const candidate = block as unknown as Record<string, unknown>;
+    if (candidate.type !== "toolCall") continue;
+    if (
+      typeof candidate.id !== "string" ||
+      !candidate.id ||
+      typeof candidate.name !== "string" ||
+      !candidate.name ||
+      seen.has(candidate.id)
+    )
+      invalidRequest();
+    seen.add(candidate.id);
+    ids.push(candidate.id);
+  }
+  return ids;
+}
+
+function mapMessages(messages: Message[], maxToolNameLength: number): WireMessage[] {
+  const mapped: WireMessage[] = [];
+  let pendingToolCallIds: string[] = [];
+  for (const message of messages) {
+    if (!isRecord(message) || !Array.isArray(message.content)) invalidRequest();
+    if (message.role !== "tool") {
+      if (pendingToolCallIds.length) invalidRequest();
+      mapped.push(...mapMessage(message, maxToolNameLength));
+      if (message.role === "assistant") pendingToolCallIds = assistantToolCallIds(message);
+      continue;
+    }
+    if (!message.content.length || !pendingToolCallIds.length) invalidRequest();
+    for (const block of message.content) {
+      if (!isRecord(block) || block.type !== "toolResult") invalidRequest();
+      const result = mapToolResult(
+        block as unknown as Extract<ContentBlock, { type: "toolResult" }>,
+      );
+      const toolCallId = result.tool_call_id;
+      if (typeof toolCallId !== "string" || pendingToolCallIds[0] !== toolCallId) invalidRequest();
+      pendingToolCallIds.shift();
+      mapped.push(result);
+    }
+  }
+  if (pendingToolCallIds.length) invalidRequest();
+  return mapped;
 }
 
 function mapTools(request: LlmRequest, maxToolNameLength: number): JsonValue[] | undefined {
@@ -270,7 +316,7 @@ function buildRequest(
   if (!isRecord(request) || typeof request.model !== "string" || !request.model.trim())
     invalidRequest();
   if (!Array.isArray(request.messages)) invalidRequest();
-  const messages = request.messages.flatMap((message) => mapMessage(message, maxToolNameLength));
+  const messages = mapMessages(request.messages, maxToolNameLength);
   const tools = mapTools(request, maxToolNameLength);
   const parameters = mapParameters(request);
   const body = {

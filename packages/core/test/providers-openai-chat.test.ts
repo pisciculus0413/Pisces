@@ -74,6 +74,7 @@ test("builds Chat Completions messages, tools, and parameters without stored rea
         { type: "reasoning", text: "stored private reasoning" },
         text("working"),
         { type: "toolCall", id: "call_1", name: toolName, arguments: { text: "ok" } },
+        { type: "toolCall", id: "call_2", name: toolName, arguments: { text: "two" } },
       ),
       message("tool", {
         type: "toolResult",
@@ -137,9 +138,17 @@ test("builds Chat Completions messages, tools, and parameters without stored rea
               arguments: '{"text":"ok"}',
             },
           },
+          {
+            id: "call_2",
+            type: "function",
+            function: {
+              name: encodeWireName(toolName),
+              arguments: '{"text":"two"}',
+            },
+          },
         ],
       },
-      { role: "tool", tool_call_id: "call_1", content: "firstresult" },
+      { role: "tool", tool_call_id: "call_1", content: "first" },
       { role: "tool", tool_call_id: "call_2", content: "second" },
     ],
     tools: [
@@ -205,6 +214,7 @@ test("rejects invalid options and unsupported request shapes safely", async () =
     message("system", { type: "toolCall", id: "c", name: "pkg#x" as EntryName, arguments: {} }),
     message("user", { type: "toolResult", toolCallId: "c", content: [] }),
     message("assistant", { type: "toolResult", toolCallId: "c", content: [] }),
+    message("assistant", null as never),
     message("tool", text("plain text")),
     message("tool", { type: "toolResult", toolCallId: "", content: [text("bad")] }),
   ];
@@ -239,6 +249,41 @@ test("rejects invalid options and unsupported request shapes safely", async () =
       ],
     }),
   ).toThrowError(expect.objectContaining({ code: "provider.invalid_response" }));
+});
+
+test("rejects tool results that do not match outstanding assistant calls exactly once", async () => {
+  const { createOpenAiChatAdapter } = await import("../src/index.js");
+  const adapter = createOpenAiChatAdapter();
+  const toolName = "pkg#echo" as EntryName;
+  const assistant = message(
+    "assistant",
+    { type: "toolCall", id: "call_1", name: toolName, arguments: {} },
+    { type: "toolCall", id: "call_2", name: toolName, arguments: {} },
+  );
+  const result = (toolCallId: string): Message =>
+    message("tool", { type: "toolResult", toolCallId, content: [text(toolCallId)] });
+
+  const invalidSequences: Message[][] = [
+    [result("call_1")],
+    [assistant, result("call_2"), result("call_1")],
+    [assistant, result("call_1"), result("call_1"), result("call_2")],
+    [assistant, result("call_1"), message("user", text("too early"))],
+    [assistant, result("call_1"), result("call_2"), result("call_2")],
+  ];
+
+  for (const messages of invalidSequences) {
+    expect(() =>
+      adapter.buildRequest({
+        model: "m",
+        messages,
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "provider.invalid_response",
+        message: "Invalid OpenAI chat request",
+      }),
+    );
+  }
 });
 
 test("exports the built-in dialect and a reusable factory", async () => {
