@@ -160,3 +160,79 @@ test("ignores an unconfirmed queue entry during the turn", async () => {
   expect(pending.map((entry) => entry.content)).toEqual([[{ type: "text", text: "pending" }]]);
   expect(pending[0]?.confirmedAt).toBeUndefined();
 });
+
+test("ignores empty deltas but persists normal text", async () => {
+  const h = createLoopHarness();
+  await h.enqueueAndConfirm([user("hello")]);
+  const { adapter, execute } = adapterFor([
+    [
+      { type: "content", delta: "" },
+      { type: "reasoning", delta: "" },
+      { type: "content", delta: "kept" },
+      { type: "stop", reason: "stop" },
+    ],
+  ]);
+  h.published.splice(0);
+
+  expect(
+    (
+      await h.driver.run({
+        sessionId: LOOP_META.id,
+        turnId: "t1" as TurnId,
+        meta: LOOP_META,
+        context: h.context,
+        sessions: h.sessions,
+        tools: h.tools,
+        adapter,
+        execute,
+        events: h.events,
+        eventClock: h.eventClock,
+        contextWindow: 100000,
+        maxOutput: 1000,
+        signal: new AbortController().signal,
+      })
+    ).reason,
+  ).toBe("completed");
+
+  expect(
+    h.published
+      .filter((event) => event.type === "turn.delta")
+      .map((event) => (event.data as { delta: string }).delta),
+  ).toEqual(["kept"]);
+  expect((await tree(h))[1]?.content).toEqual([{ type: "text", text: "kept" }]);
+});
+
+test("rejects a non-string delta as an invalid provider response", async () => {
+  const h = createLoopHarness();
+  await h.enqueueAndConfirm([user("hello")]);
+  const { adapter, execute } = adapterFor([
+    [
+      { type: "content", delta: 42 as unknown as string },
+      { type: "stop", reason: "stop" },
+    ],
+  ]);
+
+  expect(
+    (
+      await h.driver.run({
+        sessionId: LOOP_META.id,
+        turnId: "t1" as TurnId,
+        meta: LOOP_META,
+        context: h.context,
+        sessions: h.sessions,
+        tools: h.tools,
+        adapter,
+        execute,
+        events: h.events,
+        eventClock: h.eventClock,
+        contextWindow: 100000,
+        maxOutput: 1000,
+        signal: new AbortController().signal,
+      })
+    ).error,
+  ).toEqual({
+    code: "provider.invalid_response",
+    message: "Provider returned an invalid text delta",
+  });
+  expect((await tree(h)).map((node) => node.role)).toEqual(["user"]);
+});

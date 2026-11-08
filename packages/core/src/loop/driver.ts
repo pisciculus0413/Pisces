@@ -1,6 +1,6 @@
 import { createEventPublisher, type EngineEventPublisher } from "../events.js";
 import type { ContentBlock, StopReason, Usage } from "../messages.js";
-import type { SessionNodeDraft } from "../sessions/types.js";
+import type { NodeId, SessionNodeDraft } from "../sessions/types.js";
 import { PiscesError } from "../types.js";
 import { limitDriverContent } from "./content.js";
 import type {
@@ -14,7 +14,19 @@ import type {
 interface ActiveTurn {
   sessionId: RunTurnInput["sessionId"];
   turnId: RunTurnInput["turnId"];
+  context: RunTurnInput["context"];
+  controller: AbortController;
   state: "running" | "cancelling" | "ended";
+}
+
+interface TurnProgress {
+  headId: NodeId | undefined;
+  blocks: ContentBlock[];
+  step: number | undefined;
+  stopReason: StopReason | undefined;
+  usage: Usage | undefined;
+  assistantPersisted: boolean;
+  stepPublished: boolean;
 }
 
 function failure(error: unknown): { code: string; message: string } {
@@ -59,7 +71,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     error?: { code: string; message: string },
   ): Promise<TurnResult> {
     await options.runExclusive(input.sessionId, async () => {
-      if (active?.state !== undefined) active.state = "ended";
+      if (active) active.state = "ended";
       events.publishTurn("turn.ended", {
         turnId: input.turnId,
         reason,
@@ -119,80 +131,168 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     });
   }
 
+  async function clearConfirmations(input: RunTurnInput) {
+    await options.runExclusive(input.sessionId, async () => {
+      input.context.unconfirm();
+    });
+  }
+
+  async function finishCancelled(
+    input: RunTurnInput,
+    events: EngineEventPublisher,
+    progress: TurnProgress,
+  ): Promise<TurnResult> {
+    if (!progress.assistantPersisted && progress.blocks.length) {
+      const assistant = await append(input, events, progress.headId, [
+        {
+          kind: "agent",
+          role: "assistant",
+          source: "assistant",
+          content: limitDriverContent(progress.blocks),
+        },
+      ]);
+      progress.headId = assistant.at(-1)?.id;
+      progress.assistantPersisted = true;
+    }
+    await clearConfirmations(input);
+    if (progress.headId) {
+      const cancel = await append(input, events, progress.headId, [
+        {
+          kind: "control",
+          role: "cancel",
+          source: "driver",
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                turnId: input.turnId,
+                reason: "cancelled",
+                at: progress.headId,
+              }),
+            },
+          ],
+        },
+      ]);
+      progress.headId = cancel.at(-1)?.id;
+    }
+    if (progress.step !== undefined && !progress.stepPublished) {
+      await publishStep(input, events, progress.step, "cancelled", progress.usage);
+      progress.stepPublished = true;
+    }
+    return end(input, events, "cancelled");
+  }
+
   return {
     async run(input) {
       const events = publisher(input);
-      await options.runExclusive(input.sessionId, async () => {
-        if (active) throw new PiscesError("turn.active", "A turn is already active");
-        active = { sessionId: input.sessionId, turnId: input.turnId, state: "running" };
-        events.publishTurn("turn.started", {
-          turnId: input.turnId,
-          startedAt: options.now(),
-        });
-      });
+      const controller = new AbortController();
+      const turn: ActiveTurn = {
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        context: input.context,
+        controller,
+        state: "running",
+      };
+      const forwardAbort = () => {
+        if (active?.turnId !== input.turnId || active.state === "ended") return;
+        active.state = "cancelling";
+        controller.abort(input.signal.reason);
+      };
+      const progress: TurnProgress = {
+        headId: undefined,
+        blocks: [],
+        step: undefined,
+        stopReason: undefined,
+        usage: undefined,
+        assistantPersisted: false,
+        stepPublished: false,
+      };
 
       try {
-        let headId = input.nodeId;
+        await options.runExclusive(input.sessionId, async () => {
+          if (active) throw new PiscesError("turn.active", "A turn is already active");
+          active = turn;
+          events.publishTurn("turn.started", {
+            turnId: input.turnId,
+            startedAt: options.now(),
+          });
+        });
+        input.signal.addEventListener("abort", forwardAbort, { once: true });
+        if (input.signal.aborted) forwardAbort();
+        if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+
         for (let step = 1; ; step++) {
+          progress.blocks = [];
+          progress.step = undefined;
+          progress.stopReason = undefined;
+          progress.usage = undefined;
+          progress.assistantPersisted = false;
+          progress.stepPublished = false;
+
           const assembled = await input.context.assemble({
-            ...(headId ? { nodeId: headId } : {}),
+            ...(progress.headId ? { nodeId: progress.headId } : {}),
             contextWindow: input.contextWindow,
             maxOutput: input.maxOutput,
-            signal: input.signal,
+            signal: controller.signal,
           });
-          headId = assembled.headId;
-          const wire = input.adapter.buildRequest(assembled.request);
-          const blocks: ContentBlock[] = [];
-          const calls: ContentBlock[] = [];
-          let usage: Usage | undefined;
-          let stopReason: StopReason | undefined;
+          progress.headId = assembled.headId;
+          progress.step = step;
+          if (controller.signal.aborted) return await finishCancelled(input, events, progress);
 
-          for await (const chunk of input.execute(wire, input.signal)) {
+          const wire = input.adapter.buildRequest(assembled.request);
+          for await (const chunk of input.execute(wire, controller.signal)) {
             for (const event of validateEvents(input.adapter.parseChunk(chunk))) {
               if (event.type === "content" || event.type === "reasoning") {
+                if (typeof event.delta !== "string")
+                  throw new PiscesError(
+                    "provider.invalid_response",
+                    "Provider returned an invalid text delta",
+                  );
+                if (!event.delta.length) continue;
                 const kind = event.type === "content" ? "text" : "reasoning";
-                appendDelta(blocks, kind, event.delta);
+                appendDelta(progress.blocks, kind, event.delta);
                 await options.runExclusive(input.sessionId, async () => {
                   events.publishDelta(input.turnId, step, kind, event.delta);
                 });
-              } else if (event.type === "usage") usage = structuredClone(event.usage);
-              else if (event.type === "stop") stopReason = event.reason;
+              } else if (event.type === "usage") progress.usage = structuredClone(event.usage);
+              else if (event.type === "stop") progress.stopReason = event.reason;
               else if (event.type === "error") throw new PiscesError(event.code, event.message);
               else {
                 const block = { type: "toolCall", ...structuredClone(event.call) } as ContentBlock;
-                blocks.push(block);
-                calls.push(block);
+                progress.blocks.push(block);
               }
             }
           }
-          if (stopReason === undefined)
+          if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+          if (progress.stopReason === undefined)
             throw new PiscesError("provider.invalid_response", "Provider response has no stop");
 
-          const assistant = await append(input, events, headId, [
+          const assistant = await append(input, events, progress.headId, [
             {
               kind: "agent",
               role: "assistant",
               source: "assistant",
-              content: limitDriverContent(blocks),
+              content: limitDriverContent(progress.blocks),
             },
           ]);
-          if (!assistant.length)
-            throw new PiscesError("storage.corrupt", "Assistant append produced no nodes");
-          headId = assistant.at(-1)?.id;
+          progress.assistantPersisted = true;
+          progress.headId = assistant.at(-1)?.id;
+          const calls = progress.blocks.filter(
+            (block): block is Extract<ContentBlock, { type: "toolCall" }> =>
+              block.type === "toolCall",
+          );
 
           if (calls.length) {
             const results = await Promise.all(
-              calls.map((block) => {
-                if (block.type !== "toolCall") throw new TypeError("Invalid tool call block");
-                return input.tools.invoke(block, assembled.selection, {
+              calls.map((call) =>
+                input.tools.invoke(call, assembled.selection, {
                   sessionId: input.sessionId,
                   workspace: input.meta.workspace,
-                  signal: input.signal,
-                });
-              }),
+                  signal: controller.signal,
+                }),
+              ),
             );
-            const drafts: SessionNodeDraft[] = calls.map((block, index) => {
-              if (block.type !== "toolCall") throw new TypeError("Invalid tool call block");
+            const drafts: SessionNodeDraft[] = calls.map((call, index) => {
               const result = results[index];
               if (!result) throw new TypeError("Missing tool result");
               return {
@@ -202,7 +302,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
                 content: [
                   {
                     type: "toolResult",
-                    toolCallId: block.id,
+                    toolCallId: call.id,
                     content: limitDriverContent(result.content),
                     ...(result.isError === undefined ? {} : { isError: result.isError }),
                     ...(result.code === undefined ? {} : { code: result.code }),
@@ -210,16 +310,29 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
                 ],
               };
             });
-            const toolNodes = await append(input, events, headId, drafts);
-            headId = toolNodes.at(-1)?.id;
-            await publishStep(input, events, step, stopReason, usage);
+            const toolNodes = await append(input, events, progress.headId, drafts);
+            progress.headId = toolNodes.at(-1)?.id;
+            if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+            await publishStep(input, events, step, progress.stopReason, progress.usage);
+            progress.stepPublished = true;
             continue;
           }
 
-          await publishStep(input, events, step, stopReason, usage);
-          return await end(input, events, "completed");
+          await publishStep(input, events, step, progress.stopReason, progress.usage);
+          progress.stepPublished = true;
+          if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+
+          const hasConfirmed = await options.runExclusive(input.sessionId, async () => {
+            const queue = input.context.snapshot().queue;
+            return queue[0]?.confirmedAt !== undefined;
+          });
+          if (controller.signal.aborted) return await finishCancelled(input, events, progress);
+          if (!hasConfirmed) return await end(input, events, "completed");
         }
       } catch (error) {
+        if (error instanceof PiscesError && error.code === "turn.active") throw error;
+        if (active?.state === "cancelling" || controller.signal.aborted)
+          return await finishCancelled(input, events, progress);
         const errorData = failure(error);
         try {
           return await end(input, events, "failed", errorData);
@@ -232,11 +345,19 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
           };
         }
       } finally {
-        active = undefined;
+        input.signal.removeEventListener("abort", forwardAbort);
+        if (active === turn) active = undefined;
       }
     },
-    async cancel(_turnId) {
-      return false;
+    async cancel(turnId) {
+      const turn = active;
+      if (!turn || turn.turnId !== turnId || turn.state === "ended") return false;
+      turn.state = "cancelling";
+      turn.controller.abort(new DOMException("Turn cancelled", "AbortError"));
+      await options.runExclusive(turn.sessionId, async () => {
+        turn.context.unconfirm();
+      });
+      return true;
     },
   };
 }
