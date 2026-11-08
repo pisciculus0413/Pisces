@@ -61,6 +61,14 @@ async function readPage(
   return response.result as unknown as SessionReadResult;
 }
 
+function createSession(harness: GatewayHarness, params: Record<string, unknown>) {
+  return harness.gateway.handle({
+    id: "create",
+    method: "session.create",
+    params: params as unknown as JsonValue,
+  });
+}
+
 function at(nodes: readonly SessionNode[], index: number): SessionNode {
   const node = nodes[index];
   if (!node) throw new Error(`Missing seeded node ${index}`);
@@ -163,6 +171,35 @@ test("reads a temporary session as an empty session with its queue", async () =>
   expect((await read(h, { sessionId: ID, nodeId: "missing" })).error?.code).toBe(
     "session.node_not_found",
   );
+});
+
+test("keeps runtime metadata intact when a read result is mutated", async () => {
+  const h = await openHarness();
+  const { meta } = await h.seed([draftUser("one")]);
+
+  const page = await readPage(h, { sessionId: meta.id });
+  page.meta.model = "mutated";
+  expect(page.meta.model).toBe("mutated");
+
+  const again = await readPage(h, { sessionId: meta.id });
+  expect(again.meta).toEqual(meta);
+  expect(await h.store.getMeta(meta.id)).toEqual(meta);
+});
+
+test("keeps runtime metadata intact when a create result is mutated", async () => {
+  const workspace = await tempWorkspace();
+  const h = await openHarness({ defaults: { workspace, provider: "p", model: "m" } });
+
+  const created = await createSession(h, { systemPrompt: ["be brief"] });
+  const meta = created.result as unknown as SessionMeta;
+  const original = structuredClone(meta);
+  meta.model = "mutated";
+  meta.workspace = "/elsewhere";
+  expect(meta.model).toBe("mutated");
+
+  const page = await readPage(h, { sessionId: ID });
+  expect(page.meta).toEqual(original);
+  expect(await h.store.list()).toEqual([]);
 });
 
 test("shares one seq waterline across pages and repeated reads", async () => {

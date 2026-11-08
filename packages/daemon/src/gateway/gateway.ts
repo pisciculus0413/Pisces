@@ -311,7 +311,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
           runtimes.delete(sessionId);
           throw error;
         }
-        return meta;
+        return structuredClone(meta);
       });
     },
 
@@ -361,7 +361,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
         const snapshot = runtime.context.snapshot();
         const first = cursor === undefined;
         return {
-          meta: runtime.meta,
+          meta: structuredClone(runtime.meta),
           seq: snapshot.seq,
           records: page,
           queue: first ? snapshot.queue : [],
