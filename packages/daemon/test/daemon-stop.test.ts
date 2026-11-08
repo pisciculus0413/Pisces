@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { chmod, lstat, mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,7 +77,8 @@ const waitFor = async (condition: () => boolean, timeoutMs = 5000): Promise<void
 
 interface ChildSession {
   child: ChildProcess;
-  next(): Promise<Record<string, unknown>>;
+  next(timeoutMs?: number): Promise<Record<string, unknown>>;
+  send(command: string): void;
 }
 
 function spawnHostChild(
@@ -86,7 +87,7 @@ function spawnHostChild(
   mode: "ready" | "blocking" = "ready",
 ): ChildSession {
   const child = spawn(process.execPath, [FIXTURE, modulePath, dataDir, mode], {
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
   const queued: Record<string, unknown>[] = [];
   const waiters: ((line: Record<string, unknown>) => void)[] = [];
@@ -113,13 +114,16 @@ function spawnHostChild(
 
   return {
     child,
-    next() {
+    send(command) {
+      child.stdin?.write(`${JSON.stringify({ command })}\n`);
+    },
+    next(timeoutMs = 15000) {
       const ready = queued.shift();
       if (ready !== undefined) return Promise.resolve(ready);
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           reject(new Error(`child produced no line; stderr: ${stderr}`));
-        }, 15000);
+        }, timeoutMs);
         waiters.push((line) => {
           clearTimeout(timer);
           resolve(line);
@@ -554,7 +558,6 @@ test("child process retains marker, lock, socket and safe event after cleanup_fa
   const dataDir = await tempDir();
   const sessionId = "s-child-cleanup" as SessionId;
   await seedPersistedSession(dataDir, sessionId);
-  const sessionDir = join(dataDir, "sessions", sessionId);
   const markers = createActiveTurnStore({ dataDir });
   let child: ChildSession | undefined;
 
@@ -571,12 +574,14 @@ test("child process retains marker, lock, socket and safe event after cleanup_fa
     expect((await markers.read(sessionId))?.turnId).toBe(started.turnId);
     const inode = (await lstat(socketPath)).ino;
 
-    // Removing write permission from the session directory makes the active-turn
-    // marker unlink fail during abort cleanup, without any in-process test seam.
-    await chmod(sessionDir, 0o500);
+    // The compiled fixture must acknowledge that it patched the shared dist
+    // session-store singleton before the stop signal, so fault timing is
+    // unambiguous and works for root and unprivileged UIDs alike.
+    child.send("install-unlink-fault");
+    const fault = await child.next(5000);
+    expect(fault).toMatchObject({ event: "fault_installed", target: "active-turn.json" });
     child.child.kill("SIGTERM");
     const stopError = await child.next();
-    await chmod(sessionDir, 0o700);
     expect(stopError).toMatchObject({
       event: "stop_error",
       code: "daemon.stop_incomplete",
@@ -599,8 +604,8 @@ test("child process retains marker, lock, socket and safe event after cleanup_fa
     });
     expect(JSON.stringify(cleanup)).not.toContain("EACCES");
   } finally {
-    // Restore permissions and reap the child before afterEach deletes the temp dir.
-    await chmod(sessionDir, 0o700).catch(() => {});
+    // Reap the child before afterEach deletes the temp dir. The fixture's fault
+    // patch lives only in the child's dist module cache and dies with the process.
     await killChild(child?.child);
   }
 }, 30000);
