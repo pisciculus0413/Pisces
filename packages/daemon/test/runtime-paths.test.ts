@@ -1,5 +1,17 @@
 import { spawnSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  chown,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { connect, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,6 +41,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   runtimePathsFs.lstat = (path) => lstat(path);
+  runtimePathsFs.unlink = (path) => unlink(path);
   for (const server of servers.splice(0)) {
     if (!server.listening) continue;
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -199,35 +212,111 @@ test("refuses symlinks and non-socket paths without unlinking them", async () =>
   expect((await lstat(link)).isSymbolicLink()).toBe(true);
 });
 
-test("refuses a same-type socket whose owner is not the current effective uid", async () => {
-  const socketPath = join(base, "foreign.sock");
+test.skipIf(process.geteuid?.() !== 0)(
+  "refuses a same-type socket whose owner is not the current effective uid",
+  async () => {
+    const socketPath = join(base, "foreign.sock");
+    makeStaleSocket(socketPath);
+    await chown(socketPath, 65534, 65534);
+
+    await expect(clearStaleSocket(socketPath)).rejects.toMatchObject({ code: SOCKET_LIVE });
+    expect((await lstat(socketPath)).isSocket()).toBe(true);
+  },
+);
+
+test("does not unlink a live socket that replaces the stale path before quarantine", async () => {
+  const socketPath = join(base, "swapped.sock");
+  const aside = join(base, "swapped.aside");
   makeStaleSocket(socketPath);
   const realLstat = runtimePathsFs.lstat;
+  let calls = 0;
+  let liveServer: Server | undefined;
+  let liveIno = 0;
   runtimePathsFs.lstat = async (path) => {
     const stat = await realLstat(path);
-    const foreignUid = (process.geteuid?.() ?? 0) + 1;
-    return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: foreignUid });
+    calls += 1;
+    if (calls === 2) {
+      await rename(socketPath, aside);
+      liveServer = await listen(socketPath);
+      liveIno = (await realLstat(socketPath)).ino;
+    }
+    return stat;
   };
 
-  await expect(clearStaleSocket(socketPath)).rejects.toMatchObject({ code: SOCKET_LIVE });
-  expect((await lstat(socketPath)).isSocket()).toBe(true);
+  await expect(clearStaleSocket(socketPath, 250)).rejects.toMatchObject({ code: SOCKET_LIVE });
+
+  const live = await lstat(socketPath);
+  expect(live.isSocket()).toBe(true);
+  expect(live.ino).toBe(liveIno);
+  expect(liveServer?.listening).toBe(true);
+  const accepted = new Promise<void>((resolve) => liveServer?.once("connection", () => resolve()));
+  const client = connect(socketPath);
+  await accepted;
+  client.destroy();
 });
 
-test("does not unlink when the socket inode changed during the stale probe", async () => {
-  const socketPath = join(base, "swapped.sock");
+test("refuses when an ENOENT probe is followed by the same live socket reappearing", async () => {
+  const socketPath = join(base, "moved.sock");
+  const aside = join(base, "moved.aside");
+  const server = await listen(socketPath);
+  const original = await lstat(socketPath);
+  const realLstat = runtimePathsFs.lstat;
+  let calls = 0;
+  runtimePathsFs.lstat = async (path) => {
+    calls += 1;
+    if (calls === 1) {
+      const stat = await realLstat(path);
+      await rename(socketPath, aside);
+      return stat;
+    }
+    if (calls === 2) {
+      await rename(aside, socketPath);
+      return realLstat(path);
+    }
+    return realLstat(path);
+  };
+
+  await expect(clearStaleSocket(socketPath, 250)).rejects.toMatchObject({ code: SOCKET_LIVE });
+
+  const restored = await lstat(socketPath);
+  expect(restored.isSocket()).toBe(true);
+  expect(restored.ino).toBe(original.ino);
+  expect(server.listening).toBe(true);
+});
+
+test("does nothing when the probed path disappears and stays absent", async () => {
+  const socketPath = join(base, "vanished.sock");
   makeStaleSocket(socketPath);
   const realLstat = runtimePathsFs.lstat;
   let calls = 0;
   runtimePathsFs.lstat = async (path) => {
     const stat = await realLstat(path);
     calls += 1;
-    if (calls === 1) return stat;
-    return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { ino: stat.ino + 1 });
+    if (calls === 1) await rm(path);
+    return stat;
   };
 
-  await expect(clearStaleSocket(socketPath, 250)).rejects.toMatchObject({ code: SOCKET_LIVE });
-  expect(calls).toBeGreaterThanOrEqual(2);
-  expect((await lstat(socketPath)).isSocket()).toBe(true);
+  await expect(clearStaleSocket(socketPath, 250)).resolves.toBeUndefined();
+  await assertMissing(socketPath);
+});
+
+test("surfaces a normalized error when a quarantined stale socket cannot be unlinked", async () => {
+  const socketPath = join(base, "unlink.sock");
+  makeStaleSocket(socketPath);
+  const realUnlink = runtimePathsFs.unlink;
+  runtimePathsFs.unlink = async (path) => {
+    if (path.startsWith(`${socketPath}.stale-`)) {
+      const error = new Error("denied") as NodeJS.ErrnoException;
+      error.code = "EACCES";
+      throw error;
+    }
+    return realUnlink(path);
+  };
+
+  await expect(clearStaleSocket(socketPath)).rejects.toMatchObject({ code: SOCKET_LIVE });
+  await assertMissing(socketPath);
+  const quarantined = (await readdir(base)).filter((name) => name.startsWith("unlink.sock.stale-"));
+  expect(quarantined).toHaveLength(1);
 });
 
 test("removes the socket only when the recorded dev/ino identity matches", async () => {
@@ -254,6 +343,60 @@ test("keeps a replacement socket that does not match the recorded identity", asy
 
   await removeOwnedSocket(socketPath, { dev: replacement.dev, ino: replacement.ino });
   await assertMissing(socketPath);
+});
+
+test("does not unlink a live socket that replaces the owned path before quarantine", async () => {
+  const socketPath = join(base, "swap-owned.sock");
+  const aside = join(base, "swap-owned.aside");
+  makeStaleSocket(socketPath);
+  const stale = await lstat(socketPath);
+  const realLstat = runtimePathsFs.lstat;
+  let calls = 0;
+  let liveServer: Server | undefined;
+  let liveIno = 0;
+  runtimePathsFs.lstat = async (path) => {
+    const stat = await realLstat(path);
+    calls += 1;
+    if (calls === 1) {
+      await rename(socketPath, aside);
+      liveServer = await listen(socketPath);
+      liveIno = (await realLstat(socketPath)).ino;
+    }
+    return stat;
+  };
+
+  await expect(
+    removeOwnedSocket(socketPath, { dev: stale.dev, ino: stale.ino }),
+  ).rejects.toMatchObject({ code: SOCKET_LIVE });
+
+  const live = await lstat(socketPath);
+  expect(live.isSocket()).toBe(true);
+  expect(live.ino).toBe(liveIno);
+  expect(liveServer?.listening).toBe(true);
+});
+
+test("surfaces a normalized error when a quarantined owned socket cannot be unlinked", async () => {
+  const socketPath = join(base, "unlink-owned.sock");
+  makeStaleSocket(socketPath);
+  const stale = await lstat(socketPath);
+  const realUnlink = runtimePathsFs.unlink;
+  runtimePathsFs.unlink = async (path) => {
+    if (path.startsWith(`${socketPath}.stale-`)) {
+      const error = new Error("denied") as NodeJS.ErrnoException;
+      error.code = "EACCES";
+      throw error;
+    }
+    return realUnlink(path);
+  };
+
+  await expect(
+    removeOwnedSocket(socketPath, { dev: stale.dev, ino: stale.ino }),
+  ).rejects.toMatchObject({ code: SOCKET_LIVE });
+  await assertMissing(socketPath);
+  const quarantined = (await readdir(base)).filter((name) =>
+    name.startsWith("unlink-owned.sock.stale-"),
+  );
+  expect(quarantined).toHaveLength(1);
 });
 
 test("ignores missing paths and refuses non-socket paths during owned removal", async () => {
