@@ -132,10 +132,13 @@ export function createConnection(
     try {
       while (!closed && !ending && frames.length > 0) {
         const frame = frames.shift() as Uint8Array;
-        queuedBytes -= frame.byteLength;
         if (socket.write(frame) === false) {
+          // The frame stays in the socket buffer until drain; keep counting it against the
+          // budget so a stalled peer cannot hold an extra frame outside the queue bound.
           await waitForDrain();
+          if (closed) return;
         }
+        queuedBytes -= frame.byteLength;
       }
       if (closed) return;
       if (frames.length === 0) {

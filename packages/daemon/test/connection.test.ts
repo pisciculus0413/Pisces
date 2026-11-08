@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import {
   createNdjsonDecoder,
+  encodeFrame,
   MAX_EVENT_BYTES,
   MAX_RESPONSE_BYTES,
   PROTOCOL_VERSION,
@@ -121,6 +122,12 @@ function eventOfJsonBytes(totalBytes: number): ProtocolEvent {
       blob: "a".repeat(totalBytes - base.length),
     },
   };
+}
+
+/** Smallest useful event shape, so budget tests can use tiny exact frames. */
+function compactEventOfJsonBytes(totalBytes: number): ProtocolEvent {
+  const base = JSON.stringify({ event: "e", data: { blob: "" } });
+  return { event: "e", data: { blob: "a".repeat(totalBytes - base.length) } };
 }
 
 test("completes hello and dispatches later requests with a generated connection id", async () => {
@@ -411,6 +418,40 @@ test("serializes writes and resumes only after drain", async () => {
   await tick();
   expect(socket.frames).toHaveLength(2);
   expect(socket.destroyed).toBe(false);
+  connection.close();
+});
+
+test("counts the in-flight stalled write against the queued-byte budget", async () => {
+  const fake = fakeGateway();
+  const socket = new FakeSocket();
+  socket.writeResult = false;
+  const budget = 512;
+  const connection = createConnection(asSocket(socket), fake.gateway, {
+    maxQueuedBytes: budget,
+  });
+  const enqueue = attachedEnqueue(fake);
+
+  const helloFrame = encodeFrame(
+    { id: "hello", result: { version: PROTOCOL_VERSION, compatible: true } },
+    MAX_RESPONSE_BYTES,
+  );
+  expect(helloFrame.byteLength).toBeGreaterThan(50);
+  const firstFrameBytes = budget - helloFrame.byteLength - 10;
+  const secondFrameBytes = 60;
+
+  socket.feed(hello());
+  await tick();
+  // The stalled write still owns these bytes; the queue must not forget them.
+  expect(socket.frames).toEqual([helloFrame]);
+
+  enqueue(compactEventOfJsonBytes(firstFrameBytes - 1));
+  await tick();
+  expect(socket.destroyed).toBe(false);
+
+  enqueue(compactEventOfJsonBytes(secondFrameBytes - 1));
+  await tick();
+  expect(socket.destroyed).toBe(true);
+  expect(fake.detached).toHaveLength(1);
   connection.close();
 });
 
