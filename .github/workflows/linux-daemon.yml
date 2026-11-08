@@ -1,0 +1,80 @@
+name: Linux daemon
+
+on:
+  push:
+    branches: [main, dev-pi]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  daemon:
+    name: node ${{ matrix.node }} / linux-x64
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.19.0", "24", "26"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.8.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      # node-gyp compiles the pinned in-repo C addon against this exact Node ABI.
+      # The addon is required before the full suite; `vitest run` does not build it.
+      - name: Build native peer-credential binding
+        run: pnpm --filter @pisces/daemon run build:native
+
+      # Child-process fixtures launch compiled dist/*.js, so build before testing.
+      - name: Build packages
+        run: pnpm run build
+
+      - name: Typecheck sources and tests
+        run: pnpm exec tsc -p tsconfig.json
+
+      - name: Typecheck build graph
+        run: pnpm exec tsc -b tsconfig.build.json
+
+      - name: Lint and format
+        run: pnpm exec biome check .
+
+      - name: Run full test suite
+        run: pnpm exec vitest run
+
+      - name: Core boundary scan
+        run: |
+          status=0
+          rg -n 'from "(node:)?(fs|http|https|net|tls|dgram|dns)|from "@pisces/(daemon|protocol)"' packages/core/src || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "::error::packages/core/src must not import Node IO, @pisces/daemon or @pisces/protocol"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "::error::ripgrep failed with status $status"
+            exit "$status"
+          fi
+
+      - name: Protocol boundary scan
+        run: |
+          status=0
+          rg -n 'from "@pisces/(daemon|core)"' packages/protocol/src || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "::error::packages/protocol/src must not import @pisces/daemon or @pisces/core"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "::error::ripgrep failed with status $status"
+            exit "$status"
+          fi

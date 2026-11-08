@@ -1200,9 +1200,12 @@ interface ProjectRef {
 
 ### 8.1 部署与生命周期
 
-- daemon 以用户级单实例运行：启动时获取数据目录下的锁文件并绑定 socket；锁或 socket 已被占用则退出。
-- 传输默认使用 Unix domain socket，权限 `0600`，连接建立时校验 peer 凭据要求同用户；Windows 使用命名管道。
-- `start` 启动 daemon；`stop` 停止接收新请求、中止进行中的热会话、等待写盘完成并释放 socket；`status` 报告运行状态与会话数。
+- 本阶段 daemon 仅支持 Linux x64 与 Node.js >= 22.19.0；macOS 与 Windows（命名管道）仍为目标设计，未实现，非 Linux 平台在绑定前以 `daemon.unsupported_platform` 失败。
+- daemon 以用户级单实例运行：启动时对 `<dataDir>/run/pisces.lock` 取 `flock` 并绑定 `<dataDir>/run/pisces.sock`（权限 `0600`）；锁已被占用时以 `daemon.lock_busy` 退出，且不删除存活实例的 socket。
+- 本阶段没有 CLI `start`/`stop`/`status` 与配置文件加载器：嵌入程序调用 `startDaemon({ dataDir, providers, providerHost, ... })`，返回的 `DaemonHost` 提供 `socketPath`、`initializationIssues`、`recoveryIssues`、`status()` 与 `stop()`。daemon 只监听本地 Unix socket，不监听网络地址。
+- 连接在读取任何协议字节前用原生 `SO_PEERCRED` 校验 peer UID 必须等于 daemon 有效 UID；不一致只销毁该连接。原生插件为仓内 plain C Node-API，使用固定 `node-gyp` 编译为被忽略的 `packages/daemon/native/peercred.node`，需在测试前按当前 Node ABI 显式构建；缺失或构建失败以 `daemon.native_unavailable` 拒绝启动，无降级认证。
+- `stop()` 先阻断新帧并停止 accept，等待已受理请求与尽力取消活跃 turn，再关闭连接、按 inode 清理 socket、释放锁并 dispose `Gateway`；无法完成时以 `daemon.stop_incomplete` 失败并保留锁、标记与 `quiescing` 状态，不自动强杀进程，也不声称已优雅停止。
+- CI 配置 Linux x64 的 Node 22.19.0/24/26 矩阵，先构建原生插件再执行完整测试、两个 `tsc`、Biome 与边界扫描；未 push 前不得将远端矩阵结果视为已验证。
 - 临时会话在首次落盘前只存在于服务层内存；daemon 退出即丢失，磁盘不产生空会话。已落盘会话按正常流程恢复。
 - 热会话结束后成为冷会话；冷会话可从持久化记录恢复为新的热会话。
 - daemon 异常退出后，重启时恢复已持久化的冷会话；未完成的热会话标记为中断。`turn.start` 对已落盘会话在启动时写入 `active-turn.json`，临时会话在首批节点落盘后补写；turn 正常结束或失败时删除。重启读取该标记，向对应会话追加 `role=cancel` 控制消息（原因为 daemon 重启）并删除标记。

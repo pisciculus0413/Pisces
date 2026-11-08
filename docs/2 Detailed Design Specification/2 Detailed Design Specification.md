@@ -330,16 +330,18 @@ interface Event<E = JsonValue> {
 ```
 
 - 每个 `Response` 恰好包含 `result` 或 `error` 之一。
-- `Request.id` 在同一条连接内由客户端保证唯一；服务端按原样回传。
+- `Request.id` 在同一条连接内由客户端保证唯一；服务端按原样回传。无法关联请求的协议错误使用 `id: ""` 哨兵，不回显原始输入。
 - 事件不带 `id`；事件按连接推送。
+- 本阶段线上错误对象只输出 `code` 与 `message`；DDS 中出现的 `ProtocolError.data` 与 `data.*` 字段属于后续目标设计，当前 `Gateway` 安全映射不输出结构化 `data`。
 - 错误消息不得包含凭据、请求头或供应商密钥。
 
 ## 3 协议层
 
 ### 3.1 传输与分帧
 
-- 默认传输为 Unix domain socket；Windows 使用命名管道。
-- 使用 NDJSON：一条 UTF-8 JSON 对象占一行，以 `\n` 结束；请求、响应和事件共用同一连接。
+- 本阶段传输仅支持 Linux Unix domain socket（`<dataDir>/run/pisces.sock`，权限 `0600`）；Windows 命名管道与 macOS 为目标设计，尚未实现。非 Linux 平台在导入原生绑定、绑定 socket 之前以 `daemon.unsupported_platform` 失败。
+- 连接在读取任何协议字节前，由原生 `getsockopt(SOL_SOCKET, SO_PEERCRED)` 取内核 peer UID 并与 `process.geteuid()` 比较；不一致只销毁该连接，不发送协议字节。没有 chmod-only 或未认证回退。
+- 使用 NDJSON：一条 UTF-8 JSON 对象占一行，以 `\n` 结束；请求、响应和事件共用同一连接。仅字面 `LF` 分帧，`\r` 保留在帧内，不作为分隔符。
 - 上限按方向定义：
   - `MAX_ENTRY_BYTES = 256 KiB`
   - `MAX_NODE_CONTENT_BYTES = 256 KiB`
@@ -356,7 +358,7 @@ interface Event<E = JsonValue> {
 - 不支持在 JSON 对象内嵌裸换行；字符串内的换行必须转义。
 - 客户端可以在同一连接上并发发送多个请求；响应通过 `id` 关联。
 - 事件可以与响应交错；客户端不得依赖事件与某个响应的固定先后顺序。
-- 连接建立后，`protocol.hello` 必须是第一个请求；在此之前收到其他请求返回 `protocol.hello_required`。
+- 连接建立后，`protocol.hello` 必须是第一个请求；在此之前收到其他请求返回 `protocol.hello_required`，连接仍可继续握手。重复 hello 返回 `protocol.invalid_request`。
 
 ### 3.2 握手与版本
 
@@ -373,7 +375,7 @@ interface HelloResult {
 
 - 版本使用 `MAJOR.MINOR.PATCH`。
 - 客户端在 `versions` 中列出自己支持的版本，按优先级从高到低排列。
-- 服务端选择主版本相同、次版本不高于服务端、优先级最高的版本；没有可用版本时返回 `protocol.version_mismatch` 错误响应，随后关闭连接，不再发送独立事件。
+- 服务端选择主版本相同、次版本不高于服务端、优先级最高的版本；没有可用版本时返回 `protocol.version_mismatch` 错误响应，刷出该响应后关闭连接（最多等待 1 秒），不再发送独立事件。
 - 成功时 `compatible` 恒为 `true`；失败不返回 `HelloResult`。
 - 成功后该连接固定使用协商出的版本；后续不再接受版本参数。
 - 协议版本与软件包版本独立管理。
@@ -404,7 +406,7 @@ interface HelloResult {
 | `client.list` | `{}` | `{ clients: ClientRegistration[] }` |
 | `client.start` | `{ id }` | `{ pid: number }` |
 
-- 当前阶段实际路由的 `Gateway` 方法只有 `session.create`、`session.read`、`session.configure`、`queue.enqueue`、`turn.start`、`turn.cancel`、`turn.list`、`provider.list` 八个；`protocol.hello` 属于连接握手，不在 `Gateway` 分派内。本表其余方法（`session.list`、`session.subscribe`/`session.unsubscribe`、`queue.edit`/`queue.remove`/`queue.clear`、`entries.snapshot`、`template.*`、`client.*`）为目标设计，尚未接入路由；当前调用返回 `protocol.unknown_method`。
+- 当前阶段实际路由的 `Gateway` 方法为 `session.create`、`session.read`、`session.configure`、`queue.enqueue`、`turn.start`、`turn.cancel`、`turn.list`、`provider.list`，以及仅在请求带连接上下文时路由的 `session.subscribe`/`session.unsubscribe`；`protocol.hello` 由连接分发器处理，不进入 `Gateway`。不带连接上下文调用 `session.subscribe`/`session.unsubscribe` 仍返回 `protocol.unknown_method`。本表其余方法（`session.list`、`queue.edit`/`queue.remove`/`queue.clear`、`entries.snapshot`、`template.*`、`client.*`）为目标设计，尚未接入路由；当前调用返回 `protocol.unknown_method`。
 - 方法分派只查自有属性：未识别的方法名（包括 `constructor`、`toString`、`__proto__`、`valueOf` 等原型属性名）一律返回 `protocol.unknown_method`，不会落回任何处理函数。
 
 ### 3.4 会话方法
@@ -495,7 +497,10 @@ interface ConfigureSessionParams {
 
 #### 3.4.5 `session.subscribe` / `session.unsubscribe`
 
-- 当前阶段没有连接管理与事件推送，`session.subscribe`/`session.unsubscribe` 尚未路由；本节为目标设计，当前调用返回 `protocol.unknown_method`。
+- `session.subscribe`/`session.unsubscribe` 仅在请求带连接上下文时路由；不带连接上下文时与未识别方法一样返回 `protocol.unknown_method`。
+- 订阅在校验会话（含内存中的临时会话）后才安装，且与 `session.read` 快照使用同一会话锁；成功响应发出前订阅已生效，因此事件与响应可以交错。
+- 成功订阅后，该连接接收该会话的已知事件：`session.updated`、`queue.updated`、`selection.updated`、`turn.started`、`turn.delta`、`turn.step`、`turn.ended` 与 `turn.cleanup_failed`；`client.launched` 属于目标设计（客户端方法尚未路由）。
+- 事件推送不等待 socket I/O：单个连接的编码或入队失败只关闭该连接并解除其订阅，不使已提交 turn 的 EventBus 发布失败。
 
 ```ts
 interface SessionSubscribeParams {
@@ -699,6 +704,15 @@ interface SelectionUpdatedEvent {
   selection: SelectionState;
 }
 
+interface TurnCleanupFailedEvent {
+  sessionId: SessionId;
+  seq: number;
+  at: string;
+  turnId: TurnId;
+  code: "storage.io";
+  message: string; // 固定安全文案，不包含原始异常
+}
+
 interface ClientLaunchedEvent {
   at: string;
   clientId: ClientId;
@@ -713,7 +727,8 @@ type ProtocolEvent =
   | Event<TurnEndedEvent> & { event: "turn.ended" }
   | Event<QueueUpdatedEvent> & { event: "queue.updated" }
   | Event<SelectionUpdatedEvent> & { event: "selection.updated" }
-  | Event<ClientLaunchedEvent> & { event: "client.launched" };
+  | Event<TurnCleanupFailedEvent> & { event: "turn.cleanup_failed" }
+  | Event<ClientLaunchedEvent> & { event: "client.launched" }; // 目标设计
 ```
 
 事件规则：
@@ -728,7 +743,9 @@ type ProtocolEvent =
 - `turn.started` 在首次 assemble 之前发布，且不携带 `mode`；`mode` 只在 `TurnStartResult` 中出现。
 - `turn.step` 的 `step` 从 1 开始；`usage` 在供应商提供时出现。
 - `turn.ended.reason` 为 `failed` 时带 `error`。
-- `client.launched` 在客户端进程成功启动后推送；它没有会话 `seq`。
+- `turn.cleanup_failed` 在 `turn.ended` 之后、标记删除失败时发布，携带 `turnId`、固定 `code="storage.io"` 与固定安全文案；不携带原始异常、cause 或任意细节，也不表示 turn 已注销：标记与登记项仍会阻塞同会话新 turn，直到重启恢复。
+- 本阶段只转发上列八个会话事件；`client.launched`（客户端进程成功启动后推送）仍属目标设计，客户端方法尚未路由。
+- `Gateway` 把引擎事件投影为线上事件 `{ event: type, data: { sessionId, seq, at, ...payload } }`；`sessionId`、`seq`、`at` 以引擎事件为准，payload 中的同名键被丢弃。未知事件类型或缺失路由字段的事件被忽略。
 - 事件只发送给订阅该会话的连接；`client.launched` 是连接级事件，不受会话订阅限制。
 - 事件不重放；重连后客户端重新 `session.read`。
 
@@ -742,6 +759,17 @@ type ProtocolEvent =
 | 协议 | `protocol.hello_required` | 握手前发送其他请求 |
 | 协议 | `protocol.version_mismatch` | 无兼容协议版本 |
 | 协议 | `protocol.frame_too_large` | 单帧超过 8 MiB |
+| 内部 | `internal.error` | `Gateway` 捕获未分类异常；固定文案，不输出 cause |
+| daemon | `daemon.unsupported_platform` | 非 Linux 平台，在导入原生绑定与绑定 socket 前失败 |
+| daemon | `daemon.native_unavailable` | 原生绑定缺失或加载失败 |
+| daemon | `daemon.peercred_probe_failed` | 启动时原生 peer 凭据自检失败 |
+| daemon | `daemon.lock_busy` | 锁文件已被其他进程持有 |
+| daemon | `daemon.lock_failed` | 锁文件无法获取（释放失败归入 `daemon.stop_incomplete`） |
+| daemon | `daemon.insecure_directory` | 数据目录或运行目录不安全 |
+| daemon | `daemon.socket_live` | 现有 socket 不可安全移除 |
+| daemon | `daemon.socket_path_too_long` | socket 路径编码超过 107 字节 |
+| daemon | `daemon.start_failed` | 其他启动失败；不含原始原生 errno/cause |
+| daemon | `daemon.stop_incomplete` | 停止未完成；保留锁、标记与 `quiescing` 状态，可重试 |
 | 会话 | `session.not_found` | 会话不存在 |
 | 会话 | `session.model_required` | 未提供且无默认模型 |
 | 会话 | `session.invalid_model` | provider/model 不在清单中 |
@@ -754,7 +782,6 @@ type ProtocolEvent =
 | 队列 | `queue.duplicate_name` | `toggle` 中名称重复 |
 | 队列 | `queue.entry_too_large` | 单条队列入队内容超过 `MAX_ENTRY_BYTES` |
 | 队列 | `queue.too_large` | 队列总量超过 `MAX_QUEUE_BYTES` |
-| turn | `turn.not_found` | 活跃 turn 不存在 |
 | turn | `turn.node_id_forbidden` | 活跃 turn 的 `turn.start` 带 `nodeId` |
 | turn | `turn.active` | 活跃 turn 中调用 `session.configure` |
 | turn | `turn.empty` | 最终无任何可见 kind=agent 消息；通过 turn.ended.error 表达 |
@@ -784,6 +811,8 @@ type ProtocolEvent =
 | 配置 | `config.unknown_key` | 未知配置键 |
 
 - 请求级错误通过 `Response.error` 返回。
+- 本阶段 `turn.cancel` 对未知或已注销 turn 返回 `{ cancelled: false }`，不产生 `turn.not_found`。
+- 内部错误码 `daemon.peer_credentials_unavailable`/`daemon.peer_credentials_failed`/`daemon.peer_credentials_invalid` 只在 daemon 内部使用，启动时归一化为 `daemon.native_unavailable`、`daemon.peercred_probe_failed` 或 `daemon.start_failed`，不发给客户端。
 - turn 进行中的供应商或工具错误通过 `turn.ended.error` 或工具结果回填，不伪造成请求错误。
 - `event.publish_failed` 表示同步事件 handler 失败；Context 与 driver 的事件发布适配器都保留原异常为 `cause`，不重试、不回滚已提交状态。driver 中通过 `turn.ended.reason="failed"` 与 `TurnResult.error` 结束 turn。
 - 错误消息不得包含凭据；需要附加结构化信息时使用 `data`。
@@ -797,7 +826,10 @@ type ProtocolEvent =
 - 会话记录只追加；`session.updated` 只推送本次追加节点。
 - 事件是状态通知，不是事务日志；断线重连必须重新 `session.read`。
 - 单个请求/事件帧上限为 8 MiB；超过限制的连接关闭。
-- 协议不提供全局配置、凭据和扩展安装写方法；这些只经 CLI。
+- 超过 `MAX_FRAME_BYTES` 的入站帧在可安全响应时先返回 `protocol.frame_too_large`，随后关闭该连接。
+- 单连接出站队列默认上限 8 MiB；队列溢出、写错误或超限事件只关闭该连接并解除其订阅，不中止 turn。已认证的流式 turn 不设空闲超时。
+- 握手前最多同时 64 个连接，每个连接必须在 5 秒内完成 `protocol.hello`。
+- 协议不提供全局配置、凭据和扩展安装写方法；这些只经 CLI（本阶段尚未装配 CLI）。
 
 ## 4 核心层
 
@@ -1303,41 +1335,50 @@ daemon 是用户级单实例进程，负责监听、路由、持久化、扩展�
 
 #### 5.1.1 启动与停止
 
-- 启动时获取数据目录下的锁文件并绑定 socket；锁或 socket 已被占用时退出。
+- 公开入口是 `startDaemon(options: { dataDir: string; providers; providerHost; defaults?; /* 既有可选工具/条目/技能/来源工厂 */ }): Promise<DaemonHost>`；本阶段没有 CLI 或配置加载器。宿主用同一个 `dataDir` 构造 `SessionStore`、`ActiveTurnStore`、`EventBus`、`Concurrency`、`Gateway` 与 Linux 监听器，不接受外部 store/marker 注入。
+- `dataDir` 必须为绝对路径、属主为当前有效 UID 且组/其他用户不可写；`dataDir/run` 必须为属主 `0700`，既有符号链接或不安全模式直接拒绝。socket 为 `dataDir/run/pisces.sock`（`0600`），锁为 `dataDir/run/pisces.lock`。
+- 本阶段仅 Linux。平台检查与 `getuid() === geteuid()` 在导入原生绑定、绑定 socket 之前完成；macOS 与 Windows 以 `daemon.unsupported_platform` 失败，Windows 命名管道仍为目标设计。
 - 启动顺序：
-  1. 读取软件配置与工作区配置；
-  2. 初始化 `SessionStore`；
-  3. 初始化 `Extensions`、`Tools`、`Skills`、`ProviderManagement`；
-  4. 初始化 `ProviderHost`、`CredentialStore`；
-  5. 初始化 `Gateway` 与 `Concurrency`；
-  6. 开始监听 `Transport`。
-- 停止时先停止接受新连接，再中止活跃 turn、等待写盘完成、关闭 socket 与锁。
-- 当前 daemon 装配只提供 `bootstrapGateway`：依次初始化 `SessionStore`、恢复活跃 turn、构造 `Gateway`（§5.9）。锁文件、socket 绑定、`Transport` 监听与停止流程属于后续阶段，当前未装配。
+  1. 校验平台与进程身份；
+  2. 校验/创建私有运行目录；
+  3. 对 `pisces.lock` 取 `flock`；
+  4. 在 `run` 下的私有临时路径做原生 peer 凭据自检；
+  5. 校验并处理陈旧 socket；
+  6. `bootstrapGateway`：初始化 `SessionStore`、恢复活跃 turn、构造 `Gateway`（§5.9）；
+  7. 绑定并校验 `pisces.sock`，开始接受连接。
+- 任一步失败按逆序关闭已获取资源；第二个进程以 `daemon.lock_busy` 失败且不删除存活 socket；锁文件本身不在停止时 unlink。
+- 停止顺序：同步置 `quiescing` 并阻断新帧 → 停止 accept → 等待已受理请求（5 秒，含客户端已断开的请求）→ `cancelAll(5000)` 并等待取消、标记清理与注销 → 要求 `activeTurns().length === 0` → 关闭/解除连接 → 关闭监听器并按 inode 清理 socket → 释放锁 → dispose `Gateway` → `stopped`。
+- 已受理请求超时、仍有登记 turn（含 `turn.cleanup_failed`）、标记删除失败或监听器/锁释放失败统一抛 `daemon.stop_incomplete`，按其实际状态保留锁、socket、`Gateway` 与 `quiescing`，允许重试；不自动强杀进程，也不声称已优雅停止。操作者终止进程后由下一次启动按 §6.5 恢复。成功返回后 `stop()` 幂等。
 - daemon 崩溃后只恢复已落盘会话；临时会话与消息队列随进程退出丢失。
 - 未完成的热会话在恢复时标记为中断，由用户决定是否继续。
+- 本阶段尚未装配：CLI `start`/`stop`/`status`、软件/工作区配置加载、`Extensions`/`TemplateStore`/`ClientRegistry`/`CredentialStore`；这些仍为目标设计。
 
 #### 5.1.2 `Transport`
 
 ```ts
-interface Connection {
-  id: string;
-  peerUid: number;
-  send(message: Response | Event): void;
-  close(): void;
+interface UnixTransport {
+  start(): Promise<{ dev: number | bigint; ino: number | bigint }>;
+  stopAccepting(): void;
+  close(): Promise<void>;
 }
 
-interface Transport {
-  start(handler: (connection: Connection, request: Request) => Promise<void>): Promise<void>;
-  stop(): Promise<void>;
+interface UnixTransportOptions {
+  socketPath: string;
+  onAuthenticatedSocket: (socket: Socket) => void;
+  peerUidFor?: (socket: Socket) => number; // 仅内部测试 seam
+  expectedUid?: number;
+  maxConnections?: number; // 默认 64
 }
 ```
 
-- 默认 Unix domain socket，权限 `0600`；Windows 使用命名管道。
-- 连接建立时校验 peer 凭据，要求与 daemon 同用户；不监听网络地址。
-- 分帧按 §3.1 的 NDJSON 规则；超过 8 MiB 关闭连接。
-- `Transport` 只负责监听、连接、分帧、发送和关闭，不解释方法语义。
-- `Connection.send` 串行化同一连接上的写入，避免多请求响应交错破坏帧。
-- 连接关闭时通知 `Gateway` 清理订阅；不中止活跃 turn。
+- 本阶段仅 Linux Unix domain socket，权限 `0600`；Windows 命名管道为目标设计。`startDaemon` 永不注入 `peerUidFor`，生产路径始终使用原生 `SO_PEERCRED`。
+- accept 的 socket 以 `pauseOnConnect` 暂停；先取 peer UID，要求与 daemon 有效 UID 相同，通过后才挂载解析器并 `resume()`；失败只销毁该连接。不监听网络地址。
+- 原生 `bindUnixListener(path)` 创建并 listen socket，Node 用 `server.listen({ fd })` 接管，因此 Node 不持有路径名、不会在 `server.close()` 时自动 unlink。路径清理只由身份校验后的 quarantine 流程负责。
+- 分帧按 §3.1 的 NDJSON 规则；超过 8 MiB 时在可安全响应时发送 `protocol.frame_too_large`，随后关闭连接。
+- `Transport` 只负责监听、连接、认证、分帧、发送和关闭，不解释方法语义；`protocol.hello` 与请求分派由连接的 `Dispatcher` 处理。
+- `Connection.send` 串行化同一连接上的写入并设 8 MiB 出站队列预算；队列溢出或写错误只关闭该连接，不中止 turn。
+- 连接关闭时通知 `Gateway` 解除该连接的全部订阅；不中止活跃 turn。
+- 启动失败时关闭已获取的 fd/server，并按 inode 尝试清理本次绑定的路径；清理失败不改变原始启动错误，也不会删除不属于本次实例的路径。
 
 ### 5.2 `Concurrency`
 
@@ -1414,10 +1455,11 @@ interface SessionRuntime {
   eventClock: SessionEventClock; // 同会话 Context/driver/Gateway 共享
   pendingMarker?: { turnId: TurnId; startedAt: string };
   phase?: "running" | "cleanup" | "cleanup_failed";
-  subscribers: Set<string>;   // connection id
+  cancelHandleError?: unknown; // 仅运行时内部，不转抛或导出
 }
 ```
 
+- 订阅不存放在 `SessionRuntime` 中：`Gateway` 以内部 `connectionId` 为键保存 `{ enqueue, subscriptions }`，因此同一会话可被多个连接订阅，`detach` 只移除该连接。
 - `Gateway` 维护 `sessionId -> SessionRuntime` 映射。
 - 已落盘会话按需加载：读取 `SessionMeta`，创建 `Context`（`persisted=true`）并调用 `initialize`。
 - `session.create` 创建临时 `SessionMeta`、`Context`（`persisted=false`）和空队列；不写盘。
@@ -1432,7 +1474,7 @@ interface SessionRuntime {
 - `session.list`：只查 `SessionStore`；不经过运行时。当前阶段未路由（目标设计）。
 - `session.read`：在会话锁内读取 `meta`、`records`、`queue`、`selection` 与 `seq`；无 `nodeId` 按字节预算分页读全树，有 `nodeId` 读分支；临时会话没有节点。`selection` 由 `Context.selectionFor` 计算，只含已持久化记录；`queue`/`selection` 仅首屏返回。
 - `session.configure`：先检查活跃 turn，存在则整体返回 `turn.active`，不修改队列/meta；无活跃 turn 时校验后先写 `SessionStore.updateMeta`，成功后调用 `Context.updateMeta`；`systemPrompt` 只更新或新增 `source="instruction"` 队列条目。
-- `session.subscribe` / `session.unsubscribe`：维护连接的订阅集合；重复订阅幂等；退订不发事件；断开清理。当前阶段没有连接与订阅机制，未路由（目标设计）。
+- `session.subscribe` / `session.unsubscribe`：仅在请求带连接上下文时路由；不带连接上下文时按未知方法返回 `protocol.unknown_method`。订阅集合按连接保存；校验会话（含临时会话）与安装订阅在同一会话锁内完成，重复订阅幂等；退订不发事件，断开清理。事件推送与 `detach` 不中止活跃 turn，也不影响其他连接。
 - `queue.enqueue`：在会话锁内加载/复用运行时、`initialize`，拒绝任何客户端 `kind=control` 条目（`queue.invalid_control`），再委托 `Context.enqueue`；返回 `{ ids }`，成功后按最终队列推送 `queue.updated`；条目/队列超限沿用 `queue.entry_too_large`/`queue.too_large`，失败时整批不改变队列。`queue.edit` / `remove` / `clear` 不在路由内。
 - `entries.snapshot`：从 `Extensions` 取得当前清点，从 `Context` 取得已持久化选择与 effective 列表；不合并队列。当前阶段未路由（目标设计）。
 - `turn.start`：在 `runExclusive` 回调内只完成“读 activeTurn → 校验 → 写标记（已落盘会话）/暂存标记（临时会话）→ `context.confirm()` → `registerTurn` → 置运行时 `running`”；无活跃 turn 时生成 `turnId`，已落盘会话在锁内写 `active-turn.json` 标记，临时会话只记录 `pendingMarker`（由首次 `Sessions.create` 提交后补写），并返回 `{turnId, mode:"new"}`；已有活跃 turn 且运行时为 `running` 时只 `confirm` 并返回该 turn 的 `turnId` 与 `mode=steer`，不写新标记；运行时处于 `cleanup`/`cleanup_failed` 时整体返回 `turn.active`，不确认、不 steer。`AgentLoopDriver.run` 必须在 `runExclusive` 回调完全返回、会话锁释放之后才启动（锁外 fire-and-forget）；不得在锁回调内同步调用或 await `run`，否则触发非重入 `TypeError` 或死锁。
@@ -1448,11 +1490,13 @@ interface SessionRuntime {
 #### 5.3.3 事件路由
 
 - `createGateway` 在每次调用内创建唯一的 handler 闭包并订阅一次 `EventBus`，按 `event.sessionId` 路由到本实例的运行时，未知会话忽略且不抛错。`EventBus` 按函数引用去重，不能为同一函数提供多个身份，因此禁止共享/模块级 handler，也禁止按会话分别订阅。
-- `Context` 的 `queue.updated`、`selection.updated`、`session.updated`，以及 driver 的 turn 事件进入 `EventBus`。
-- `Gateway` 把引擎事件转换为协议事件，只发送给订阅该会话的连接。
+- `Context` 的 `queue.updated`、`selection.updated`、`session.updated`，以及 driver 的 turn 事件（含 `turn.cleanup_failed`）进入 `EventBus`。
+- `Gateway` 把引擎事件投影为 `{ event: type, data: { sessionId, seq, at, ...payload } }`，只发送给订阅该会话的连接。`sessionId`、`seq`、`at` 以引擎事件为准，payload 中的同名键被丢弃；未知事件类型或缺失路由字段的事件被忽略。
+- `turn.cleanup_failed` 只输出固定 `turnId`、`code="storage.io"` 与固定安全文案，不复制原始 cause 或任意 payload。
+- 每个连接的 `enqueue` 异常（编码超限、队列溢出、连接已关闭）被捕获，仅移除该连接并解除其订阅；`EventBus.publish` 不因单个客户端失败而失败。
 - 事件都带 `sessionId`、`seq` 与 `at`；`queue.updated` 携带完整队列，`selection.updated` 携带完整名称集合。
 - `session.updated` 只携带本次追加节点；核心按完整 EngineEvent JSON 的 UTF-8 字节预算 4194304 拆分，每帧独立 seq；`meta` 变化时 nodes 可为空。队列与选择通知按最终状态各发布一次。
-- `client.launched` 是连接级事件，不受会话订阅限制。
+- `client.launched` 是连接级事件，不受会话订阅限制；本阶段客户端方法未路由，该事件仍为目标设计。
 - 事件不重放；重连后客户端重新 `session.read`。
 
 #### 5.3.4 多客户端与临时状态
@@ -1752,11 +1796,12 @@ interface ClientRegistry {
 
 ### 5.9 服务层装配
 
-- `bootstrapGateway(deps)` 是唯一装配路径：先 `SessionStore.initialize()`，再用 `markers.scan()` 执行 `recoverActiveTurns`（逐会话隔离损坏标记），最后 `createGateway(deps)`；返回 `{ gateway, initializationIssues, recoveryIssues }`，且须在任何请求被服务前完成。它不包含 daemon 锁、socket 监听/停止或 `Transport` 装配。
-- `Gateway` 依赖 `SessionStore`、`Extensions`、`ProviderHost`、`TemplateStore`、`ClientRegistry` 与 `Concurrency`。
-- `Extensions` 依赖 `Tools`、`Skills`、`Context`、`ProviderManagement`、`ClientRegistry`。
-- `ProviderHost` 依赖 `CredentialStore` 与 `ProviderManagement`。
-- `TemplateStore` 依赖 `WorkspaceAccess`、`ExecHost`、`projects.json`。
+- 公开装配路径是 `startDaemon`（§5.1.1）：宿主用同一个 `dataDir` 构造 store/marker/EventBus/Concurrency，再调用 `bootstrapGateway(deps)` 完成 `SessionStore.initialize()`、`markers.scan()` 恢复（逐会话隔离损坏标记）与 `createGateway`，最后绑定并校验 socket。`bootstrapGateway` 本身不做锁、socket 或 `Transport` 装配；返回 `{ gateway, initializationIssues, recoveryIssues }`，且须在任何请求被服务前完成。
+- `Gateway` 依赖 `SessionStore`、`ActiveTurnStore`、`EventBus`、`Concurrency`、`ProviderManagement`、`ProviderHost`，以及可选的默认值、工具/条目/技能/来源工厂与 id/时间工厂。
+- 本阶段未装配 `Extensions`、`TemplateStore`、`ClientRegistry`、`CredentialStore` 与 CLI；下列依赖关系为目标设计。
+- `Extensions` 依赖 `Tools`、`Skills`、`Context`、`ProviderManagement`、`ClientRegistry`（目标设计）。
+- `ProviderHost` 依赖 `CredentialStore` 与 `ProviderManagement`（目标设计）。
+- `TemplateStore` 依赖 `WorkspaceAccess`、`ExecHost`、`projects.json`（目标设计）。
 - 核心层不引用服务层；服务层通过接口注入。
 - 启动失败时关闭已打开的 socket、锁与子进程；不留下半初始化状态。
 
