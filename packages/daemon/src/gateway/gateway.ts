@@ -4,6 +4,7 @@ import { access, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import {
   type AgentLoopDriver,
+  type ContentBlock,
   type Context,
   type ContextEntries,
   type ContextSourceRegistry,
@@ -370,6 +371,58 @@ export function createGateway(deps: GatewayDeps): Gateway {
             ? { nextCursor: (page.at(-1) as SessionNode).id }
             : {}),
         };
+      });
+    },
+
+    async "session.configure"(params): Promise<SessionMeta> {
+      const sessionId = params.sessionId;
+      if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) invalidRequest();
+      const model = params.model;
+      if (model !== undefined && typeof model !== "string") invalidRequest();
+      const provider = params.provider;
+      if (provider !== undefined && typeof provider !== "string") invalidRequest();
+      const systemPrompt = params.systemPrompt;
+      if (systemPrompt !== undefined && typeof systemPrompt !== "string") invalidRequest();
+      const id = sessionId as SessionId;
+
+      return deps.concurrency.runExclusive(id, async () => {
+        const runtime = await runtimeFor(id);
+        // Reject the whole configuration before mutating meta, queue, or records.
+        if (deps.concurrency.activeTurn(id) !== undefined)
+          throw new PiscesError("turn.active", "A turn is active for this session");
+        const hasModel = model !== undefined;
+        const hasProvider = provider !== undefined;
+        if (hasModel !== hasProvider)
+          throw new PiscesError("session.model_required", "Provider and model are required");
+        if (hasModel && !deps.providers.select(provider as string, model as string))
+          throw new PiscesError("session.invalid_model", "Invalid model");
+
+        if (hasModel) {
+          const meta = { ...runtime.meta, model: model as string, provider: provider as string };
+          // Persist first so a storage failure leaves memory untouched.
+          if (runtime.persisted) await deps.store.updateMeta(id, meta);
+          runtime.context.updateMeta(meta);
+          runtime.meta = meta;
+        }
+
+        if (systemPrompt !== undefined) {
+          const queue = runtime.context.snapshot().queue;
+          const existing = queue.findLast(
+            (entry) =>
+              entry.kind === "agent" &&
+              entry.role === "system" &&
+              entry.source === "instruction" &&
+              entry.confirmedAt === undefined,
+          );
+          const content: ContentBlock[] = [{ type: "text", text: systemPrompt }];
+          if (existing) runtime.context.edit(existing.id, content);
+          else
+            runtime.context.enqueue([
+              { kind: "agent", role: "system", source: "instruction", content },
+            ]);
+        }
+
+        return structuredClone(runtime.meta);
       });
     },
 
