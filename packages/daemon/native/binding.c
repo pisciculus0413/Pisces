@@ -40,9 +40,16 @@ static napi_value read_fd(napi_env env, napi_callback_info info, int32_t *fd) {
   if (napi_typeof(env, argv[0], &type) != napi_ok || type != napi_number) {
     return throw_type(env, "file descriptor must be a number");
   }
-  if (napi_get_value_int32(env, argv[0], fd) != napi_ok || *fd < 0) {
+  double value = 0.0;
+  if (napi_get_value_double(env, argv[0], &value) != napi_ok) {
+    return throw_type(env, "file descriptor must be a number");
+  }
+  /* Reject before any conversion or syscall: N-API would otherwise truncate
+     fractional and wrap out-of-range values into a different descriptor. */
+  if (!(value >= 0.0) || value > 2147483647.0 || value != (double)(int32_t)value) {
     return throw_type(env, "file descriptor must be a non-negative 32-bit integer");
   }
+  *fd = (int32_t)value;
   return NULL;
 }
 
