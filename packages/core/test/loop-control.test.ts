@@ -233,6 +233,62 @@ test("keeps parsed calls on cancellation before tool execution", async () => {
   expect(nodes[2]?.role).toBe("cancel");
 });
 
+test("does not launch tools when cancellation arrives after assistant commit", async () => {
+  const invoke = vi.fn(async () => ({ content: [{ type: "text" as const, text: "unused" }] }));
+  const h = createLoopHarness({ tools: toolsWithInvoke(invoke) });
+  await h.enqueueAndConfirm([user("hello")]);
+  const { adapter, execute } = adapterFor([
+    [
+      { type: "toolCall", call: { id: "call-1", name: name("one"), arguments: null } },
+      { type: "stop", reason: "toolCall" },
+    ],
+  ]);
+  const cancellations: Promise<boolean>[] = [];
+  let cancelled = false;
+  h.events.subscribe((event) => {
+    if (cancelled || event.type !== "session.updated") return;
+    const nodes = (event.data as unknown as { nodes: SessionNode[] }).nodes;
+    if (!nodes.some((node) => node.role === "assistant")) return;
+    cancelled = true;
+    cancellations.push(h.driver.cancel("t1" as TurnId));
+  });
+
+  expect((await run(h, adapter, execute)).reason).toBe("cancelled");
+  await Promise.all(cancellations);
+  expect(invoke).not.toHaveBeenCalled();
+  expect((await tree(h)).map((node) => node.role)).toEqual(["user", "assistant", "cancel"]);
+  expect(
+    h.published.filter((event) => event.type === "turn.step").map((event) => event.data),
+  ).toEqual([{ turnId: "t1", step: 1, stopReason: "cancelled" }]);
+});
+
+test("publishes only a cancelled step when cancellation follows a no-tool assistant commit", async () => {
+  const h = createLoopHarness();
+  await h.enqueueAndConfirm([user("hello")]);
+  const { adapter, execute } = adapterFor([
+    [
+      { type: "content", delta: "partial" },
+      { type: "stop", reason: "stop" },
+    ],
+  ]);
+  const cancellations: Promise<boolean>[] = [];
+  let cancelled = false;
+  h.events.subscribe((event) => {
+    if (cancelled || event.type !== "session.updated") return;
+    const nodes = (event.data as unknown as { nodes: SessionNode[] }).nodes;
+    if (!nodes.some((node) => node.role === "assistant")) return;
+    cancelled = true;
+    cancellations.push(h.driver.cancel("t1" as TurnId));
+  });
+
+  expect((await run(h, adapter, execute)).reason).toBe("cancelled");
+  await Promise.all(cancellations);
+  expect((await tree(h)).map((node) => node.role)).toEqual(["user", "assistant", "cancel"]);
+  expect(
+    h.published.filter((event) => event.type === "turn.step").map((event) => event.data),
+  ).toEqual([{ turnId: "t1", step: 1, stopReason: "cancelled" }]);
+});
+
 test("waits for launched tools, preserves result order, and stops before another step", async () => {
   const bothStarted = gate();
   const releaseTools = gate();

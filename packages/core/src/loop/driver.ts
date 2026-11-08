@@ -9,12 +9,12 @@ import type {
   LlmEvent,
   RunTurnInput,
   TurnResult,
+  WireRequest,
 } from "./types.js";
 
 interface ActiveTurn {
   sessionId: RunTurnInput["sessionId"];
   turnId: RunTurnInput["turnId"];
-  context: RunTurnInput["context"];
   controller: AbortController;
   state: "running" | "cancelling" | "ended";
 }
@@ -31,8 +31,10 @@ interface TurnProgress {
 
 function failure(error: unknown): { code: string; message: string } {
   if (error instanceof PiscesError) return { code: error.code, message: error.message };
-  if (error instanceof Error) return { code: "provider.invalid_response", message: error.message };
-  return { code: "provider.invalid_response", message: String(error) };
+  return {
+    code: "provider.invalid_response",
+    message: "Provider response could not be processed",
+  };
 }
 
 function appendDelta(blocks: ContentBlock[], type: "text" | "reasoning", delta: string): void {
@@ -46,8 +48,52 @@ function validateEvents(value: unknown): LlmEvent[] {
   if (!Array.isArray(value))
     throw new PiscesError("provider.invalid_response", "Adapter returned invalid events");
   for (const event of value) {
-    if (event === null || typeof event !== "object")
+    if (event === null || typeof event !== "object" || Array.isArray(event))
       throw new PiscesError("provider.invalid_response", "Adapter returned invalid event");
+    const candidate = event as Record<string, unknown>;
+    if (candidate.type === "content" || candidate.type === "reasoning") {
+      if (typeof candidate.delta !== "string")
+        throw new PiscesError(
+          "provider.invalid_response",
+          "Provider returned an invalid text delta",
+        );
+    } else if (candidate.type === "toolCall") {
+      const call = candidate.call as Record<string, unknown> | undefined;
+      if (
+        !call ||
+        typeof call.id !== "string" ||
+        !call.id ||
+        typeof call.name !== "string" ||
+        !call.name ||
+        !("arguments" in call)
+      )
+        throw new PiscesError(
+          "provider.invalid_response",
+          "Provider returned an invalid tool call",
+        );
+    } else if (candidate.type === "usage") {
+      const usage = candidate.usage as Record<string, unknown> | undefined;
+      if (!usage || typeof usage.inputTokens !== "number" || typeof usage.outputTokens !== "number")
+        throw new PiscesError("provider.invalid_response", "Provider returned invalid usage");
+    } else if (candidate.type === "stop") {
+      if (
+        !["stop", "toolCall", "length", "contentFilter", "cancelled", "error"].includes(
+          candidate.reason as string,
+        )
+      )
+        throw new PiscesError(
+          "provider.invalid_response",
+          "Provider returned an invalid stop reason",
+        );
+    } else if (candidate.type === "error") {
+      if (typeof candidate.code !== "string" || typeof candidate.message !== "string")
+        throw new PiscesError(
+          "provider.invalid_response",
+          "Provider returned an invalid error event",
+        );
+    } else {
+      throw new PiscesError("provider.invalid_response", "Provider returned an unknown event");
+    }
   }
   return value as LlmEvent[];
 }
@@ -87,6 +133,31 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     };
   }
 
+  async function finalizeFailure(
+    input: RunTurnInput,
+    events: EngineEventPublisher,
+    cause: unknown,
+  ): Promise<TurnResult> {
+    const error = failure(cause);
+    if (active?.state === "ended")
+      return {
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        reason: "failed",
+        error,
+      };
+    try {
+      return await end(input, events, "failed", error);
+    } catch (terminationError) {
+      return {
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        reason: "failed",
+        error: failure(terminationError),
+      };
+    }
+  }
+
   async function append(
     input: RunTurnInput,
     events: EngineEventPublisher,
@@ -120,14 +191,17 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     step: number,
     stopReason: StopReason,
     usage?: Usage,
-  ) {
-    await options.runExclusive(input.sessionId, async () => {
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    return options.runExclusive(input.sessionId, async () => {
+      if (signal?.aborted) return false;
       events.publishTurn("turn.step", {
         turnId: input.turnId,
         step,
         stopReason,
         ...(usage ? { usage } : {}),
       });
+      return true;
     });
   }
 
@@ -189,7 +263,6 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
       const turn: ActiveTurn = {
         sessionId: input.sessionId,
         turnId: input.turnId,
-        context: input.context,
         controller,
         state: "running",
       };
@@ -239,15 +312,42 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
           progress.step = step;
           if (controller.signal.aborted) return await finishCancelled(input, events, progress);
 
-          const wire = input.adapter.buildRequest(assembled.request);
-          for await (const chunk of input.execute(wire, controller.signal)) {
-            for (const event of validateEvents(input.adapter.parseChunk(chunk))) {
+          let wire: WireRequest;
+          try {
+            wire = input.adapter.buildRequest(assembled.request);
+          } catch (error) {
+            if (error instanceof PiscesError) throw error;
+            throw new PiscesError(
+              "provider.invalid_response",
+              "Provider request could not be built",
+              { cause: error },
+            );
+          }
+          const iterator = input.execute(wire, controller.signal)[Symbol.asyncIterator]();
+          while (true) {
+            let next: IteratorResult<string>;
+            try {
+              next = await iterator.next();
+            } catch (error) {
+              if (controller.signal.aborted || error instanceof PiscesError) throw error;
+              throw new PiscesError("provider.transport", "Provider transport failed", {
+                cause: error,
+              });
+            }
+            if (next.done) break;
+            let parsed: unknown;
+            try {
+              parsed = input.adapter.parseChunk(next.value);
+            } catch (error) {
+              if (error instanceof PiscesError) throw error;
+              throw new PiscesError(
+                "provider.invalid_response",
+                "Provider response could not be parsed",
+                { cause: error },
+              );
+            }
+            for (const event of validateEvents(parsed)) {
               if (event.type === "content" || event.type === "reasoning") {
-                if (typeof event.delta !== "string")
-                  throw new PiscesError(
-                    "provider.invalid_response",
-                    "Provider returned an invalid text delta",
-                  );
                 if (!event.delta.length) continue;
                 const kind = event.type === "content" ? "text" : "reasoning";
                 appendDelta(progress.blocks, kind, event.delta);
@@ -267,6 +367,31 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
           if (progress.stopReason === undefined)
             throw new PiscesError("provider.invalid_response", "Provider response has no stop");
 
+          const calls = progress.blocks.filter(
+            (block): block is Extract<ContentBlock, { type: "toolCall" }> =>
+              block.type === "toolCall",
+          );
+          if (new Set(calls.map((call) => call.id)).size !== calls.length)
+            throw new PiscesError(
+              "provider.invalid_response",
+              "Provider returned duplicate tool call ids",
+            );
+          if (progress.stopReason === "toolCall" && !calls.length)
+            throw new PiscesError(
+              "provider.invalid_response",
+              "Provider returned toolCall stop without calls",
+            );
+          if (progress.stopReason === "error")
+            throw new PiscesError(
+              "provider.invalid_response",
+              "Provider returned error stop without an error event",
+            );
+          if (progress.stopReason === "cancelled")
+            throw new PiscesError(
+              "provider.invalid_response",
+              "Provider returned cancelled stop without cancellation",
+            );
+
           const assistant = await append(input, events, progress.headId, [
             {
               kind: "agent",
@@ -277,12 +402,10 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
           ]);
           progress.assistantPersisted = true;
           progress.headId = assistant.at(-1)?.id;
-          const calls = progress.blocks.filter(
-            (block): block is Extract<ContentBlock, { type: "toolCall" }> =>
-              block.type === "toolCall",
-          );
+          if (controller.signal.aborted) return await finishCancelled(input, events, progress);
 
           if (calls.length) {
+            if (controller.signal.aborted) return await finishCancelled(input, events, progress);
             const results = await Promise.all(
               calls.map((call) =>
                 input.tools.invoke(call, assembled.selection, {
@@ -313,12 +436,32 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
             const toolNodes = await append(input, events, progress.headId, drafts);
             progress.headId = toolNodes.at(-1)?.id;
             if (controller.signal.aborted) return await finishCancelled(input, events, progress);
-            await publishStep(input, events, step, progress.stopReason, progress.usage);
+            if (
+              !(await publishStep(
+                input,
+                events,
+                step,
+                progress.stopReason,
+                progress.usage,
+                controller.signal,
+              ))
+            )
+              return await finishCancelled(input, events, progress);
             progress.stepPublished = true;
             continue;
           }
 
-          await publishStep(input, events, step, progress.stopReason, progress.usage);
+          if (
+            !(await publishStep(
+              input,
+              events,
+              step,
+              progress.stopReason,
+              progress.usage,
+              controller.signal,
+            ))
+          )
+            return await finishCancelled(input, events, progress);
           progress.stepPublished = true;
           if (controller.signal.aborted) return await finishCancelled(input, events, progress);
 
@@ -331,19 +474,15 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
         }
       } catch (error) {
         if (error instanceof PiscesError && error.code === "turn.active") throw error;
-        if (active?.state === "cancelling" || controller.signal.aborted)
-          return await finishCancelled(input, events, progress);
-        const errorData = failure(error);
-        try {
-          return await end(input, events, "failed", errorData);
-        } catch {
-          return {
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            reason: "failed",
-            error: errorData,
-          };
+        if (active?.state === "ended") return await finalizeFailure(input, events, error);
+        if (active?.state === "cancelling" || controller.signal.aborted) {
+          try {
+            return await finishCancelled(input, events, progress);
+          } catch (finalizationError) {
+            return await finalizeFailure(input, events, finalizationError);
+          }
         }
+        return await finalizeFailure(input, events, error);
       } finally {
         input.signal.removeEventListener("abort", forwardAbort);
         if (active === turn) active = undefined;
@@ -354,9 +493,6 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
       if (!turn || turn.turnId !== turnId || turn.state === "ended") return false;
       turn.state = "cancelling";
       turn.controller.abort(new DOMException("Turn cancelled", "AbortError"));
-      await options.runExclusive(turn.sessionId, async () => {
-        turn.context.unconfirm();
-      });
       return true;
     },
   };
