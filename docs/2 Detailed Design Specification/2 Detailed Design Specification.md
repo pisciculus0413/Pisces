@@ -426,9 +426,10 @@ interface CreateSessionParams {
   - 空数组：不启用任何条目；
   - 显式列表：替换默认选择，不与默认值合并。
 - `extensions` 生成一条 `kind=control`、`role=declaration` 的队列条目，`toggle` 为所选名称；所选为空时不生成。
+- 当前 daemon 没有扩展清点与 definition 来源，无法为声明附加 definition：有效 `extensions`（显式列表或默认选择）非空时，在创建临时会话与运行时之前整体以 `queue.invalid_control` 拒绝；名称不符合 `package#name` 同样以 `queue.invalid_control` 拒绝，重复名称以 `queue.duplicate_name` 拒绝；空列表接受且不生成声明条目。失败不创建会话、不写队列。`templateId` 尚未接入模板解析，出现即返回 `protocol.invalid_request`。
 - `workspace` 显式提供时直接使用；省略时读取全局配置中的 `defaultWorkspace`。两者都没有返回 `session.workspace_required`；路径不存在、不是目录或不可写返回 `session.invalid_workspace`。默认工作区必须是绝对路径，不自动创建；不读取 daemon 工作目录。工作区配置 `.pisces/config.json` 不参与默认工作区解析。
 - `provider`/`model` 只能成对出现：两者均省略时取配置中的 `defaultProvider`/`defaultModel`；只提供一个，或默认值不完整，返回 `session.model_required`；显式组合或默认组合不在 `provider.list` 中，返回 `session.invalid_model`。
-- `templateId` 只用于解析模板级初始配置；不创建目录、不写文件、不执行脚本。工作区初始化只能经 `template.preview`/`template.apply`。
+- `templateId` 设计上只用于解析模板级初始配置；不创建目录、不写文件、不执行脚本。工作区初始化只能经 `template.preview`/`template.apply`。当前实现尚未接入模板解析，按上一条拒绝。
 - 返回临时 `SessionMeta`，客户端通过 `session.read` 取得队列。
 
 #### 3.4.2 `session.list`
@@ -522,9 +523,11 @@ interface QueueEditParams {
 }
 ```
 
-- `queue.enqueue` 只入队，不确认，不写会话记录；条目超过 `MAX_ENTRY_BYTES` 返回 `queue.entry_too_large`，队列超过 `MAX_QUEUE_BYTES` 返回 `queue.too_large`。
+- `queue.enqueue` 只入队，不确认，不写会话记录；在会话锁内加载或复用运行时并 `initialize`，再委托 `Context.enqueue`，返回 `{ ids }` 并按最终队列推送 `queue.updated`。整批请求要么全部入队，要么队列保持不变。
+- 大小限制沿用核心错误码：条目超过 `MAX_ENTRY_BYTES` 返回 `queue.entry_too_large`，完整队列超过 `MAX_QUEUE_BYTES` 返回 `queue.too_large`。
 - `queue.enqueue` 只接受 agent/system/user/assistant/tool 与 `role=declaration`；`compaction`、`cancel` 由运行框架写入，客户端提交返回 `queue.invalid_control`。
 - `declaration` 必须由 daemon 附加 definition；客户端内联 definition 被拒绝。`Context.enqueue` 是内部可信边界，接受已附完整 definitions 并校验结构，不从实时 Tools 重新获取定义。
+- 当前 daemon 没有扩展清点与 definition 来源，因此客户端提交的 `kind=control` 条目（包括 `declaration`）一律以 `queue.invalid_control` 拒绝；`queue.edit`、`queue.remove`、`queue.clear` 尚未路由。
 - 队列按入队顺序排列；不提供重排方法。
 - `queue.edit` 只允许未确认的 `kind=agent` 条目；已确认条目返回 `queue.entry_locked`，`data.reason=confirmed`。
 - `queue.remove` 可删除任意尚未装配的条目，包括已确认未装配条目。
@@ -573,6 +576,7 @@ interface TurnStartResult {
   - 不启动第二个 turn，`mode` 为 `steer`；
   - 不得带 `nodeId`，否则返回 `turn.node_id_forbidden`；
   - 返回已有 turn 的 `turnId`。
+- 已有登记的 turn 但运行时处于 `cleanup`/`cleanup_failed`（`turn.ended` 之后、标记尚未删除）：返回 `turn.active`，不确认队列、不 steer、不改写标记。
 - 并发 `turn.start` 由服务层按会话串行化；后到者按 steer 处理。
 
 #### 3.6.3 `turn.list` / `turn.cancel`
@@ -584,6 +588,9 @@ interface TurnStartResult {
   - 已产生的回复与控制消息写入会话并标记中断；
   - 清除尚未装配条目的 `confirmedAt`，用户需重新确认；
   - 找不到活跃 turn 时返回 `{ cancelled: false }`。
+- `{ cancelled: true }` 只表示取消请求已交给登记的 turn，不表示 turn 已结束；turn 仍登记且运行时为 `running` 时每次调用都返回 `true`，但取消 handle 至多执行一次。
+- turn 已进入 `cleanup`/`cleanup_failed`（包括 `turn.ended` 之后、标记清理之前），或未知、已注销时返回 `{ cancelled: false }`，不再触发取消 handle。
+- 忽略中止的 driver 保持 `running` 并被 `turn.list` 列出，同会话新 turn 被阻塞，直到自然结束或重启恢复。
 - 连接断开或 `session.unsubscribe` 不触发中止。
 
 ### 3.7 供应商、模板与客户端方法
@@ -1292,6 +1299,7 @@ daemon 是用户级单实例进程，负责监听、路由、持久化、扩展�
   5. 初始化 `Gateway` 与 `Concurrency`；
   6. 开始监听 `Transport`。
 - 停止时先停止接受新连接，再中止活跃 turn、等待写盘完成、关闭 socket 与锁。
+- 当前 daemon 装配只提供 `bootstrapGateway`：依次初始化 `SessionStore`、恢复活跃 turn、构造 `Gateway`（§5.9）。锁文件、socket 绑定、`Transport` 监听与停止流程属于后续阶段，当前未装配。
 - daemon 崩溃后只恢复已落盘会话；临时会话与消息队列随进程退出丢失。
 - 未完成的热会话在恢复时标记为中断，由用户决定是否继续。
 
@@ -1350,8 +1358,10 @@ interface Concurrency {
 - `activeTurn` 只记录正在运行的 turn；`activeTurns()` 返回按 `sessionId`、`turnId` 排序的脱离快照，`turn.list` 据此生成快照，允许无锁快照偏差。
 - `registerTurn` 每个会话只登记一个 turn，重复登记以 `turn.active` 拒绝而不替换已有 turn；登记时保存取消 handle。
 - `cancelTurn(turnId)` 对未知 turn 返回 `false`，否则至多调用一次该 turn 的取消 handle。handle 抛错被隔离，不向调用方转抛原始异常；`cancelAll` 因此仍继续取消其它 turn 并照常等待超时。
+- `cancelTurn(turnId)` 是唯一取消入口：`Gateway` 不直接调用 `AgentLoopDriver.cancel` 或 `cancelAll`，也不扫描运行时查找 driver。登记的 handle 必须是总函数且无锁：同步触发、不 await、不获取会话锁；handle 抛错只记录在运行时，不转抛、不外泄。
+- `cancelTurn` 返回 `true` 只表示请求已交给登记的 turn，不表示该 turn 已结束；忽略中止的 driver 继续以 `running` 登记、继续被 `turn.list` 列出并阻塞同会话新 turn。turn 仍登记时重复调用仍返回 `true`，handle 至多执行一次。
 - `runExclusive` 不跨会话持有锁；回调内不得 acquire 同一会话锁。
-- `cancelAll(maxWaitMs = 5000)` 取消全部已登记 turn 并等待其完成；超时不报错且不删除登记项（含 `active-turn.json` 标记），由启动恢复处理。
+- `cancelAll(maxWaitMs = 5000)` 取消全部已登记 turn 并等待其完成；超时不报错且不删除登记项（含 `active-turn.json` 标记），turn 保持 `running`，只能由自然结束或启动恢复处理。host 发起的 `cancelAll` 后没有 start/stop/shutdown 路径，也没有超出重启恢复的残留 turn 恢复。
 - `Concurrency` 不持久化状态；daemon 重启后活跃 turn 集合为空。
 
 ### 5.3 `EventBus` 与 `Gateway`
@@ -1384,8 +1394,13 @@ interface EventBus {
 ```ts
 interface SessionRuntime {
   meta: SessionMeta;
+  persisted: boolean;         // 临时会话首次落盘后置 true
   context: Context;
+  sessions: Sessions;         // 包装 SessionStore；首次 create 提交后补写临时会话标记
+  driver: AgentLoopDriver;
   eventClock: SessionEventClock; // 同会话 Context/driver/Gateway 共享
+  pendingMarker?: { turnId: TurnId; startedAt: string };
+  phase?: "running" | "cleanup" | "cleanup_failed";
   subscribers: Set<string>;   // connection id
 }
 ```
@@ -1395,25 +1410,30 @@ interface SessionRuntime {
 - `session.create` 创建临时 `SessionMeta`、`Context`（`persisted=false`）和空队列；不写盘。
 - 临时会话不出现在 `session.list`；daemon 退出即丢失。
 - 同一会话的运行时只创建一次；多个客户端共享。
+- 运行时在进程存活期间不逐出、不重建，随之只有一份 `SessionEventClock`，由该会话的 `Context`、driver 与 `Gateway` 共享，`next()` 只在会话锁内调用。因此进程运行期间 `seq` 不回退。
+- `SessionNode` 不持久化 `seq`，重启后每个会话的 clock 从 `0` 开始；这不违反 §3.4.3/§5.3.3，因为事件不重放，重连客户端先 `session.read` 并以返回的 `seq` 作为水位。
 
 #### 5.3.2 方法路由
 
-- `session.create`：校验 provider/model、workspace 与 extensions；创建运行时；将 `systemPrompt` 和扩展选择物化为队列条目；返回临时 `SessionMeta`。
+- `session.create`：校验 provider/model、workspace 与 extensions；有效 `extensions`（显式或默认）非空时在创建任何运行时之前整体以 `queue.invalid_control` 拒绝（无扩展清点/definition 来源），空列表不生成声明条目；`templateId` 返回 `protocol.invalid_request`。通过后在会话锁内创建运行时，将 `systemPrompt` 物化为队列条目，返回临时 `SessionMeta`。
 - `session.list`：只查 `SessionStore`；不经过运行时。
 - `session.read`：在会话锁内读取 `meta`、`records`、`queue`、`selection` 与 `seq`；无 `nodeId` 按字节预算分页读全树，有 `nodeId` 读分支；临时会话没有节点。`selection` 由 `Context.selectionFor` 计算，只含已持久化记录；`queue`/`selection` 仅首屏返回。
 - `session.configure`：先检查活跃 turn，存在则整体返回 `turn.active`，不修改队列/meta；无活跃 turn 时校验后先写 `SessionStore.updateMeta`，成功后调用 `Context.updateMeta`；`systemPrompt` 只更新或新增 `source="instruction"` 队列条目。
 - `session.subscribe` / `session.unsubscribe`：维护连接的订阅集合；重复订阅幂等；退订不发事件；断开清理。
-- `queue.enqueue` / `edit` / `remove` / `clear`：委托 `Context`；返回队列 id；推送 `queue.updated`。
+- `queue.enqueue`：在会话锁内加载/复用运行时、`initialize`，拒绝任何客户端 `kind=control` 条目（`queue.invalid_control`），再委托 `Context.enqueue`；返回 `{ ids }`，成功后按最终队列推送 `queue.updated`；条目/队列超限沿用 `queue.entry_too_large`/`queue.too_large`，失败时整批不改变队列。`queue.edit` / `remove` / `clear` 不在路由内。
 - `entries.snapshot`：从 `Extensions` 取得当前清点，从 `Context` 取得已持久化选择与 effective 列表；不合并队列。
-- `turn.start`：在 `runExclusive` 回调内只完成“读 activeTurn → 校验 → `context.confirm()` → `registerTurn`”；无活跃 turn 时生成 `turnId`，已落盘会话在锁内写 `active-turn.json` marker，并返回 `{turnId, mode:"new"}`；已有活跃 turn 时返回该 turn 的 `turnId` 与 `mode=steer`，不写新标记。`AgentLoopDriver.run` 必须在 `runExclusive` 回调完全返回、会话锁释放之后才启动（锁外 fire-and-forget）；不得在锁回调内同步调用或 await `run`，否则触发非重入 `TypeError` 或死锁。
+- `turn.start`：在 `runExclusive` 回调内只完成“读 activeTurn → 校验 → 写标记（已落盘会话）/暂存标记（临时会话）→ `context.confirm()` → `registerTurn` → 置运行时 `running`”；无活跃 turn 时生成 `turnId`，已落盘会话在锁内写 `active-turn.json` 标记，临时会话只记录 `pendingMarker`（由首次 `Sessions.create` 提交后补写），并返回 `{turnId, mode:"new"}`；已有活跃 turn 且运行时为 `running` 时只 `confirm` 并返回该 turn 的 `turnId` 与 `mode=steer`，不写新标记；运行时处于 `cleanup`/`cleanup_failed` 时整体返回 `turn.active`，不确认、不 steer。`AgentLoopDriver.run` 必须在 `runExclusive` 回调完全返回、会话锁释放之后才启动（锁外 fire-and-forget）；不得在锁回调内同步调用或 await `run`，否则触发非重入 `TypeError` 或死锁。
+- 临时会话标记：`turn.start` 不写盘标记；`Gateway` 包装的 `Sessions.create` 在首次提交成功后写 `active-turn.json`（`startOffset=0`，无 `startNodeId`）。写失败以 `storage.io`（“Active turn marker could not be written”）失败，且发生在任何供应商请求之前：已提交节点与已确认队列的消费保持不变量、不回滚，磁盘无标记。提交成功到写标记之间的进程崩溃窗口不可恢复，本设计不声称覆盖。
 - `turn.list`：从 `Concurrency` 返回活跃 turn 快照。
-- `turn.cancel`：不取会话锁，委托 `Concurrency.cancelTurn(turnId)`，通过 `registerTurn` 登记时保存的取消 handle 发起取消，`cancelled` 取其返回值；未知 `turnId` 返回 `{ cancelled: false }`。取消句柄只触发 driver 的协作式取消（中止供应商流、置位工具信号并停止新 step，见 §3.6.3），不强制终止、不取会话锁，也不绕过 `Concurrency` 自行查找 driver。
+- `turn.cancel`：不取会话锁，先按 `turnId` 在 `Concurrency.activeTurns()` 定位会话与运行时；未知 turn、已注销或运行时处于 `cleanup`/`cleanup_failed` 返回 `{ cancelled: false }`；运行时仍为 `running` 时委托唯一取消入口 `Concurrency.cancelTurn(turnId)` 并返回其布尔值。登记 handle 在 `registerTurn` 时保存，总是不阻塞、无锁、同步触发 driver 的协作式取消（中止供应商流、置位工具信号并停止新 step，见 §3.6.3），不强制终止，也不绕过 `Concurrency` 自行查找 driver。`{ cancelled: true }` 只表示请求已交给登记的 turn，不表示 turn 已结束；`running` 期间重复调用仍返回 `true`，handle 至多执行一次；忽略中止的 driver 保持 `running`、继续被 `turn.list` 列出并阻塞同会话新 turn，只能由自然结束或重启恢复解除。
+- turn 生命周期：`running -> cleanup -> (unregistered | cleanup_failed)`。driver 结束（含失败）后，`launch` 在会话锁内把阶段置为 `cleanup`；`turn.ended` 只把运行时移到 `cleanup`，不注销 turn、不删除标记。随后删除 `active-turn.json` 成功才注销；失败则发布安全数据的 `turn.cleanup_failed`（`{turnId, code:"storage.io", message}`，不含原始异常），在缺失时追加一条同 `turnId`、`reason="cleanup_failed"` 的 `cancel` 控制消息，重试删除一次；仍失败则保留标记并把阶段置为 `cleanup_failed`。`cleanup`/`cleanup_failed` 期间 `turn.list` 仍列出该 turn，`turn.start` 返回 `turn.active`，`turn.cancel` 返回 `{ cancelled:false }`，因此残留标记与登记项会阻塞该会话的新 turn，直到重启恢复删除标记；`cleanup_failed` cancel 已提交时恢复按同 `turnId` 去重，只删除标记而不追加 `daemon_restart` cancel。
 - `provider.list`：从 `ProviderManagement` 与 `CredentialStore` 生成；`ready` 由凭据状态计算。
 - `template.list` / `preview` / `apply`：委托 `TemplateStore`、`WorkspaceAccess`、`ExecHost`，并创建临时会话。
 - `client.list` / `start`：委托 `ClientRegistry`。
 
 #### 5.3.3 事件路由
 
+- `createGateway` 在每次调用内创建唯一的 handler 闭包并订阅一次 `EventBus`，按 `event.sessionId` 路由到本实例的运行时，未知会话忽略且不抛错。`EventBus` 按函数引用去重，不能为同一函数提供多个身份，因此禁止共享/模块级 handler，也禁止按会话分别订阅。
 - `Context` 的 `queue.updated`、`selection.updated`、`session.updated`，以及 driver 的 turn 事件进入 `EventBus`。
 - `Gateway` 把引擎事件转换为协议事件，只发送给订阅该会话的连接。
 - 事件都带 `sessionId`、`seq` 与 `at`；`queue.updated` 携带完整队列，`selection.updated` 携带完整名称集合。
@@ -1429,9 +1449,41 @@ interface SessionRuntime {
 - 临时会话可读、可订阅、可队列操作；首次 turn 落盘后进入 `session.list`。
 - daemon 停止或崩溃时，未落盘的临时会话与队列不恢复。
 
+#### 5.3.5 活跃 turn 标记
+
+```ts
+interface ActiveTurnStore {
+  read(sessionId: SessionId): Promise<ActiveTurnMarker | undefined>;
+  write(sessionId: SessionId, marker: ActiveTurnMarker): Promise<void>;
+  remove(sessionId: SessionId, turnId: TurnId): Promise<void>;
+  list(): Promise<{ sessionId: SessionId; marker: ActiveTurnMarker }[]>;
+  scan(): Promise<ActiveTurnScanEntry[]>;
+}
+
+type ActiveTurnScanEntry =
+  | { sessionId: SessionId; marker: ActiveTurnMarker }
+  | { sessionId: SessionId; error: PiscesError };
+```
+
+- `write` 校验 `sessionId` 与标记结构后，写 `active-turn.json.tmp`、fsync、rename 覆盖并同步会话目录；会话目录不存在返回 `storage.io`。
+- `read` 在文件缺失时返回 `undefined`；未知字段、非法 id、`startOffset` 不是非负安全整数或 `startedAt` 不是 24 字节 RFC3339 UTC 毫秒时间戳均返回 `storage.corrupt`。
+- `remove` 先读取，仅在磁盘标记的 `turnId` 匹配时删除；文件不存在或不匹配为幂等 no-op，不会删除其他 turn 的标记。
+- 严格 `list()` 遇任一损坏标记整体拒绝并保留原始数据，供非恢复调用方 fail-closed 使用。
+- 恢复专用的 `scan()` 逐会话返回标记或该会话的 `PiscesError`，单个损坏标记不阻断健康会话；`recoverActiveTurns` 只消费 `scan()`，把无效条目转为 `RecoveryIssue` 并保留坏标记，不静默跳过。
+- 标记由 `Gateway` 侧的 `ActiveTurnStore` 拥有，不是 `SessionStore` 的一部分；`SessionStore.initialize` 不读取、不清理 `active-turn.json`。文件契约与恢复规则见 §6.5。
+
 ### 5.4 `SessionStore`
 
 `SessionStore` 实现 `SessionRepository`，负责会话目录、`meta.json`、`events.jsonl` 与项目记录。
+
+```ts
+interface SessionStore extends SessionRepository {
+  initialize(): Promise<RecoveryIssue[]>;
+  getMeta(sessionId: SessionId): Promise<SessionMeta>;
+  commitOffset(sessionId: SessionId): Promise<number>;
+  readTreeSince(sessionId: SessionId, offset: number): AsyncIterable<SessionNode>;
+}
+```
 
 #### 5.4.1 布局
 
@@ -1479,6 +1531,10 @@ interface SessionRuntime {
 - 未提交尾部在读取时忽略，不修改文件；下一次 append 前截断到 commit。
 - 文件中间出现空白行忽略；非法行报错。
 - 节点 `parentId` 不存在、根指针异常或环返回 `storage.corrupt`。
+- `getMeta` 在 `initialize` 后返回 `SessionMeta` 的脱离副本；会话缺失返回 `session.not_found`，meta 非法返回 `storage.corrupt`。
+- `commitOffset` 返回当前 `events.commit` 的已提交字节偏移，需先 `initialize`。
+- `readTreeSince(offset)` 按提交顺序产出字节偏移不小于 `offset` 的已提交节点；`offset` 必须是非负安全整数，否则 `TypeError`。未提交尾部不参与比较；恢复据此排除 `startOffset` 之前的历史节点。
+- 三者是 `SessionStore` 的服务内部读访问器，不属于 `SessionRepository`，core 不调用；`active-turn.json` 仍由 `ActiveTurnStore`（§5.3.5）拥有，`SessionStore` 不读取、不清理。
 
 #### 5.4.4 列表与项目
 
@@ -1682,6 +1738,7 @@ interface ClientRegistry {
 
 ### 5.9 服务层装配
 
+- `bootstrapGateway(deps)` 是唯一装配路径：先 `SessionStore.initialize()`，再用 `markers.scan()` 执行 `recoverActiveTurns`（逐会话隔离损坏标记），最后 `createGateway(deps)`；返回 `{ gateway, initializationIssues, recoveryIssues }`，且须在任何请求被服务前完成。它不包含 daemon 锁、socket 监听/停止或 `Transport` 装配。
 - `Gateway` 依赖 `SessionStore`、`Extensions`、`ProviderHost`、`TemplateStore`、`ClientRegistry` 与 `Concurrency`。
 - `Extensions` 依赖 `Tools`、`Skills`、`Context`、`ProviderManagement`、`ClientRegistry`。
 - `ProviderHost` 依赖 `CredentialStore` 与 `ProviderManagement`。
@@ -1766,17 +1823,23 @@ interface ClientRegistry {
 1. `SessionStore.initialize` 只清理无 `meta.json` 的普通会话孤儿目录；有 meta 但 commit 缺失或非法须保留并报告 `storage.corrupt`。
 2. 逐会话校验 meta、schema、commit 偏移与已提交节点记录，故障收集为初始化报告，隔离损坏会话。
 3. 对健康会话截断 commit 后的未提交尾部并同步，清理三个受控 `.tmp`；损坏会话不截尾、不清理，不返回部分记录。
-4. 仅对存在 active-turn 标记的会话恢复：从标记的 `startNodeId` 开始，只扫描偏移不小于标记 `startOffset` 的已提交节点，按提交顺序沿子节点推进到本 turn 已提交端点（同会话仅一个活跃 turn）；没有后续节点时使用起点。临时会话首次落盘后从根沿追加链确定端点。只在该分支查找最后 assistant 节点；对缺少对应 toolResult 的 toolCall 合成 `synthetic="interrupted"` 的 toolResult（内容为“结果未知，可能已部分生效，请核验”），再以该分支端点为父节点追加 `role=cancel` 控制消息（`reason=daemon_restart`，`at=最后节点`），删除标记。
+4. 仅对存在 active-turn 标记的会话恢复：从标记的 `startNodeId` 开始，用 `SessionStore.readTreeSince(startOffset)` 只扫描字节偏移不小于标记 `startOffset` 的已提交节点，按提交顺序沿每个节点的最后一个子节点推进到本 turn 已提交端点（同会话仅一个活跃 turn）；没有后续节点时使用起点。临时会话没有 `startNodeId`，取窗口内第一个已提交节点，从根沿追加链确定端点。只在该路径查找最后 assistant 节点；对缺少对应 toolResult 的 toolCall 按调用顺序合成 `synthetic="interrupted"` 的 toolResult（内容为“结果未知，可能已部分生效，请核验”）。同一原子 `Sessions.append` 批次把这些合成结果接在端点之后，再把 `role=cancel` 控制消息接在最后一条合成结果（无合成结果时接在端点）之后；`reason=daemon_restart`，`cancel.at` 为恢复前的真实已提交端点 `endpointId`，不是批内生成的合成节点 id。追加提交成功后才删除标记。
 5. 恢复为冷会话；`turn.list` 为空；客户端重新 `session.read`。
+
+恢复幂等：
+
+- 去重以 `turnId` 为键，但只在 `startOffset` 窗口内、且位于本次走过路径上的 `cancel` 生效：命中则只删除标记，不追加合成结果或 cancel；窗口外或非选中兄弟分支上的同 `turnId` cancel 不算命中，也不会删除标记。
+- 追加已提交但抛 `storage.io` 时保留标记；下次恢复命中这条已提交的 cancel，只删除标记而不重复追加。
 
 活跃 turn 标记：
 
 - 路径：`<dataDir>/sessions/<sessionId>/active-turn.json`。
-- 内容：`{ turnId, startedAt, startOffset, startNodeId? }`；`startNodeId` 固化本次 turn 实际起点（显式 nodeId 或启动时默认末节点），临时会话省略；`startOffset` 为启动时 events.commit 的字节偏移，临时会话为 0，用于排除起点已有的历史子分支。起点与偏移在同一会话锁内确定，标记原子写入成功后才启动 driver；由 `Gateway` 在 `turn.start` 启动 driver 前写入，正常结束后删除。
-- 标记是服务层运行时状态，不进入 `SessionMeta`、不进入 `events.jsonl`、不参与选择。
-- 临时会话没有标记；首次落盘前崩溃不产生标记。临时会话在首批节点落盘后补写标记。
-- 已落盘会话的 turn 启动前必须写标记；临时会话补写失败时结束 turn，不继续请求。
-- 恢复时追加 `cancel` 失败则保留标记，下次启动重试；不重复追加同 turn 的 `cancel` 由 `turnId` 检查。
+- 内容：`{ turnId, startedAt, startOffset, startNodeId? }`；`startNodeId` 固化本次 turn 实际起点（显式 nodeId 或启动时默认末节点），临时会话省略；`startOffset` 为启动时 events.commit 的字节偏移，临时会话为 0，用于排除起点已有的历史子分支。起点与偏移在同一会话锁内确定，已落盘会话的标记原子写入成功后才启动 driver；由 `Gateway` 在 `turn.start` 启动 driver 前写入，正常结束后删除。
+- 标记是服务层运行时状态，不进入 `SessionMeta`、不进入 `events.jsonl`、不参与选择；读写接口见 §5.3.5。
+- 已落盘会话在 `turn.start` 的会话锁内写标记，写成功后才确认队列、登记并启动 driver。临时会话在 `turn.start` 只记录待写标记，等首次 `Sessions.create` 提交成功后补写（`startOffset=0`、无 `startNodeId`）；补写失败以 `storage.io` 结束该 turn，发生在任何供应商请求之前：已提交节点与已确认队列的消费不变量保持不变、不回滚，磁盘无标记。
+- 首次落盘提交与补写标记之间的进程崩溃窗口不可恢复：会话已落盘但没有标记，恢复不会为该 turn 合成 interrupted 结果或 cancel。本设计明确不覆盖该窗口。
+- driver 结束进入 `cleanup` 后才删除标记，删除成功才注销 turn；删除失败按 §5.3.2 的 `cleanup_failed` 流程处理：发布 `turn.cleanup_failed`、必要时追加同 `turnId` 的 `cleanup_failed` cancel、重试删除一次，仍失败则保留标记与登记的 `cleanup_failed` turn。
+- 恢复追加失败（含提交点后抛 `storage.io`）保留标记，下次启动重试；同 `turnId` 去重只在 `startOffset` 窗口内的走过路径生效，因此已提交的 cancel 不会重复追加。`cleanup_failed` cancel 已提交时，恢复按同 `turnId` 去重只删除标记，不追加 `daemon_restart` cancel；若该 cancel 也未能提交，恢复按正常规则补齐。
 
 未完成工具：
 
