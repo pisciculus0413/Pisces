@@ -404,6 +404,9 @@ interface HelloResult {
 | `client.list` | `{}` | `{ clients: ClientRegistration[] }` |
 | `client.start` | `{ id }` | `{ pid: number }` |
 
+- 当前阶段实际路由的 `Gateway` 方法只有 `session.create`、`session.read`、`session.configure`、`queue.enqueue`、`turn.start`、`turn.cancel`、`turn.list`、`provider.list` 八个；`protocol.hello` 属于连接握手，不在 `Gateway` 分派内。本表其余方法（`session.list`、`session.subscribe`/`session.unsubscribe`、`queue.edit`/`queue.remove`/`queue.clear`、`entries.snapshot`、`template.*`、`client.*`）为目标设计，尚未接入路由；当前调用返回 `protocol.unknown_method`。
+- 方法分派只查自有属性：未识别的方法名（包括 `constructor`、`toString`、`__proto__`、`valueOf` 等原型属性名）一律返回 `protocol.unknown_method`，不会落回任何处理函数。
+
 ### 3.4 会话方法
 
 #### 3.4.1 `session.create`
@@ -433,6 +436,8 @@ interface CreateSessionParams {
 - 返回临时 `SessionMeta`，客户端通过 `session.read` 取得队列。
 
 #### 3.4.2 `session.list`
+
+- 当前阶段 `session.list` 尚未路由；会话枚举属于后续阶段的目标设计，当前调用返回 `protocol.unknown_method`。
 
 - 只返回已落盘会话的 `SessionMeta`。
 - 临时会话不出现。
@@ -490,6 +495,8 @@ interface ConfigureSessionParams {
 
 #### 3.4.5 `session.subscribe` / `session.unsubscribe`
 
+- 当前阶段没有连接管理与事件推送，`session.subscribe`/`session.unsubscribe` 尚未路由；本节为目标设计，当前调用返回 `protocol.unknown_method`。
+
 ```ts
 interface SessionSubscribeParams {
   sessionId: SessionId;
@@ -542,6 +549,8 @@ interface QueueEditParams {
 ### 3.6 条目与 turn 方法
 
 #### 3.6.1 `entries.snapshot`
+
+- 当前阶段 `entries.snapshot` 尚未路由；本节为目标设计，当前调用返回 `protocol.unknown_method`。
 
 - 返回当前可用的工具、包装器、技能、上下文来源的 `entries`，以及本会话已固化定义的 `effective` 列表；`selection` 按默认分支计算。
 - `entries` 含 `definition/definitionHash`，供确认前审查；`effective` 含 name、configHash、stale。
@@ -604,6 +613,8 @@ interface TurnStartResult {
 
 #### 3.7.2 模板方法
 
+- 当前阶段模板方法（`template.list`/`template.preview`/`template.apply`）尚未路由；本节为目标设计，当前调用返回 `protocol.unknown_method`。
+
 - `template.list` 返回 `TemplateInfo[]`，不返回文件内容。
 - `template.preview` 解析模板，返回将创建的目录、文件、冲突列表与可选的初始化脚本；无副作用。
 - `template.apply` 必须带 `confirmed: true`；存在冲突且未带 `overwrite: true` 时返回 `template.workspace_conflict`。
@@ -617,6 +628,8 @@ interface TurnStartResult {
 - 初始化脚本失败时返回 `template.init_failed`，不创建会话；已创建文件不自动回滚。
 
 #### 3.7.3 客户端方法
+
+- 当前阶段客户端方法（`client.list`/`client.start`）尚未路由；本节为目标设计，当前调用返回 `protocol.unknown_method`。
 
 - `client.list` 返回已注册客户端，不返回进程状态。
 - `client.start` 校验客户端 id，按注册信息启动进程，返回 pid。
@@ -1416,20 +1429,21 @@ interface SessionRuntime {
 #### 5.3.2 方法路由
 
 - `session.create`：校验 provider/model、workspace 与 extensions；有效 `extensions`（显式或默认）非空时在创建任何运行时之前整体以 `queue.invalid_control` 拒绝（无扩展清点/definition 来源），空列表不生成声明条目；`templateId` 返回 `protocol.invalid_request`。通过后在会话锁内创建运行时，将 `systemPrompt` 物化为队列条目，返回临时 `SessionMeta`。
-- `session.list`：只查 `SessionStore`；不经过运行时。
+- `session.list`：只查 `SessionStore`；不经过运行时。当前阶段未路由（目标设计）。
 - `session.read`：在会话锁内读取 `meta`、`records`、`queue`、`selection` 与 `seq`；无 `nodeId` 按字节预算分页读全树，有 `nodeId` 读分支；临时会话没有节点。`selection` 由 `Context.selectionFor` 计算，只含已持久化记录；`queue`/`selection` 仅首屏返回。
 - `session.configure`：先检查活跃 turn，存在则整体返回 `turn.active`，不修改队列/meta；无活跃 turn 时校验后先写 `SessionStore.updateMeta`，成功后调用 `Context.updateMeta`；`systemPrompt` 只更新或新增 `source="instruction"` 队列条目。
-- `session.subscribe` / `session.unsubscribe`：维护连接的订阅集合；重复订阅幂等；退订不发事件；断开清理。
+- `session.subscribe` / `session.unsubscribe`：维护连接的订阅集合；重复订阅幂等；退订不发事件；断开清理。当前阶段没有连接与订阅机制，未路由（目标设计）。
 - `queue.enqueue`：在会话锁内加载/复用运行时、`initialize`，拒绝任何客户端 `kind=control` 条目（`queue.invalid_control`），再委托 `Context.enqueue`；返回 `{ ids }`，成功后按最终队列推送 `queue.updated`；条目/队列超限沿用 `queue.entry_too_large`/`queue.too_large`，失败时整批不改变队列。`queue.edit` / `remove` / `clear` 不在路由内。
-- `entries.snapshot`：从 `Extensions` 取得当前清点，从 `Context` 取得已持久化选择与 effective 列表；不合并队列。
+- `entries.snapshot`：从 `Extensions` 取得当前清点，从 `Context` 取得已持久化选择与 effective 列表；不合并队列。当前阶段未路由（目标设计）。
 - `turn.start`：在 `runExclusive` 回调内只完成“读 activeTurn → 校验 → 写标记（已落盘会话）/暂存标记（临时会话）→ `context.confirm()` → `registerTurn` → 置运行时 `running`”；无活跃 turn 时生成 `turnId`，已落盘会话在锁内写 `active-turn.json` 标记，临时会话只记录 `pendingMarker`（由首次 `Sessions.create` 提交后补写），并返回 `{turnId, mode:"new"}`；已有活跃 turn 且运行时为 `running` 时只 `confirm` 并返回该 turn 的 `turnId` 与 `mode=steer`，不写新标记；运行时处于 `cleanup`/`cleanup_failed` 时整体返回 `turn.active`，不确认、不 steer。`AgentLoopDriver.run` 必须在 `runExclusive` 回调完全返回、会话锁释放之后才启动（锁外 fire-and-forget）；不得在锁回调内同步调用或 await `run`，否则触发非重入 `TypeError` 或死锁。
 - 临时会话标记：`turn.start` 不写盘标记；`Gateway` 包装的 `Sessions.create` 在首次提交成功后写 `active-turn.json`（`startOffset=0`，无 `startNodeId`）。写失败以 `storage.io`（“Active turn marker could not be written”）失败，且发生在任何供应商请求之前：已提交节点与已确认队列的消费保持不变量、不回滚，磁盘无标记。提交成功到写标记之间的进程崩溃窗口不可恢复，本设计不声称覆盖。
 - `turn.list`：从 `Concurrency` 返回活跃 turn 快照。
 - `turn.cancel`：不取会话锁，先按 `turnId` 在 `Concurrency.activeTurns()` 定位会话与运行时；未知 turn、已注销或运行时处于 `cleanup`/`cleanup_failed` 返回 `{ cancelled: false }`；运行时仍为 `running` 时委托唯一取消入口 `Concurrency.cancelTurn(turnId)` 并返回其布尔值。登记 handle 在 `registerTurn` 时保存，总是不阻塞、无锁、同步触发 driver 的协作式取消（中止供应商流、置位工具信号并停止新 step，见 §3.6.3），不强制终止，也不绕过 `Concurrency` 自行查找 driver。`{ cancelled: true }` 只表示请求已交给登记的 turn，不表示 turn 已结束；`running` 期间重复调用仍返回 `true`，handle 至多执行一次；忽略中止的 driver 保持 `running`、继续被 `turn.list` 列出并阻塞同会话新 turn，只能由自然结束或重启恢复解除。
 - turn 生命周期：`running -> cleanup -> (unregistered | cleanup_failed)`。driver 结束（含失败）后，`launch` 在会话锁内把阶段置为 `cleanup`；`turn.ended` 只把运行时移到 `cleanup`，不注销 turn、不删除标记。随后删除 `active-turn.json` 成功才注销；失败则发布安全数据的 `turn.cleanup_failed`（`{turnId, code:"storage.io", message}`，不含原始异常），在缺失时追加一条同 `turnId`、`reason="cleanup_failed"` 的 `cancel` 控制消息，重试删除一次；仍失败则保留标记并把阶段置为 `cleanup_failed`。`cleanup`/`cleanup_failed` 期间 `turn.list` 仍列出该 turn，`turn.start` 返回 `turn.active`，`turn.cancel` 返回 `{ cancelled:false }`，因此残留标记与登记项会阻塞该会话的新 turn，直到重启恢复删除标记；`cleanup_failed` cancel 已提交时恢复按同 `turnId` 去重，只删除标记而不追加 `daemon_restart` cancel。
 - `provider.list`：从 `ProviderManagement` 与 `CredentialStore` 生成；`ready` 由凭据状态计算。
-- `template.list` / `preview` / `apply`：委托 `TemplateStore`、`WorkspaceAccess`、`ExecHost`，并创建临时会话。
-- `client.list` / `start`：委托 `ClientRegistry`。
+- `template.list` / `preview` / `apply`：委托 `TemplateStore`、`WorkspaceAccess`、`ExecHost`，并创建临时会话。当前阶段未路由（目标设计）。
+- `client.list` / `start`：委托 `ClientRegistry`。当前阶段未路由（目标设计）。
+- 未识别的方法名（包括 `constructor`、`toString`、`__proto__` 等原型属性名）在分派前按自有属性判定，统一返回 `protocol.unknown_method`，不进入任何处理函数，也不产生 `internal.error`。
 
 #### 5.3.3 事件路由
 

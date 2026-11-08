@@ -716,7 +716,8 @@ export function createGateway(deps: GatewayDeps): Gateway {
           error: { code: "protocol.invalid_request", message: "Invalid request parameters" },
         };
 
-      const route = handlers[request.method];
+      // Own properties only: inherited names such as "constructor" or "toString" must not route.
+      const route = Object.hasOwn(handlers, request.method) ? handlers[request.method] : undefined;
       if (!route)
         return {
           id: request.id,

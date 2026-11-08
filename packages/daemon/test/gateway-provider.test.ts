@@ -68,6 +68,21 @@ test("rejects an unknown method with protocol.unknown_method", async () => {
   });
 });
 
+test.each(["constructor", "toString", "__proto__", "valueOf", "hasOwnProperty"])(
+  "rejects inherited property name %s with protocol.unknown_method",
+  async (method) => {
+    const h = await openHarness();
+
+    const response = await h.gateway.handle({ id: "1", method, params: {} });
+
+    expect(response).toEqual({
+      id: "1",
+      error: { code: "protocol.unknown_method", message: "Unknown protocol method" },
+    });
+    expect(response).not.toHaveProperty("result");
+  },
+);
+
 test("rejects null params with protocol.invalid_request", async () => {
   const h = await openHarness();
 
