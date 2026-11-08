@@ -278,6 +278,31 @@ test("redacts generic executor failures as provider.transport", async () => {
   expect(JSON.stringify(h.published)).not.toContain("secret");
 });
 
+test("redacts synchronous execute construction and iterator failures", async () => {
+  const cases = [
+    (() => {
+      throw new Error("token=secret");
+    }) as unknown as ExecuteProvider,
+    (() => ({
+      get [Symbol.asyncIterator]() {
+        throw new Error("token=secret");
+      },
+    })) as unknown as ExecuteProvider,
+  ];
+
+  for (const execute of cases) {
+    const h = createLoopHarness();
+    await h.enqueueAndConfirm([user("hello")]);
+    const { adapter } = adapterFor();
+    const result = await run(h, adapter, execute);
+    expect(result.error).toEqual({
+      code: "provider.transport",
+      message: "Provider transport failed",
+    });
+    expect(JSON.stringify(h.published)).not.toContain("secret");
+  }
+});
+
 test("returns independent synthetic interrupted results", () => {
   const first = createInterruptedToolResult("call-1");
   const second = createInterruptedToolResult("call-2");

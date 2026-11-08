@@ -138,6 +138,35 @@ test("continues with an outside-lock steer and ignores an unconfirmed one", asyn
   expect(queue[0]?.confirmedAt).toBeUndefined();
 });
 
+test("checks for steer and completes under one driver lock", async () => {
+  const h = createLoopHarness();
+  await h.enqueueAndConfirm([user("hello")]);
+  const { adapter, execute } = adapterFor([
+    [
+      { type: "content", delta: "done" },
+      { type: "stop", reason: "stop" },
+    ],
+  ]);
+  let stepSeen = false;
+  let endedLocks = -1;
+  let endedUnderLock = false;
+  h.events.subscribe((event) => {
+    if (event.type === "turn.step") {
+      stepSeen = true;
+      h.resetDriverLockCount();
+    }
+    if (event.type === "turn.ended") {
+      endedLocks = h.driverLockCount();
+      endedUnderLock = h.isLocked();
+    }
+  });
+
+  expect((await run(h, adapter, execute)).reason).toBe("completed");
+  expect(stepSeen).toBe(true);
+  expect(endedUnderLock).toBe(true);
+  expect(endedLocks).toBe(1);
+});
+
 test("cancels a stream, persists partial content, and resets confirmations", async () => {
   const h = createLoopHarness();
   await h.enqueueAndConfirm([user("hello")]);

@@ -256,6 +256,25 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
     return end(input, events, "cancelled");
   }
 
+  async function completeIfIdle(
+    input: RunTurnInput,
+    events: EngineEventPublisher,
+    signal: AbortSignal,
+  ): Promise<"confirmed" | "completed" | "cancelled"> {
+    return options.runExclusive(input.sessionId, async () => {
+      if (signal.aborted) return "cancelled";
+      const queue = input.context.snapshot().queue;
+      if (queue[0]?.confirmedAt !== undefined) return "confirmed";
+      if (active) active.state = "ended";
+      events.publishTurn("turn.ended", {
+        turnId: input.turnId,
+        reason: "completed",
+        endedAt: options.now(),
+      });
+      return "completed";
+    });
+  }
+
   return {
     async run(input) {
       const events = publisher(input);
@@ -323,7 +342,15 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
               { cause: error },
             );
           }
-          const iterator = input.execute(wire, controller.signal)[Symbol.asyncIterator]();
+          let iterator: AsyncIterator<string>;
+          try {
+            iterator = input.execute(wire, controller.signal)[Symbol.asyncIterator]();
+          } catch (error) {
+            if (error instanceof PiscesError) throw error;
+            throw new PiscesError("provider.transport", "Provider transport failed", {
+              cause: error,
+            });
+          }
           while (true) {
             let next: IteratorResult<string>;
             try {
@@ -465,12 +492,15 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
           progress.stepPublished = true;
           if (controller.signal.aborted) return await finishCancelled(input, events, progress);
 
-          const hasConfirmed = await options.runExclusive(input.sessionId, async () => {
-            const queue = input.context.snapshot().queue;
-            return queue[0]?.confirmedAt !== undefined;
-          });
+          const completion = await completeIfIdle(input, events, controller.signal);
           if (controller.signal.aborted) return await finishCancelled(input, events, progress);
-          if (!hasConfirmed) return await end(input, events, "completed");
+          if (completion === "completed")
+            return {
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              reason: "completed",
+            };
+          if (completion === "cancelled") return await finishCancelled(input, events, progress);
         }
       } catch (error) {
         if (error instanceof PiscesError && error.code === "turn.active") throw error;

@@ -74,6 +74,7 @@ export function createLoopHarness(overrides: { tools?: Tools } = {}) {
   };
   const ownership = new AsyncLocalStorage<boolean>();
   let tail = Promise.resolve();
+  let driverLocks = 0;
   async function baseRunExclusive<T>(task: () => Promise<T>): Promise<T> {
     if (ownership.getStore()) throw new Error("Session lock is not reentrant");
     const previous = tail;
@@ -105,6 +106,7 @@ export function createLoopHarness(overrides: { tools?: Tools } = {}) {
   });
 
   const driverRunExclusive = async <T>(_sessionId: SessionId, task: () => Promise<T>) => {
+    driverLocks++;
     if (pendingHold?.blockNextDriverLock) {
       pendingHold.blockNextDriverLock = false;
       pendingHold.reached.release();
@@ -145,6 +147,7 @@ export function createLoopHarness(overrides: { tools?: Tools } = {}) {
     context,
     deps,
     driver: createAgentLoopDriver(options),
+    driverLockCount: () => driverLocks,
     enqueue,
     enqueueAndConfirm: (entries: QueueEntryInput[]) => enqueue(entries, true),
     eventClock: deps.eventClock,
@@ -160,6 +163,9 @@ export function createLoopHarness(overrides: { tools?: Tools } = {}) {
     now: () => LOOP_NOW,
     published,
     repository,
+    resetDriverLockCount: () => {
+      driverLocks = 0;
+    },
     runExclusive: baseRunExclusive,
     sessions,
     tools,
