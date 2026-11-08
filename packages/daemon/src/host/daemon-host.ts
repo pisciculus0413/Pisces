@@ -102,25 +102,10 @@ export interface DaemonStopDeadlines {
   cancelAllMs?: number;
 }
 
-/**
- * Module-internal observability and cleanup hooks for host tests. Never
- * exported from the package index, and never able to force a stop or bypass
- * authentication; `releaseRetainedTurns` only performs the marker removal and
- * unregistration that a normal turn cleanup would have performed.
- */
-export interface DaemonHostTestControl {
-  /** Number of Gateway disposals performed by the stop path (not startup). */
-  gatewayDisposes(): number;
-  /** Recover a deliberately retained `cleanup_failed` turn after assertions. */
-  releaseRetainedTurns(): Promise<void>;
-}
-
 export interface DaemonHostSeams {
   probePeerCredentials?: (runDir: string) => Promise<void>;
   /** Test-only shortened deadlines; production stop always uses 5000 ms. */
   stopDeadlines?: DaemonStopDeadlines;
-  /** Test-only observation/cleanup; never exposed publicly. */
-  onTestControl?: (control: DaemonHostTestControl) => void;
 }
 
 const startFailed = (): PiscesError =>
@@ -194,7 +179,6 @@ export async function startDaemonWithSeams(
   let gateway: Gateway | undefined;
   let state: DaemonHostStatus["state"] = "running";
   let stopPromise: Promise<void> | undefined;
-  let gatewayDisposes = 0;
 
   try {
     await probe(paths.runDir);
@@ -295,7 +279,6 @@ export async function startDaemonWithSeams(
           connections.clear();
           await listener.close();
           await lock.release();
-          gatewayDisposes += 1;
           activeGateway.dispose();
           state = "stopped";
         })()
@@ -310,15 +293,6 @@ export async function startDaemonWithSeams(
         return stopPromise;
       },
     };
-    seams.onTestControl?.({
-      gatewayDisposes: () => gatewayDisposes,
-      releaseRetainedTurns: async () => {
-        for (const turn of concurrency.activeTurns()) {
-          await markers.remove(turn.sessionId, turn.turnId);
-          concurrency.unregisterTurn(turn.sessionId, turn.turnId);
-        }
-      },
-    });
     return host;
   } catch (error) {
     await transport?.close().catch(() => {});

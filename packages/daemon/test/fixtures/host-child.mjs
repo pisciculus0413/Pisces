@@ -82,7 +82,13 @@ async function main() {
         process.exitCode = 0;
       })
       .catch((error) => {
-        emit({ event: "stop_error", code: error?.code ?? "unknown" });
+        const status = host.status();
+        emit({
+          event: "stop_error",
+          code: error?.code ?? "unknown",
+          state: status.state,
+          activeTurns: status.activeTurns,
+        });
         process.exitCode = 1;
       });
   };

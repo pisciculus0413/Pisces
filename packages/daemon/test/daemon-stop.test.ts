@@ -1,7 +1,9 @@
-import { lstat, mkdtemp, rm } from "node:fs/promises";
+import { type ChildProcess, spawn } from "node:child_process";
+import { chmod, lstat, mkdtemp, rm } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   createProviderManagement,
   createSessions,
@@ -21,7 +23,6 @@ import type { GatewayResponse } from "../src/gateway/protocol.js";
 import {
   type DaemonHost,
   type DaemonHostSeams,
-  type DaemonHostTestControl,
   type StartDaemonOptions,
   startDaemonWithSeams,
 } from "../src/host/daemon-host.js";
@@ -32,6 +33,8 @@ import { createSessionStore } from "../src/session-store/session-store.js";
 import { sessionStoreIo } from "../src/session-store/session-store-io.js";
 
 const NOW = "2026-11-08T05:00:00.000Z";
+const FIXTURE = fileURLToPath(new URL("./fixtures/host-child.mjs", import.meta.url));
+const DIST_ENTRY = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 
 const hosts: DaemonHost[] = [];
 const clients: Client[] = [];
@@ -72,6 +75,79 @@ const waitFor = async (condition: () => boolean, timeoutMs = 5000): Promise<void
   }
 };
 
+interface ChildSession {
+  child: ChildProcess;
+  next(): Promise<Record<string, unknown>>;
+}
+
+function spawnHostChild(
+  modulePath: string,
+  dataDir: string,
+  mode: "ready" | "blocking" = "ready",
+): ChildSession {
+  const child = spawn(process.execPath, [FIXTURE, modulePath, dataDir, mode], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const queued: Record<string, unknown>[] = [];
+  const waiters: ((line: Record<string, unknown>) => void)[] = [];
+  let buffer = "";
+  let stderr = "";
+
+  child.stdout?.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString("utf8");
+    let index = buffer.indexOf("\n");
+    while (index !== -1) {
+      const line = buffer.slice(0, index).trim();
+      buffer = buffer.slice(index + 1);
+      index = buffer.indexOf("\n");
+      if (line.length === 0) continue;
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      const waiter = waiters.shift();
+      if (waiter === undefined) queued.push(parsed);
+      else waiter(parsed);
+    }
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+  });
+
+  return {
+    child,
+    next() {
+      const ready = queued.shift();
+      if (ready !== undefined) return Promise.resolve(ready);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(`child produced no line; stderr: ${stderr}`));
+        }, 15000);
+        waiters.push((line) => {
+          clearTimeout(timer);
+          resolve(line);
+        });
+      });
+    },
+  };
+}
+
+const waitExit = async (child: ChildProcess): Promise<void> => {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error("child did not exit after SIGKILL"));
+    }, 5000);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+};
+
+const killChild = async (child: ChildProcess | undefined): Promise<void> => {
+  if (child === undefined) return;
+  if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  await waitExit(child);
+};
+
 interface Gate {
   entered: Promise<void>;
   promise: Promise<void>;
@@ -98,7 +174,7 @@ let requestSeq = 0;
 class Client {
   private buffer = "";
   private readonly waiters = new Map<string, (response: WireResponse) => void>();
-  private readonly eventFrames: string[] = [];
+  private readonly eventFrames: { event: string; data?: unknown }[] = [];
   private readonly socket: Socket;
 
   private constructor(socket: Socket) {
@@ -129,9 +205,9 @@ class Client {
       this.buffer = this.buffer.slice(index + 1);
       index = this.buffer.indexOf("\n");
       if (line.length === 0) continue;
-      const parsed = JSON.parse(line) as WireResponse & { event?: unknown };
+      const parsed = JSON.parse(line) as WireResponse & { event?: unknown; data?: unknown };
       if (typeof parsed.event === "string") {
-        this.eventFrames.push(parsed.event);
+        this.eventFrames.push({ event: parsed.event, data: parsed.data });
         continue;
       }
       const waiter = this.waiters.get(parsed.id);
@@ -158,7 +234,11 @@ class Client {
   }
 
   events(): readonly string[] {
-    return this.eventFrames;
+    return this.eventFrames.map((frame) => frame.event);
+  }
+
+  eventData(event: string): unknown {
+    return this.eventFrames.find((frame) => frame.event === event)?.data;
   }
 
   close(): void {
@@ -470,87 +550,64 @@ test("retains the lock and reports incomplete while a driver ignores abort, then
   await restarted.stop();
 });
 
-test("retains marker, lock and socket after cleanup_failed and never reports stopped", async () => {
+test("child process retains marker, lock, socket and safe event after cleanup_failed stop", async () => {
   const dataDir = await tempDir();
-  const sessionId = "s-cleanup-failed" as SessionId;
+  const sessionId = "s-child-cleanup" as SessionId;
   await seedPersistedSession(dataDir, sessionId);
-  const driver = abortableDriver();
+  const sessionDir = join(dataDir, "sessions", sessionId);
   const markers = createActiveTurnStore({ dataDir });
-  let control: DaemonHostTestControl | undefined;
-  let host: DaemonHost | undefined;
+  let child: ChildSession | undefined;
 
-  const realUnlink = sessionStoreIo.unlink;
   try {
-    sessionStoreIo.unlink = (async (path: unknown) => {
-      if (String(path).endsWith("active-turn.json")) {
-        throw Object.assign(new Error("unlink failed"), { code: "EACCES" });
-      }
-      return (realUnlink as (value: unknown) => Promise<void>)(path);
-    }) as typeof sessionStoreIo.unlink;
-
-    host = await openHost(
-      dataDir,
-      { providerHost: readyProviderHost({ execute: () => driver.execute }) },
-      {
-        stopDeadlines: { pendingDrainMs: 200, cancelAllMs: 200 },
-        onTestControl: (value) => {
-          control = value;
-        },
-      },
-    );
-    const activeHost = host;
-    const client = await Client.connect(activeHost.socketPath);
+    child = spawnHostChild(DIST_ENTRY, dataDir, "blocking");
+    const ready = await child.next();
+    expect(ready).toMatchObject({ event: "ready", recoveryIssues: 0 });
+    const socketPath = ready.socketPath as string;
+    const client = await Client.connect(socketPath);
     await client.hello();
     await ok(client, "session.subscribe", { sessionId });
     const started = (await ok(client, "turn.start", { sessionId })) as { turnId: TurnId };
-    await waitFor(() => activeHost.status().activeTurns === 1);
-    await driver.started;
-    const inode = (await lstat(activeHost.socketPath)).ino;
+    await waitFor(() => client.events().includes("turn.started"));
+    expect((await markers.read(sessionId))?.turnId).toBe(started.turnId);
+    const inode = (await lstat(socketPath)).ino;
 
-    await expect(activeHost.stop()).rejects.toMatchObject({ code: "daemon.stop_incomplete" });
-    // The turn was cancelled but its marker cleanup failed, so it stays registered.
-    expect(driver.observed).toEqual([true]);
-    // The Gateway is still attached during an incomplete stop: its cleanup event
-    // is published to the subscribed client instead of being disposed away.
-    await waitFor(() => client.events().includes("turn.cleanup_failed"));
-    expect(activeHost.status()).toEqual({ state: "quiescing", activeTurns: 1 });
-    expect(await markers.read(sessionId)).toMatchObject({ turnId: started.turnId });
-    expect((await lstat(activeHost.socketPath)).ino).toBe(inode);
+    // Removing write permission from the session directory makes the active-turn
+    // marker unlink fail during abort cleanup, without any in-process test seam.
+    await chmod(sessionDir, 0o500);
+    child.child.kill("SIGTERM");
+    const stopError = await child.next();
+    await chmod(sessionDir, 0o700);
+    expect(stopError).toMatchObject({
+      event: "stop_error",
+      code: "daemon.stop_incomplete",
+      state: "quiescing",
+      activeTurns: 1,
+    });
+
+    expect((await markers.read(sessionId))?.turnId).toBe(started.turnId);
+    const socket = await lstat(socketPath);
+    expect(socket.isSocket()).toBe(true);
+    expect(socket.ino).toBe(inode);
     await expectLockHeld(dataDir);
 
-    // Retry must not silently turn the retained state into a stopped daemon.
-    await expect(activeHost.stop()).rejects.toMatchObject({ code: "daemon.stop_incomplete" });
-    expect(activeHost.status().state).toBe("quiescing");
-    expect(await markers.read(sessionId)).toMatchObject({ turnId: started.turnId });
+    await waitFor(() => client.events().includes("turn.cleanup_failed"));
+    const cleanup = client.eventData("turn.cleanup_failed") as Record<string, unknown>;
+    expect(cleanup).toMatchObject({
+      turnId: started.turnId,
+      code: "storage.io",
+      message: "Active turn marker could not be removed",
+    });
+    expect(JSON.stringify(cleanup)).not.toContain("EACCES");
   } finally {
-    sessionStoreIo.unlink = realUnlink;
-    driver.release();
-    // Only after the assertions: recover the intentionally retained turn through
-    // the internal test seam, then run a normal stop so no lock/socket leaks.
-    await control?.releaseRetainedTurns();
-    await host?.stop();
+    // Restore permissions and reap the child before afterEach deletes the temp dir.
+    await chmod(sessionDir, 0o700).catch(() => {});
+    await killChild(child?.child);
   }
+}, 30000);
 
-  const stopped = host;
-  if (stopped === undefined) throw new Error("host was not created");
-  // The retained host was reclaimed through a normal stop, not left holding the
-  // lock/socket while afterEach removes its directory.
-  expect(stopped.status()).toEqual({ state: "stopped", activeTurns: 0 });
-  expect(await markers.read(sessionId)).toBeUndefined();
-}, 15000);
-
-test("retains Gateway and lock when inode-checked socket unlink fails, then stops on retry", async () => {
+test("keeps a retryable incomplete state when inode-checked socket unlink fails, then stops on retry", async () => {
   const dataDir = await tempDir();
-  let control: DaemonHostTestControl | undefined;
-  const host = await openHost(
-    dataDir,
-    {},
-    {
-      onTestControl: (value) => {
-        control = value;
-      },
-    },
-  );
+  const host = await openHost(dataDir);
   const client = await Client.connect(host.socketPath);
   await client.hello();
 
@@ -566,15 +623,11 @@ test("retains Gateway and lock when inode-checked socket unlink fails, then stop
   try {
     await expect(host.stop()).rejects.toMatchObject({ code: "daemon.stop_incomplete" });
     expect(host.status()).toEqual({ state: "quiescing", activeTurns: 0 });
-    // The listener closed but its quarantined inode could not be removed, so the
-    // daemon must keep the Gateway handler for the retry instead of disposing it.
-    expect(control?.gatewayDisposes()).toBe(0);
     await expectLockHeld(dataDir);
     await expect(lstat(host.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
 
     injectFailure = false;
     await host.stop();
-    expect(control?.gatewayDisposes()).toBe(1);
     expect(host.status()).toEqual({ state: "stopped", activeTurns: 0 });
     await expect(lstat(host.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
     const restarted = await openHost(dataDir);
