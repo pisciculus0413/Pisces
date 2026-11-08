@@ -11,9 +11,13 @@
   },
   "scripts": {
     "build": "tsc -b tsconfig.build.json",
+    "build:native": "node native/build.mjs",
     "clean": "tsc -b tsconfig.build.json --clean"
   },
   "dependencies": {
     "@pisces/core": "workspace:*"
+  },
+  "devDependencies": {
+    "node-gyp": "12.4.0"
   }
 }

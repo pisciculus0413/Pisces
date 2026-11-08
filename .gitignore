@@ -3,3 +3,7 @@ dist/
 *.tsbuildinfo
 coverage/
 .DS_Store
+
+# native addon build output
+packages/daemon/native/build/
+packages/daemon/native/*.node
