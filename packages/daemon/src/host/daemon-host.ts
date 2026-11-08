@@ -29,12 +29,21 @@ import { clearStaleSocket, prepareRuntimePaths } from "./runtime-paths.js";
  * attempt acquired; another instance's live socket and lock inode are never
  * unlinked.
  *
- * Task 7 provides a real stop for a host with no active turns. Cancellation and
- * recovery of registered turns belong to Task 8, so any active turn reports
- * `daemon.stop_incomplete` and retains the lock, socket and Gateway.
+ * Stop is ordered so no admitted work can outlive the lock: synchronously gate
+ * new frames on every connection → stop accepting → wait every admitted request
+ * (including work whose client disconnected) → cancel registered turns and wait
+ * for marker cleanup and unregistration → close/detach connections → dispose
+ * the Gateway handler → close the listener and inode-checked unlink → release
+ * the lock → `stopped`. A pending timeout, a surviving registered turn, a
+ * failed marker cleanup or a failed teardown/release all throw the normalized
+ * `daemon.stop_incomplete` error and retain the lock, socket, Gateway and
+ * quiescing state where they are still held; a retry re-runs the same sequence
+ * instead of reporting a stopped daemon.
  */
 
+/** Public stop deadlines: admitted-request drain and turn-cancellation cleanup. */
 const STOP_DRAIN_TIMEOUT_MS = 5000;
+const STOP_CANCEL_TIMEOUT_MS = 5000;
 
 const START_CODES = new Set([
   "daemon.unsupported_platform",
@@ -80,11 +89,20 @@ export interface DaemonHost {
 
 /**
  * Internal seams for host-ordering tests. Deliberately not re-exported from the
- * package index: public `startDaemon` always runs the real native self-probe
- * and never exposes an authentication bypass.
+ * package index: public `startDaemon` always runs the real native self-probe,
+ * never exposes an authentication bypass, and always uses the 5 s stop deadlines.
  */
+export interface DaemonStopDeadlines {
+  /** How long admitted requests may take to settle before stop fails closed. */
+  pendingDrainMs?: number;
+  /** How long cancelled turns may take to finish marker cleanup and unregister. */
+  cancelAllMs?: number;
+}
+
 export interface DaemonHostSeams {
   probePeerCredentials?: (runDir: string) => Promise<void>;
+  /** Test-only shortened deadlines; production stop always uses 5000 ms. */
+  stopDeadlines?: DaemonStopDeadlines;
 }
 
 const startFailed = (): PiscesError =>
@@ -92,6 +110,10 @@ const startFailed = (): PiscesError =>
 
 const stopIncomplete = (): PiscesError =>
   new PiscesError("daemon.stop_incomplete", "daemon stop did not complete");
+
+/** Accept a positive test deadline only; anything else keeps the public default. */
+const stopDeadline = (value: number | undefined, fallback: number): number =>
+  typeof value === "number" && Number.isFinite(value) ? Math.max(1, Math.floor(value)) : fallback;
 
 /** Preserve only documented safe startup codes; drop every raw internal failure. */
 const normalizeStartError = (error: unknown): PiscesError => {
@@ -128,6 +150,8 @@ export async function startDaemonWithSeams(
   seams: DaemonHostSeams,
 ): Promise<DaemonHost> {
   const probe = seams.probePeerCredentials ?? probePeerCredentials;
+  const pendingDrainMs = stopDeadline(seams.stopDeadlines?.pendingDrainMs, STOP_DRAIN_TIMEOUT_MS);
+  const cancelAllMs = stopDeadline(seams.stopDeadlines?.cancelAllMs, STOP_CANCEL_TIMEOUT_MS);
   // Platform and process identity are checked before the deferred native import runs.
   assertLinuxPlatform();
   assertUnambiguousProcessIdentity(process.getuid?.(), process.geteuid?.());
@@ -189,6 +213,12 @@ export async function startDaemonWithSeams(
 
     function accept(socket: Socket): void {
       const connection = createConnection(socket, activeGateway);
+      if (state !== "running") {
+        // Stop already began; a socket accepted in that window is never admitted.
+        connection.quiesce();
+        connection.close();
+        return;
+      }
       connections.add(connection);
       socket.once("close", () => {
         connections.delete(connection);
@@ -218,25 +248,45 @@ export async function startDaemonWithSeams(
       stop() {
         if (state === "stopped") return Promise.resolve();
         stopPromise ??= (async () => {
+          // 1. Synchronously gate new frames before any await: a `turn.start`
+          //    admitted after this point could otherwise register behind the
+          //    cancelAll snapshot and escape cancellation.
           state = "quiescing";
-          listener.stopAccepting();
           for (const connection of connections) connection.quiesce();
+
+          // 2. Stop accepting new connections.
+          listener.stopAccepting();
+
+          // 3. Wait for every already-admitted request, including operations
+          //    whose client disconnected while they were in flight.
           const waits: Promise<void>[] = [];
           for (const connection of connections) waits.push(connection.pending());
           for (const pending of retiring) waits.push(pending);
-          if (!(await drainWithin(waits, STOP_DRAIN_TIMEOUT_MS))) throw stopIncomplete();
-          // Task 8 adds cancellation/drain; until then a registered turn cannot be stopped.
+          if (!(await drainWithin(waits, pendingDrainMs))) throw stopIncomplete();
+
+          // 4. Cancel registered turns and wait for marker cleanup plus
+          //    unregistration. `cancelAll` can resolve on timeout, so abort is
+          //    never treated as completion: a surviving registration (including
+          //    a retained cleanup_failed marker) fails the stop closed.
+          await concurrency.cancelAll(cancelAllMs);
           if (concurrency.activeTurns().length > 0) throw stopIncomplete();
 
+          // 5. Tear down only after no admitted request or turn can still be live.
           for (const connection of [...connections]) connection.close();
           connections.clear();
-          await listener.close();
           activeGateway.dispose();
+          await listener.close();
           await lock.release();
           state = "stopped";
-        })().finally(() => {
-          stopPromise = undefined;
-        });
+        })()
+          .catch(() => {
+            // Every stop failure is the documented incomplete-stop error: raw
+            // close/transport messages never escape and a retry stays possible.
+            throw stopIncomplete();
+          })
+          .finally(() => {
+            stopPromise = undefined;
+          });
         return stopPromise;
       },
     };

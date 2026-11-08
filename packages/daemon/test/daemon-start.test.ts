@@ -671,7 +671,7 @@ test("does not report stopped when lock release fails, and retries the stop", as
     await realClose(handle);
   };
   try {
-    await expect(host.stop()).rejects.toThrow("close failed");
+    await expect(host.stop()).rejects.toMatchObject({ code: "daemon.stop_incomplete" });
     expect(host.status().state).toBe("quiescing");
     // The failed close left the flock held by this process.
     await expect((await loadHost()).startDaemon(hostOptions(dataDir))).rejects.toMatchObject({
@@ -688,6 +688,14 @@ test("does not report stopped when lock release fails, and retries the stop", as
 
 test("returns stop_incomplete for an active turn, retains the lock, and stops on retry", async () => {
   const dataDir = await tempDir();
+  const sessionId = "s-active-stop" as SessionId;
+  // A persisted session already has a visible user node; creating an empty
+  // session would fail with `turn.empty` before the provider is ever iterated.
+  await seedPersistedSession(dataDir, sessionId);
+  let enterExecute!: () => void;
+  const executeEntered = new Promise<void>((resolve) => {
+    enterExecute = resolve;
+  });
   let releaseTurn!: () => void;
   const turnGate = new Promise<void>((resolve) => {
     releaseTurn = resolve;
@@ -695,6 +703,7 @@ test("returns stop_incomplete for an active turn, retains the lock, and stops on
   const providerHost = readyProviderHost({
     execute() {
       return async function* () {
+        enterExecute();
         await turnGate;
         yield "frame";
       };
@@ -703,15 +712,14 @@ test("returns stop_incomplete for an active turn, retains the lock, and stops on
   const host = await openHost(hostOptions(dataDir, { providerHost }));
   const client = await Client.connect(host.socketPath);
   await client.hello();
-  const created = (await ok(client, "session.create", {
-    provider: "p",
-    model: "m",
-  })) as SessionMeta;
-  const started = (await ok(client, "turn.start", { sessionId: created.id })) as {
+  const started = (await ok(client, "turn.start", { sessionId })) as {
     turnId: TurnId;
   };
   expect(started.turnId).toBeDefined();
   await waitFor(() => host.status().activeTurns === 1);
+  // The provider must really be iterating; abort before execute starts would end
+  // the turn without exercising the fail-closed cancellation deadline.
+  await executeEntered;
 
   await expect(host.stop()).rejects.toMatchObject({ code: "daemon.stop_incomplete" });
   expect(host.status().state).toBe("quiescing");
@@ -725,7 +733,7 @@ test("returns stop_incomplete for an active turn, retains the lock, and stops on
   await host.stop();
   expect(host.status()).toEqual({ state: "stopped", activeTurns: 0 });
   await expect(lstat(host.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
-});
+}, 20000);
 
 test("drains admitted Gateway work before releasing the lock and socket", async () => {
   const dataDir = await tempDir();
