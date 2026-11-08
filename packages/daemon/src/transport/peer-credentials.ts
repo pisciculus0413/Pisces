@@ -15,10 +15,12 @@ import { PiscesError } from "@pisces/core";
 export interface NativeBinding {
   readPeerUid(fd: number): number;
   lockFile(fd: number): void;
+  bindUnixListener(path: string): number;
 }
 
 const BINDING_PATH = fileURLToPath(new URL("../../native/peercred.node", import.meta.url));
 const MAX_FD = 2 ** 31 - 1;
+const MAX_UNIX_PATH_BYTES = 107;
 const LOCK_BUSY_ERRNO = constants.errno.EAGAIN;
 
 const unavailable = (): PiscesError =>
@@ -33,6 +35,9 @@ const invalidFd = (): PiscesError =>
 const credentialsFailed = (): PiscesError =>
   new PiscesError("daemon.peer_credentials_failed", "peer credentials could not be read");
 
+const bindFailed = (): PiscesError =>
+  new PiscesError("daemon.start_failed", "socket path could not be bound");
+
 export function loadNativeBinding(path: string): NativeBinding {
   let loaded: unknown;
   try {
@@ -44,7 +49,11 @@ export function loadNativeBinding(path: string): NativeBinding {
     throw unavailable();
   }
   const candidate = loaded as Partial<NativeBinding>;
-  if (typeof candidate.readPeerUid !== "function" || typeof candidate.lockFile !== "function") {
+  if (
+    typeof candidate.readPeerUid !== "function" ||
+    typeof candidate.lockFile !== "function" ||
+    typeof candidate.bindUnixListener !== "function"
+  ) {
     throw unavailable();
   }
   return candidate as NativeBinding;
@@ -84,6 +93,26 @@ export function lockFile(fd: number): void {
       throw new PiscesError("daemon.lock_busy", "lock is held by another process");
     }
     throw new PiscesError("daemon.lock_failed", "lock could not be acquired");
+  }
+}
+
+/**
+ * Create and listen on a pathname Unix socket without letting Node own the
+ * pathname. The returned descriptor is already listening and must be adopted
+ * by `net.Server.listen({ fd })`; Node then removes no pathname on close, so
+ * Task 3 remains the only identity-checked path cleanup owner.
+ */
+export function bindUnixListener(path: string): number {
+  if (typeof path !== "string" || path.length === 0 || path.includes("\0")) {
+    throw bindFailed();
+  }
+  if (Buffer.byteLength(path, "utf8") > MAX_UNIX_PATH_BYTES) throw bindFailed();
+  try {
+    const fd = binding.bindUnixListener(path);
+    if (!Number.isInteger(fd) || fd < 0 || fd > MAX_FD) throw bindFailed();
+    return fd;
+  } catch {
+    throw bindFailed();
   }
 }
 

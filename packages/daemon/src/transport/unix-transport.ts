@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { closeSync } from "node:fs";
 import { chmod, lstat } from "node:fs/promises";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { dirname, isAbsolute, join } from "node:path";
@@ -103,20 +104,69 @@ const loadPeerUidReader = async (): Promise<PeerUidReader> => {
   }
 };
 
+const loadBindUnixListener = async (): Promise<(path: string) => number> => {
+  try {
+    const module = await import("./peer-credentials.js");
+    return module.bindUnixListener;
+  } catch (error) {
+    throw normalizeProbeError(error);
+  }
+};
+
 const closeServer = (server: Server): Promise<void> =>
   new Promise((resolve) => {
     server.close(() => resolve());
   });
 
-const listen = (server: Server, path: string): Promise<void> =>
+const serverHandle = (server: Server): unknown =>
+  (server as unknown as { _handle?: unknown })._handle;
+
+/**
+ * Adopt an already-listening native Unix socket descriptor. Node then has no
+ * pathname association for the handle, so `server.close()` cannot unlink a
+ * replacement pathname; Task 3 remains the sole path cleanup owner.
+ *
+ * The caller owns descriptor cleanup on rejection: an existing handle means
+ * closing the server releases the descriptor, otherwise it must be closed
+ * directly and exactly once.
+ */
+const listenOnFd = (server: Server, fd: number): Promise<void> =>
   new Promise((resolve, reject) => {
-    const onError = (): void => reject(probeFailed());
-    server.once("error", onError);
-    server.listen(path, () => {
-      server.removeListener("error", onError);
-      resolve();
-    });
+    let settled = false;
+    const fail = (): void => {
+      if (settled) return;
+      settled = true;
+      server.removeListener("error", fail);
+      reject(startFailed());
+    };
+    server.once("error", fail);
+    try {
+      server.listen({ fd }, () => {
+        if (settled) return;
+        settled = true;
+        server.removeListener("error", fail);
+        resolve();
+      });
+    } catch {
+      fail();
+    }
   });
+
+const sameIdentity = (a: SocketIdentity, b: SocketIdentity): boolean =>
+  a.dev.toString() === b.dev.toString() && a.ino.toString() === b.ino.toString();
+
+/**
+ * Startup cleanup still routed through Task 3 removal. Only an identity captured
+ * from the pathname this instance bound is eligible; failures are contained so
+ * the original startup error remains the reported cause.
+ */
+const removeBoundPath = async (
+  path: string,
+  identity: SocketIdentity | undefined,
+): Promise<void> => {
+  if (identity === undefined) return;
+  await removeOwnedSocket(path, identity).catch(() => {});
+};
 
 const readProbeUid = (
   server: Server,
@@ -195,20 +245,38 @@ export async function probePeerCredentials(
   const probePath = join(runDir, `${PROBE_PREFIX}${process.pid}-${randomUUID()}.sock`);
   if (Buffer.byteLength(probePath, "utf8") > MAX_SOCKET_PATH_BYTES) throw probeFailed();
 
+  let fd: number | undefined;
+  try {
+    const bindUnixListener = await loadBindUnixListener();
+    fd = bindUnixListener(probePath);
+  } catch (error) {
+    throw normalizeProbeError(error);
+  }
+
   const server = createServer({ pauseOnConnect: true });
   let identity: SocketIdentity | undefined;
   let accepted: Socket | undefined;
   let client: Socket | undefined;
   let failure: PiscesError | undefined;
   let cleanupFailed = false;
+  // Errors outside the adoption promise must not crash the process.
+  server.on("error", () => {});
 
   try {
-    await listen(server, probePath);
+    const initial = await lstat(probePath);
+    identity = { dev: initial.dev, ino: initial.ino };
+    if (!initial.isSocket() || initial.isSymbolicLink() || initial.uid !== euid) {
+      throw probeFailed();
+    }
+
+    await listenOnFd(server, fd);
+    fd = undefined;
+
     await chmod(probePath, 0o600);
     const stat = await lstat(probePath);
-    if (!stat.isSocket() || stat.isSymbolicLink() || stat.uid !== euid) throw probeFailed();
-    if ((stat.mode & 0o777) !== 0o600) throw probeFailed();
-    identity = { dev: stat.dev, ino: stat.ino };
+    if (!sameIdentity(stat, identity) || (stat.mode & 0o777) !== 0o600) {
+      throw probeFailed();
+    }
 
     await readProbeUid(
       server,
@@ -227,6 +295,7 @@ export async function probePeerCredentials(
     failure = normalizeProbeError(error);
   }
 
+  const handleExisted = serverHandle(server) != null;
   accepted?.destroy();
   client?.destroy();
   try {
@@ -234,12 +303,17 @@ export async function probePeerCredentials(
   } catch {
     cleanupFailed = true;
   }
-  if (identity !== undefined) {
+  if (!handleExisted && fd !== undefined) {
     try {
-      await removeOwnedSocket(probePath, identity);
+      closeSync(fd);
     } catch {
       cleanupFailed = true;
     }
+  }
+  try {
+    await removeBoundPath(probePath, identity);
+  } catch {
+    cleanupFailed = true;
   }
 
   if (failure !== undefined) throw failure;
@@ -305,6 +379,8 @@ export function createUnixTransport(options: UnixTransportOptions): UnixTranspor
   const start = async (): Promise<SocketIdentity> => {
     if (server !== undefined || starting) throw startFailed();
     starting = true;
+    let fd: number | undefined;
+    let boundPathCreated = false;
 
     try {
       stopRequested = false;
@@ -318,51 +394,62 @@ export function createUnixTransport(options: UnixTransportOptions): UnixTranspor
       if (!Number.isInteger(expectedUid) || expectedUid < 0) throw startFailed();
 
       reader = options.peerUidFor ?? (await loadPeerUidReader());
+      const bindUnixListener = await loadBindUnixListener();
 
       await probePeerCredentials(dirname(options.socketPath), { expectedUid });
 
+      fd = bindUnixListener(options.socketPath);
+      boundPathCreated = true;
+
+      const initial = await lstat(options.socketPath);
+      identity = { dev: initial.dev, ino: initial.ino };
+      if (!initial.isSocket() || initial.isSymbolicLink() || initial.uid !== expectedUid) {
+        throw startFailed();
+      }
+
       const bound = createServer({ pauseOnConnect: true });
       bound.on("connection", onConnection);
+      // Errors outside the adoption promise must not crash the process.
+      bound.on("error", () => {});
       server = bound;
-      await listen(bound, options.socketPath).catch(() => {
-        throw startFailed();
-      });
+      await listenOnFd(bound, fd);
+      fd = undefined;
 
-      await chmod(options.socketPath, 0o600).catch(() => {
-        throw startFailed();
-      });
-      const stat = await lstat(options.socketPath).catch(() => {
-        throw startFailed();
-      });
+      await chmod(options.socketPath, 0o600);
+      const stat = await lstat(options.socketPath);
       const boundIdentity: SocketIdentity = { dev: stat.dev, ino: stat.ino };
-      identity = boundIdentity;
       if (
         !stat.isSocket() ||
         stat.isSymbolicLink() ||
         stat.uid !== expectedUid ||
-        (stat.mode & 0o777) !== 0o600
+        (stat.mode & 0o777) !== 0o600 ||
+        !sameIdentity(stat, identity)
       ) {
         throw startFailed();
       }
-
-      // Server errors after a successful bind must not crash the process.
-      bound.on("error", () => {});
+      identity = boundIdentity;
 
       accepting = !stopRequested;
       return boundIdentity;
     } catch (error) {
       accepting = false;
       const bound = server;
+      const handleExisted = bound !== undefined && serverHandle(bound) != null;
       server = undefined;
       if (bound !== undefined) {
         closePromise ??= closeServer(bound);
         await closePromise.catch(() => {});
         closePromise = undefined;
       }
-      if (identity !== undefined) {
-        await removeOwnedSocket(options.socketPath, identity).catch(() => {});
-        identity = undefined;
+      if (!handleExisted && fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          // The descriptor is already gone.
+        }
       }
+      if (boundPathCreated) await removeBoundPath(options.socketPath, identity);
+      identity = undefined;
       if (error instanceof PiscesError) throw error;
       throw startFailed();
     } finally {

@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, readdir, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -298,6 +298,38 @@ test("stops accepting new clients without touching authenticated ones", async ()
   });
   expect(handlerCalls).toBe(1);
   expect(first.destroyed).toBe(false);
+});
+
+test("does not unlink a replacement path when the listener closes", async () => {
+  const { createUnixTransport } = await loadTransport();
+  const socketPath = join(dir, "replaced.sock");
+  const movedPath = join(dir, "replaced.sock.moved");
+  const transport = track(createUnixTransport({ socketPath, onAuthenticatedSocket: () => {} }));
+
+  const identity = await transport.start();
+  const bound = await lstat(socketPath);
+  expect(bound.ino.toString()).toBe(identity.ino.toString());
+
+  await rename(socketPath, movedPath);
+  await writeFile(socketPath, "replacement must survive");
+
+  await transport.close();
+
+  const replacement = await lstat(socketPath);
+  expect(replacement.isFile()).toBe(true);
+  expect(await readFile(socketPath, "utf8")).toBe("replacement must survive");
+  expect((await lstat(movedPath)).isSocket()).toBe(true);
+});
+
+test("fails closed without deleting a non-socket at the bind path", async () => {
+  const { createUnixTransport } = await loadTransport();
+  const socketPath = join(dir, "occupied.sock");
+  await writeFile(socketPath, "occupied by a regular file");
+  const transport = track(createUnixTransport({ socketPath, onAuthenticatedSocket: () => {} }));
+
+  await expect(transport.start()).rejects.toMatchObject({ code: "daemon.start_failed" });
+  expect(await readFile(socketPath, "utf8")).toBe("occupied by a regular file");
+  await expect(transport.close()).resolves.toBeUndefined();
 });
 
 test("closes idempotently, drops connections and removes the bound socket", async () => {

@@ -1,5 +1,5 @@
-import { closeSync, fstatSync, openSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { closeSync, fstatSync, openSync, readdirSync } from "node:fs";
+import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -166,4 +166,52 @@ test("fails closed when the compiled addon is missing", () => {
   expect(() => loadNativeBinding(join(dir, "missing", "peercred.node"))).toThrowError(
     errorCode(UNAVAILABLE),
   );
+});
+
+const loadBindUnixListener = async (): Promise<(path: string) => number> => {
+  const module = await import("../src/transport/peer-credentials.js");
+  const bind = (module as { bindUnixListener?: (path: string) => number }).bindUnixListener;
+  expect(typeof bind).toBe("function");
+  return bind as (path: string) => number;
+};
+
+test("binds and listens on an absolute Unix socket and returns a socket descriptor", async () => {
+  const bindUnixListener = await loadBindUnixListener();
+  const path = join(dir, "bound.sock");
+  const fd = bindUnixListener(path);
+  try {
+    expect(fstatSync(fd).isSocket()).toBe(true);
+    expect((await lstat(path)).isSocket()).toBe(true);
+    expect((await lstat(path)).uid).toBe(process.geteuid?.());
+    const client = connect(path);
+    await new Promise<void>((resolve, reject) => {
+      client.once("connect", () => resolve());
+      client.once("error", reject);
+    });
+    client.destroy();
+  } finally {
+    closeSync(fd);
+  }
+});
+
+test("native bind rejects NUL and overlong paths before creating a pathname", () => {
+  expect(typeof native.bindUnixListener).toBe("function");
+  expect(() => native.bindUnixListener(join(dir, "nul\0path"))).toThrowError(TypeError);
+  expect(() => native.bindUnixListener(join(dir, "a".repeat(200)))).toThrowError(TypeError);
+});
+
+test("native bind closes the descriptor when bind fails", () => {
+  expect(typeof native.bindUnixListener).toBe("function");
+  const path = join(dir, "busy.sock");
+  const fd = native.bindUnixListener(path);
+  const openFds = (): number => readdirSync("/proc/self/fd").length;
+  try {
+    const before = openFds();
+    for (let attempt = 0; attempt < 32; attempt += 1) {
+      expect(() => native.bindUnixListener(path)).toThrowError();
+    }
+    expect(openFds()).toBe(before);
+  } finally {
+    closeSync(fd);
+  }
 });
