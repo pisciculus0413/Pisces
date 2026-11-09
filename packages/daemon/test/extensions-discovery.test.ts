@@ -703,7 +703,11 @@ test("rejects async wrapper schemas in a bounded fresh dist process", async () =
     },
   });
   await writeSidecar(pkg, "wrappers/async.ts", {
-    config: { defaults: {}, schema: { $async: true, type: "object" } },
+    config: {
+      defaults: {},
+      // Missing required property makes an invoked async validator reject.
+      schema: { $async: true, type: "object", required: ["x"] },
+    },
   });
 
   const distPath = fileURLToPath(new URL("../dist/extensions/discovery.js", import.meta.url));
