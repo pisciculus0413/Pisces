@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { type EntryName, type JsonObject, PiscesError } from "@pisces/core";
+import { type EntryName, type JsonObject, type JsonValue, PiscesError } from "@pisces/core";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import {
   mergeConfigLayers,
@@ -15,6 +15,10 @@ import type { ExtensionConfig } from "../src/extensions/types.js";
 const INVALID = "Invalid extension configuration";
 const UNKNOWN_KEY = "Unknown extension configuration key";
 const INVALID_JSON = "Value is not valid JSON";
+const DEEP_DEPTH = 50_000;
+
+const deepArrayText = (): string => "[".repeat(DEEP_DEPTH) + "]".repeat(DEEP_DEPTH);
+const deepArray = (): JsonValue => JSON.parse(deepArrayText()) as JsonValue;
 
 let root = "";
 
@@ -286,6 +290,36 @@ test("mergeConfigLayers deep-copies without mutating its inputs", () => {
   expect(globalLayer.extensions).toEqual(["pkg#a"]);
   expect(globalEntry).toEqual({ nested: { x: 1 }, list: [1, 2] });
   expect(workspaceLayer.entryConfig).toEqual({ "pkg#wrapper": { nested: { y: 2 } } });
+});
+
+test("readConfigLayer normalizes deep recursion to safe config.invalid", async () => {
+  const path = join(root, "global", "config.json");
+  await writeText(path, `{"entryConfig":{"pkg#x":{"k":${deepArrayText()}}}}`);
+  const error = await rejects(() => readConfigLayer(path, "global"));
+  expect(error.code).toBe("config.invalid");
+  expect(error.message).toBe(INVALID);
+  expect(error.message).not.toContain("Maximum call stack");
+  expect(error.cause).toBeUndefined();
+  expect(error.data).toBeUndefined();
+});
+
+test("mergeConfigLayers normalizes deep recursion to safe config.invalid", () => {
+  const deepEntry = JSON.parse(`{"k":${deepArrayText()}}`) as JsonObject;
+  const error = rejectsSync(() => mergeConfigLayers([{ entryConfig: { "pkg#x": deepEntry } }]));
+  expect(error.code).toBe("config.invalid");
+  expect(error.message).toBe(INVALID);
+  expect(error.message).not.toContain("Maximum call stack");
+  expect(error.cause).toBeUndefined();
+  expect(error.data).toBeUndefined();
+});
+
+test("canonicalJson normalizes deep recursion to safe config.invalid", () => {
+  const error = rejectsSync(() => canonicalJson(deepArray()));
+  expect(error.code).toBe("config.invalid");
+  expect(error.message).toBe(INVALID_JSON);
+  expect(error.message).not.toContain("Maximum call stack");
+  expect(error.cause).toBeUndefined();
+  expect(error.data).toBeUndefined();
 });
 
 test("readGlobalConfig reads <configDir>/config.json", async () => {

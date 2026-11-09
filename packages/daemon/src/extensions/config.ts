@@ -25,6 +25,11 @@ function unknownKey(): never {
   throw new PiscesError("config.unknown_key", UNKNOWN_KEY);
 }
 
+function rethrowKnown(error: unknown): never {
+  if (error instanceof PiscesError) throw error;
+  invalid();
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -143,10 +148,22 @@ export async function readConfigLayer(path: string, scope: ConfigScope): Promise
     if (isNotFound(error)) return {};
     invalid();
   }
-  return parseLayer(text, scope);
+  try {
+    return parseLayer(text, scope);
+  } catch (error) {
+    rethrowKnown(error);
+  }
 }
 
 export function mergeConfigLayers(layers: readonly ExtensionConfig[]): ExtensionConfig {
+  try {
+    return mergeLayers(layers);
+  } catch (error) {
+    rethrowKnown(error);
+  }
+}
+
+function mergeLayers(layers: readonly ExtensionConfig[]): ExtensionConfig {
   const result: ExtensionConfig = {};
   const entries = new Map<string, JsonObject>();
   let hasEntryConfig = false;

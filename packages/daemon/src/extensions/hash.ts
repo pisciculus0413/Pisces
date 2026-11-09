@@ -32,7 +32,12 @@ function encode(value: unknown): string {
 }
 
 export function canonicalJson(value: JsonValue): string {
-  return encode(value);
+  try {
+    return encode(value);
+  } catch (error) {
+    if (error instanceof PiscesError) throw error;
+    invalidJson();
+  }
 }
 
 export function sha256(bytes: string | Uint8Array): string {
