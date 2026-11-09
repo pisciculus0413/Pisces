@@ -812,3 +812,35 @@ test("ignores unrelated events without a session runtime", async () => {
   };
   expect(() => h.bus.publish(event)).not.toThrow();
 });
+
+test("steers a temporary session after its first commit using the stored offset", async () => {
+  const h = await openHarness({ validateWorkspace: async () => true, execute: blockedExecute() });
+  const created = await h.gateway.handle({
+    id: "create",
+    method: "session.create",
+    params: { workspace: "/workspace", provider: "p", model: "m" } as unknown as JsonValue,
+  });
+  const meta = created.result as unknown as SessionMeta;
+  await h.enqueue(meta.id, [draftQueueUser("hello")]);
+  const started = await turnStart(h, meta.id);
+  const turnId = turnIdOf(started);
+  // The marker only exists after the temporary session's first commit.
+  await vi.waitFor(async () => expect(await h.markers.read(meta.id)).toBeDefined(), {
+    timeout: 2000,
+    interval: 10,
+  });
+  await h.enqueue(meta.id, [draftQueueUser("steer")]);
+
+  const steer = await turnStart(h, meta.id, {}, "steer");
+
+  expect(steer.result).toEqual({ turnId, mode: "steer" });
+  expect((await readSession(h, meta.id)).queue).toEqual([
+    expect.objectContaining({ confirmedAt: expect.any(String) }),
+  ]);
+  expect((await h.markers.read(meta.id))?.turnId).toBe(turnId);
+  expect((await turnList(h)).turns).toHaveLength(1);
+
+  await turnCancel(h, turnId);
+  await h.waitForTurnEnd(turnId);
+  await waitForEmpty(h);
+});

@@ -1,5 +1,8 @@
 import type {
+  ContentBlock,
+  EffectiveEntry,
   EntryName,
+  JsonObject,
   JsonValue,
   NodeId,
   QueueEntry,
@@ -119,4 +122,52 @@ export interface SessionSubscribeParams {
 
 export interface SessionSubscribeResult {
   sessionId: SessionId;
+}
+
+/** Protocol-safe inventory projection: no entry path, configuration body, or execute value. */
+export interface EntrySnapshot {
+  name: EntryName;
+  kind: "tool" | "wrapper" | "skill" | "context";
+  description?: string;
+  parameters?: JsonObject;
+  definitionHash?: string;
+  configHash?: string;
+}
+
+export interface EntriesSnapshotParams {
+  sessionId: SessionId;
+}
+
+/** Persisted branch selection plus eligibility; never includes a queued toggle. */
+export interface EntriesSnapshotResult {
+  entries: EntrySnapshot[];
+  selection: SelectionState;
+  effective: EffectiveEntry[];
+}
+
+export interface QueueEditParams {
+  sessionId: SessionId;
+  id: QueueEntryId;
+  content: ContentBlock[];
+}
+
+export interface QueueEditResult {
+  id: QueueEntryId;
+}
+
+export interface QueueRemoveParams {
+  sessionId: SessionId;
+  id: QueueEntryId;
+}
+
+export interface QueueRemoveResult {
+  id: QueueEntryId;
+}
+
+export interface QueueClearParams {
+  sessionId: SessionId;
+}
+
+export interface QueueClearResult {
+  ids: QueueEntryId[];
 }

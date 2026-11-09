@@ -32,6 +32,7 @@ import {
   type TurnId,
 } from "@pisces/core";
 import type { ProtocolEvent } from "@pisces/protocol";
+import { MAX_RESPONSE_BYTES } from "@pisces/protocol";
 import type { ExtensionBinding, Extensions } from "../extensions/types.js";
 import type { ProviderHost } from "../provider/provider-host.js";
 import type { Concurrency } from "../runtime/concurrency.js";
@@ -45,14 +46,19 @@ import {
   preparePersistedBinding,
   resolvedModelPair,
 } from "./extension-session.js";
+import { extensionSnapshot } from "./extension-view.js";
 import type {
   CreateSessionParams,
+  EntriesSnapshotResult,
   GatewayRequest,
   GatewayResponse,
   ModelInfo,
   ProviderInfo,
   ProviderListResult,
+  QueueClearResult,
+  QueueEditResult,
   QueueEnqueueResult,
+  QueueRemoveResult,
   SessionDefaults,
   SessionReadResult,
   TurnListResult,
@@ -113,6 +119,8 @@ interface SessionRuntime {
   phase?: TurnPhase;
   /** Frozen per-session view; absent only in the legacy manual-injection mode. */
   binding?: ExtensionBinding;
+  /** Branch and commit offset this turn started from; used to validate steer before appending. */
+  turnStart?: { nodeId?: NodeId; offset: number };
   /** Runtime-local only; a failing cancel handle is never rethrown or exported. */
   cancelHandleError?: unknown;
 }
@@ -126,6 +134,8 @@ const SESSION_ID = /^[A-Za-z0-9_-]+$/;
 const TURN_ID = SESSION_ID;
 const CLEANUP_FAILED_CODE = "storage.io";
 const CLEANUP_FAILED_MESSAGE = "Active turn marker could not be removed";
+const RESPONSE_TOO_LARGE_MESSAGE = "Response exceeds the size limit";
+const ACTIVE_TURN_MESSAGE = "A turn is active for this session";
 // Only client-meaningful turn failure codes are allowed on the wire, each with its own
 // fixed safe message; every other code is replaced so raw adapter/upstream details never leak.
 const TURN_ENDED_ERROR_MESSAGES: Record<string, string> = {
@@ -452,6 +462,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
     await deps.concurrency.runExclusive(sessionId, async () => {
       deps.concurrency.unregisterTurn(sessionId, turnId);
       delete runtime.phase;
+      delete runtime.turnStart;
     });
   }
 
@@ -788,6 +799,64 @@ export function createGateway(deps: GatewayDeps): Gateway {
       });
     },
 
+    async "entries.snapshot"(params): Promise<EntriesSnapshotResult> {
+      const sessionId = params.sessionId;
+      if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) invalidRequest();
+      const id = sessionId as SessionId;
+      return deps.concurrency.runExclusive(id, async () => {
+        const runtime = await runtimeFor(id);
+        await runtime.context.initialize();
+        // Pure branch replay: no queued toggle, no extension code, no source resolution.
+        const view = await runtime.context.viewFor();
+        return extensionSnapshot(runtime.binding, view);
+      });
+    },
+
+    async "queue.edit"(params): Promise<QueueEditResult> {
+      const sessionId = params.sessionId;
+      if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) invalidRequest();
+      const entryId = params.id;
+      if (typeof entryId !== "string") invalidRequest();
+      const content = params.content;
+      if (!Array.isArray(content)) invalidRequest();
+      const id = sessionId as SessionId;
+      return deps.concurrency.runExclusive(id, async () => {
+        const runtime = await runtimeFor(id);
+        await runtime.context.initialize();
+        // Core owns the single client-visible change: content/size checks and one queue.updated.
+        runtime.context.edit(entryId as QueueEntryId, content as ContentBlock[]);
+        return { id: entryId as QueueEntryId };
+      });
+    },
+
+    async "queue.remove"(params): Promise<QueueRemoveResult> {
+      const sessionId = params.sessionId;
+      if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) invalidRequest();
+      const entryId = params.id;
+      if (typeof entryId !== "string") invalidRequest();
+      const id = sessionId as SessionId;
+      return deps.concurrency.runExclusive(id, async () => {
+        const runtime = await runtimeFor(id);
+        await runtime.context.initialize();
+        runtime.context.remove(entryId as QueueEntryId);
+        return { id: entryId as QueueEntryId };
+      });
+    },
+
+    async "queue.clear"(params): Promise<QueueClearResult> {
+      const sessionId = params.sessionId;
+      if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) invalidRequest();
+      const id = sessionId as SessionId;
+      return deps.concurrency.runExclusive(id, async () => {
+        // A registered turn (running, cleanup or failed cleanup) rejects the whole request.
+        if (deps.concurrency.activeTurn(id) !== undefined)
+          throw new PiscesError("turn.active", ACTIVE_TURN_MESSAGE);
+        const runtime = await runtimeFor(id);
+        await runtime.context.initialize();
+        return { ids: runtime.context.clear() };
+      });
+    },
+
     async "turn.start"(params): Promise<TurnStartResult> {
       const sessionId = params.sessionId;
       if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) invalidRequest();
@@ -812,6 +881,15 @@ export function createGateway(deps: GatewayDeps): Gateway {
                 "turn.node_id_forbidden",
                 "Cannot select a node while steering",
               );
+            // Reconcile any pending commit, then validate the branch this turn actually
+            // executes: the original start branch until the turn appends, then the latest
+            // committed branch. Validation precedes confirmation and never changes state.
+            await runtime.context.initialize();
+            const start = runtime.turnStart;
+            let offset = 0;
+            if (runtime.persisted) offset = await deps.store.commitOffset(id);
+            const branch = start !== undefined && offset > start.offset ? undefined : start?.nodeId;
+            await runtime.context.validateQueue(branch);
             runtime.context.confirm();
             return { steer: { turnId: active, mode: "steer" } };
           }
@@ -844,6 +922,10 @@ export function createGateway(deps: GatewayDeps): Gateway {
           const turnId = newTurnId();
           const startedAt = now();
           try {
+            // Validate every unconfirmed declaration against the exact branch this turn will
+            // append to, before the marker, confirmation, or turn registration exist.
+            await runtime.context.initialize();
+            await runtime.context.validateQueue(startNodeId);
             if (runtime.persisted)
               await deps.markers.write(id, {
                 turnId,
@@ -863,6 +945,10 @@ export function createGateway(deps: GatewayDeps): Gateway {
             };
             deps.concurrency.registerTurn(id, turnId, startedAt, cancel);
             runtime.phase = "running";
+            runtime.turnStart = {
+              ...(startNodeId !== undefined ? { nodeId: startNodeId } : {}),
+              offset: startOffset,
+            };
             const input: RunTurnInput = {
               sessionId: id,
               turnId,
@@ -882,6 +968,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
             return { input, runtime, turnId };
           } catch (error) {
             delete runtime.pendingMarker;
+            delete runtime.turnStart;
             if (runtime.persisted) {
               try {
                 await deps.markers.remove(id, turnId);
@@ -1011,10 +1098,15 @@ export function createGateway(deps: GatewayDeps): Gateway {
         };
 
       try {
-        return {
-          id: request.id,
-          result: (await route(request.params, connection)) as JsonValue,
-        };
+        const result = (await route(request.params, connection)) as JsonValue;
+        // Pre-check the exact wire envelope (id included, UTF-8 bytes) so an oversized result
+        // becomes a safe protocol error instead of a transport destroy on encode.
+        if (ENCODER.encode(JSON.stringify({ id: request.id, result })).length > MAX_RESPONSE_BYTES)
+          return {
+            id: request.id,
+            error: { code: "protocol.frame_too_large", message: RESPONSE_TOO_LARGE_MESSAGE },
+          };
+        return { id: request.id, result };
       } catch (error) {
         if (error instanceof PiscesError)
           return { id: request.id, error: { code: error.code, message: error.message } };

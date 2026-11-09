@@ -687,3 +687,42 @@ test("dispose detaches the gateway handler", async () => {
   expect(() => h.bus.publish(deltaEvent(meta.id, 1, "after"))).not.toThrow();
   expect(events).toHaveLength(0);
 });
+
+test("delivers reviewed queue route events only to the subscribed connection", async () => {
+  const h = await openHarness();
+  const first = await h.seed([draftUser("one")]);
+  const second = await h.seed([draftUser("two")]);
+  const one = attach(h, "one");
+  const two = attach(h, "two");
+  await subscribe(h, "one", first.meta.id);
+  await subscribe(h, "two", second.meta.id);
+  const ids = await h.enqueue(first.meta.id, [draftQueueUser("x")]);
+  one.length = 0;
+  two.length = 0;
+
+  const edit = await h.gateway.handle({
+    id: "edit",
+    method: "queue.edit",
+    params: {
+      sessionId: first.meta.id,
+      id: ids[0],
+      content: [{ type: "text", text: "y" }],
+    } as unknown as JsonValue,
+  });
+  expect(edit.error).toBeUndefined();
+  expect(one).toHaveLength(1);
+  expect(one[0]).toMatchObject({
+    event: "queue.updated",
+    data: { sessionId: first.meta.id },
+  });
+  expect(two).toHaveLength(0);
+
+  const removed = await h.gateway.handle({
+    id: "remove",
+    method: "queue.remove",
+    params: { sessionId: first.meta.id, id: ids[0] } as unknown as JsonValue,
+  });
+  expect(removed.error).toBeUndefined();
+  expect(one).toHaveLength(2);
+  expect(two).toHaveLength(0);
+});
