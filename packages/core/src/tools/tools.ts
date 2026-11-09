@@ -123,7 +123,7 @@ interface InventoryBinding {
 export function createTools(options: ToolsOptions = {}): Tools {
   const encode = options.encodeWireName ?? defaultEncodeWireName;
   const declarations = new Map<EntryName, ToolDeclaration>();
-  const wrappers = new Map<EntryName, () => ToolWrapper>();
+  const wrappers = new Map<EntryName, () => ToolWrapper | Promise<ToolWrapper>>();
   const wrapperPromises = new Map<EntryName, Promise<ToolWrapper>>();
   const wireOwners = new Map<string, EntryName>();
   const unavailable = new Set<EntryName>();

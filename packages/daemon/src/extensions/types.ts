@@ -1,4 +1,13 @@
-import type { ContentBlock, EntryInfo, EntryName, JsonObject } from "@pisces/core";
+import type {
+  ContentBlock,
+  ContextEntries,
+  ContextSourceRegistry,
+  EntryInfo,
+  EntryName,
+  JsonObject,
+  Skills,
+  Tools,
+} from "@pisces/core";
 
 export interface ExtensionsOptions {
   configDir: string;
@@ -43,4 +52,21 @@ export interface DiscoveryResult {
   inventory: Inventory;
   records: ReadonlyMap<EntryName, DiscoveredEntry>;
   issues: ExtensionIssue[];
+}
+
+/** One frozen per-session view; internal records and loader stay private. */
+export interface ExtensionBinding {
+  workspace: string;
+  config: ExtensionConfig;
+  inventory: Inventory;
+  issues: readonly ExtensionIssue[];
+  entries: ContextEntries;
+  skills: Skills;
+  sources: ContextSourceRegistry;
+  tools: Tools;
+}
+
+export interface Extensions {
+  readGlobalConfig(): Promise<ExtensionConfig>;
+  prepare(workspace: string): Promise<ExtensionBinding>;
 }

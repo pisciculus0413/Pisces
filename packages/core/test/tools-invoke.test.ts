@@ -238,6 +238,41 @@ test("caches rejected wrapper factories and reports missing wrapper registration
   ).toEqual(errorResult("tool.wrapper_invalid", "Invalid tool wrapper: pkg#missing"));
 });
 
+test("awaits an asynchronous wrapper factory and caches its promise", async () => {
+  const catalog = createTools();
+  let attempts = 0;
+  catalog.registerTool(tool("pkg#echo"));
+  catalog.registerWrapper(name("pkg#async"), async () => {
+    attempts++;
+    return (wrapped) => ({
+      ...wrapped,
+      execute: async () => ({ content: [{ type: "text", text: "async" }] }),
+    });
+  });
+  const facade = catalog.forInventory({
+    hash: "h",
+    entries: [entry("pkg#echo", "tool"), entry("pkg#async", "wrapper")],
+  });
+  const selection = select("pkg#echo", "pkg#async");
+  const expected = { content: [{ type: "text", text: "async" }] };
+
+  expect(
+    await facade.invoke(
+      { id: "call-1", name: name("pkg#echo"), arguments: null },
+      selection,
+      context,
+    ),
+  ).toEqual(expected);
+  expect(
+    await facade.invoke(
+      { id: "call-2", name: name("pkg#echo"), arguments: null },
+      selection,
+      context,
+    ),
+  ).toEqual(expected);
+  expect(attempts).toBe(1);
+});
+
 test("allows a wrapper to supply execute and rejects a non-object result", async () => {
   const supplyingCatalog = createTools();
   supplyingCatalog.registerTool(tool("pkg#echo", false));

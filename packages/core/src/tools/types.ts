@@ -54,7 +54,7 @@ export interface ToolInventory {
 export interface Tools {
   forInventory(inventory: ToolInventory): Tools;
   registerTool(declaration: ToolDeclaration): void;
-  registerWrapper(name: EntryName, factory: () => ToolWrapper): void;
+  registerWrapper(name: EntryName, factory: () => ToolWrapper | Promise<ToolWrapper>): void;
   selected(selection: SelectionState): ToolDeclaration[];
   invoke(
     call: ToolCall,
