@@ -5,9 +5,9 @@ import { createProviderManagement } from "@pisces/core";
  * Child-process fixture for the compiled public host with extension composition.
  *
  * Runs only compiled `dist/*.js` and the ignored native addon next to it, never the
- * Vitest TypeScript aliases. The parent drives `snapshot`, `turn.start`, `session.read`
- * and `enqueue` over the real Unix socket; this fixture only provides the provider,
- * the extension config directory and bounded ready/stop lifecycle events.
+ * Vitest TypeScript aliases. The parent drives `snapshot`, `turn.start` and `session.read`
+ * over the real Unix socket; this fixture only provides the provider, the extension config
+ * directory and bounded ready/stop lifecycle events.
  *
  * Usage: node extensions-child.mjs <entry.js> <dataDir> <configDir> <workspace> <toolName> [serve|platform]
  *

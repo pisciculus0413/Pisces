@@ -13,9 +13,10 @@ import {
   type SessionMeta,
 } from "@pisces/core";
 import { PROTOCOL_VERSION } from "@pisces/protocol";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, expectTypeOf, test } from "vitest";
 import { defaultBuiltinDir } from "../src/extensions/discovery.js";
-import type { Extensions, ExtensionsOptions } from "../src/extensions/types.js";
+import { createExtensions } from "../src/extensions/extensions.js";
+import type { ExtensionBinding, Extensions, ExtensionsOptions } from "../src/extensions/types.js";
 import type {
   EntriesSnapshotResult,
   GatewayResponse,
@@ -32,9 +33,12 @@ import type {
   StartDaemonOptions as PublicStartDaemonOptions,
 } from "../src/index.js";
 import type { ProviderHost } from "../src/provider/provider-host.js";
-import { makePackage, toolSource, writeJson } from "./extensions-fixtures.js";
+import { makePackage, toolSource, writeJson, writeText } from "./extensions-fixtures.js";
 
 const RUN = "demo#run" as EntryName;
+/** Inner bounds shorter than the default 5 s test timeout: a stuck helper reports itself. */
+const WAIT_TIMEOUT_MS = 4000;
+const CHILD_TIMEOUT_MS = 4000;
 const FIXTURE = fileURLToPath(new URL("./fixtures/extensions-child.mjs", import.meta.url));
 const DIST_ENTRY = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
@@ -69,7 +73,10 @@ const exists = async (path: string): Promise<boolean> => {
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-const waitFor = async (condition: () => Promise<boolean>, timeoutMs = 15000): Promise<void> => {
+const waitFor = async (
+  condition: () => Promise<boolean>,
+  timeoutMs = WAIT_TIMEOUT_MS,
+): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
   while (!(await condition())) {
     if (Date.now() > deadline) throw new Error("condition was not met in time");
@@ -280,7 +287,7 @@ function spawnChildHost(args: string[]): ChildHost {
     stderr += chunk.toString("utf8");
   });
 
-  const waitExit = (timeoutMs = 10000): Promise<number | null> => {
+  const waitExit = (timeoutMs = CHILD_TIMEOUT_MS): Promise<number | null> => {
     if (child.exitCode !== null) return Promise.resolve(child.exitCode);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -303,7 +310,7 @@ function spawnChildHost(args: string[]): ChildHost {
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           reject(new Error(`child produced no line; stderr: ${stderr}`));
-        }, 15000);
+        }, CHILD_TIMEOUT_MS);
         waiters.push((line) => {
           clearTimeout(timer);
           resolve(line);
@@ -355,38 +362,21 @@ async function waitForToolResult(client: Client, sessionId: string): Promise<Ses
   return latest;
 }
 
-// Compile-time contract: the public startup option is the directory configuration, never the
-// Gateway's `extensions` service instance. `tsc -p tsconfig.json` fails if either assertion breaks.
-type ServiceIsNotStartupOptions = Extensions extends ExtensionsOptions ? never : true;
-const serviceIsNotStartupOptions: ServiceIsNotStartupOptions = true;
+// Compile-time contract only (`tsc -p tsconfig.json`), not behavioural coverage: the public
+// startup option is the directory configuration, never the Gateway's `extensions` service.
 type PublicOption = NonNullable<PublicStartDaemonOptions["extensions"]>;
-type PublicOptionIsDirectoryConfig = PublicOption extends PublicExtensionsOptions
-  ? PublicExtensionsOptions extends PublicOption
-    ? true
-    : false
-  : false;
-const publicOptionIsDirectoryConfig: PublicOptionIsDirectoryConfig = true;
-type PublicBindingMatches = PublicExtensionBinding extends ExtensionsBindingShape ? true : false;
-interface ExtensionsBindingShape {
-  inventory: unknown;
-  issues: readonly unknown[];
-}
-const publicBindingMatches: PublicBindingMatches = true;
+type ServiceIsNotStartupOptions = Extensions extends ExtensionsOptions ? never : true;
 type PublicServiceMatches = PublicExtensions extends Extensions
   ? Extensions extends PublicExtensions
     ? true
     : false
   : false;
-const publicServiceMatches: PublicServiceMatches = true;
 
-test("exports the extension directory configuration and never the Gateway service instance", () => {
-  expect(typeof startDaemon).toBe("function");
-  expect(
-    serviceIsNotStartupOptions &&
-      publicOptionIsDirectoryConfig &&
-      publicBindingMatches &&
-      publicServiceMatches,
-  ).toBe(true);
+test("public extension types: directory config in, service type out (type-level assertions)", () => {
+  expectTypeOf<PublicOption>().toEqualTypeOf<PublicExtensionsOptions>();
+  expectTypeOf<ServiceIsNotStartupOptions>().toEqualTypeOf<true>();
+  expectTypeOf<PublicServiceMatches>().toEqualTypeOf<true>();
+  expectTypeOf<PublicExtensionBinding>().toEqualTypeOf<ExtensionBinding>();
 });
 
 test("public host rejects mixed extension composition before listening", async () => {
@@ -415,7 +405,9 @@ test("public host rejects mixed extension composition before listening", async (
   }
 });
 
-test("serves a configured extension session, runs its TS tool, then stops cleanly", async () => {
+test("serves a configured extension session, runs its TS tool, then stops cleanly", {
+  timeout: 20000,
+}, async () => {
   const root = await tempDir();
   const workspace = await workspaceDir(root, "ws");
   const sentinel = join(root, "tool.log");
@@ -472,6 +464,15 @@ test("serves a configured extension session, runs its TS tool, then stops cleanl
   hosts.push(restarted);
   const restartedClient = await openClient(restarted.socketPath);
   expect((await restartedClient.hello()).result).toMatchObject({ compatible: true });
+  // The restarted host still composes extensions: a fresh session is created and snapshotted
+  // through the same public routes instead of reporting a stopped or bypassed startup.
+  const restartedMeta = (await ok(restartedClient, "session.create", {
+    workspace,
+    systemPrompt: ["restarted"],
+  })) as SessionMeta;
+  const restartedSnapshot = await snapshot(restartedClient, restartedMeta.id);
+  expect(restartedSnapshot.entries.map((entry) => entry.name)).toEqual([RUN]);
+  expect(restartedSnapshot.selection).toEqual([]);
   await restarted.stop();
 });
 
@@ -507,7 +508,16 @@ test("resolves the default builtin directory from the module URL, not the workin
   });
   const configDir = join(root, "config");
   await mkdir(configDir, { recursive: true });
+  // Decoy builtin tree at the candidate cwd location: a cwd-derived implementation discovers it.
   const elsewhere = await workspaceDir(root, "elsewhere");
+  const decoySentinel = join(root, "decoy-tool.log");
+  await makePackage(join(elsewhere, "extensions", "builtin", "decoy"), {
+    name: "decoy",
+    files: { "tools/x.ts": toolSource(decoySentinel) },
+  });
+  expect(await exists(join(elsewhere, "extensions", "builtin", "decoy", "tools", "x.ts"))).toBe(
+    true,
+  );
   const original = process.cwd();
   const before = defaultBuiltinDir();
   let host: DaemonHost | undefined;
@@ -525,8 +535,11 @@ test("resolves the default builtin directory from the module URL, not the workin
     const client = await openClient(host.socketPath);
     expect((await client.hello()).result).toMatchObject({ compatible: true });
     const meta = (await ok(client, "session.create", { workspace })) as SessionMeta;
-    // The default builtin inventory stays empty; only the workspace tool is discovered.
-    expect((await snapshot(client, meta.id)).entries.map((entry) => entry.name)).toEqual([RUN]);
+    const discovered = (await snapshot(client, meta.id)).entries.map((entry) => entry.name);
+    // The decoy tree under the working directory is not the module-derived builtin directory.
+    expect(discovered).toEqual([RUN]);
+    expect(discovered).not.toContain("decoy#x");
+    expect(await exists(decoySentinel)).toBe(false);
   } finally {
     process.chdir(original);
     await host?.stop().catch(() => {});
@@ -553,7 +566,9 @@ test("fails on an unsupported platform before extension config, native probe or 
   await expect(lstat(paths.lockPath)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
-test("a bounded dist child serves an extension session over a real socket and runs one TS tool", async () => {
+test("a bounded dist child serves an extension session over a real socket and runs one TS tool", {
+  timeout: 20000,
+}, async () => {
   const root = await tempDir();
   const workspace = await workspaceDir(root, "dist-ws");
   const sentinel = join(root, "dist-tool.log");
@@ -563,16 +578,26 @@ test("a bounded dist child serves an extension session over a real socket and ru
     defaultModel: "m",
     extensions: [RUN],
   });
-  // A broken package next to the healthy one must not block the daemon.
-  await writeJson(join(workspace, ".pisces", "extensions", "broken", "package.json"), {
-    name: "broken",
-  });
+  // A genuinely invalid package: an unparseable package.json yields `extensions.invalid`
+  // during discovery and must not block the daemon or the healthy workspace package.
+  await writeText(
+    join(workspace, ".pisces", "extensions", "broken", "package.json"),
+    "{ not valid json\n",
+  );
   await writeJson(join(workspace, ".pisces", "extensions", "broken", "tools", "bad.ts.meta.json"), {
     description: "broken",
   });
   const configDir = join(root, "config");
   await mkdir(configDir, { recursive: true });
   const dataDir = join(root, "data");
+
+  // Same directories the child uses: the issue is real, not assumed by the fixture shape.
+  const probed = await createExtensions({ configDir }).prepare(workspace);
+  expect(probed.issues).toContainEqual({
+    code: "extensions.invalid",
+    source: "broken",
+  });
+  expect(probed.inventory.entries.map((entry) => entry.name)).toEqual([RUN]);
 
   const child = spawnChildHost([DIST_ENTRY, dataDir, configDir, workspace, RUN]);
   const ready = await child.next();
