@@ -1,4 +1,5 @@
 export * from "./context/context.js";
+export * from "./context/selection.js";
 export * from "./context/types.js";
 export {
   createEventPublisher,

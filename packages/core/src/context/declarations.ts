@@ -73,21 +73,56 @@ export function parseDeclaration(
   return payload as DeclarationPayload;
 }
 
+export function declarationPayloads(
+  nodes: readonly SessionNodeDraft[],
+  origin: "queue" | "storage",
+): DeclarationPayload[] {
+  const payloads: DeclarationPayload[] = [];
+  for (const node of nodes)
+    if (node.kind === "control" && node.role === "declaration")
+      payloads.push(parseDeclaration(node.content, origin));
+  return payloads;
+}
+
+const isContentNode = (node: SessionNodeDraft) =>
+  node.kind === "agent" && node.role === "system" && isEntryName(node.source);
+
+/** Accumulated branch evidence shared by every pure replay consumer. */
+export interface ReplayState {
+  selection: Set<EntryName>;
+  definitions: Map<EntryName, DefinitionSnapshot>;
+  contentNames: Set<EntryName>;
+}
+
+export function createReplayState(): ReplayState {
+  return { selection: new Set(), definitions: new Map(), contentNames: new Set() };
+}
+
+/** Single XOR/definition application used by both replay and pending application. */
+export function applyDeclarationPayload(state: ReplayState, payload: DeclarationPayload): void {
+  for (const name of payload.toggle) {
+    if (state.selection.has(name)) state.selection.delete(name);
+    else state.selection.add(name);
+  }
+  for (const definition of payload.definitions ?? [])
+    state.definitions.set(definition.name, structuredClone(definition));
+}
+
+export function replayNodes(
+  nodes: readonly SessionNodeDraft[],
+  origin: "queue" | "storage",
+): ReplayState {
+  const state = createReplayState();
+  for (const payload of declarationPayloads(nodes, origin)) applyDeclarationPayload(state, payload);
+  for (const node of nodes)
+    if (isContentNode(node)) state.contentNames.add(node.source as EntryName);
+  return state;
+}
+
 export function replayDeclarations(nodes: readonly SessionNodeDraft[]): {
   selection: SelectionState;
   definitions: Map<EntryName, DefinitionSnapshot>;
 } {
-  const selected = new Set<EntryName>();
-  const definitions = new Map<EntryName, DefinitionSnapshot>();
-  for (const node of nodes) {
-    if (node.kind !== "control" || node.role !== "declaration") continue;
-    const payload = parseDeclaration(node.content, "storage");
-    for (const name of payload.toggle) {
-      if (selected.has(name)) selected.delete(name);
-      else selected.add(name);
-    }
-    for (const definition of payload.definitions ?? [])
-      definitions.set(definition.name, structuredClone(definition));
-  }
-  return { selection: [...selected].sort(), definitions };
+  const { selection, definitions } = replayNodes(nodes, "storage");
+  return { selection: [...selection].sort(), definitions };
 }

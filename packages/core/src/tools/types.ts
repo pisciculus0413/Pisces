@@ -19,6 +19,14 @@ export interface EntryInfo {
   definitionHash?: string;
 }
 
+/** Per-entry eligibility from replayed definitions; never fabricates kind evidence. */
+export interface EffectiveEntry {
+  name: EntryName;
+  definitionHash?: string;
+  configHash?: string;
+  stale: boolean;
+}
+
 export interface ToolDeclaration {
   readonly id: string;
   readonly source: string;

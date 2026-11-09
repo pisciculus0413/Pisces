@@ -1,4 +1,10 @@
-import type { ContentBlock, EntryName, Message, SelectionState } from "../messages.js";
+import type {
+  ContentBlock,
+  DefinitionSnapshot,
+  EntryName,
+  Message,
+  SelectionState,
+} from "../messages.js";
 import type { NodeId, SessionId, SessionMeta, SessionNode, Sessions } from "../sessions/types.js";
 import type { Brand, JsonObject, JsonValue } from "../types.js";
 
@@ -52,6 +58,8 @@ export type ContextEntryKind = "tool" | "wrapper" | "skill" | "context";
 /** Classification from a frozen inventory; supplies no live tool definitions. */
 export interface ContextEntries {
   kind(name: EntryName): ContextEntryKind | undefined;
+  /** Pure synchronous hash comparison; absent for legacy manual injection. */
+  matchesDefinition?(definition: DefinitionSnapshot): boolean;
 }
 
 export interface RequestToolDeclaration {
