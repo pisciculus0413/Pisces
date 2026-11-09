@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 本计划已获用户实施授权。当前基线及 Tasks 1–2 已完成；Task 3 已实现并通过独立审查（残余 Minor 留账），Tasks 4–6 未开始。先读 [当前交接](../handoffs/2026-11-09-extensions-selection-a-to-b.md)；下方任务正文/checkbox 保留规划模板，不得据此重复已完成任务。在 `dev-pi` 顺序工作，不建 worktree、不向 main 提交、不 push/merge，保留旧 SDD 资料。
+- 本计划已获用户实施授权，Tasks 1–6 已完成：代码验收 SHA `e57f793`，A 范围整体审查完成（无 Critical；2 项 Important 已关闭），交接 READY。先读 [当前交接](../handoffs/2026-11-09-extensions-selection-a-to-b.md)；下方任务正文/checkbox 保留规划模板，不得据此重复已完成任务。Plan B 未授权。在 `dev-pi` 顺序工作，不建 worktree、不向 main 提交、不 push/merge，保留旧 SDD 资料。
 - 必须读入口索引 `2026-11-09-extensions-selection.md` 的门禁 G；每次提交执行原生构建、完整 Vitest、两项 tsc、Biome、边界扫描，仅显式暂存本任务文件。
 - Core 无文件/环境 I/O，不依赖 daemon/protocol；发现不执行扩展代码，工具/包装器 invoke 时才装载，来源按需固化。
 - `package#name`；`foo.ts.meta.json`；技能相邻 `foo.meta.json` + `SKILL.md`；只有 wrapper 接受条目配置。
@@ -196,13 +196,13 @@
   git commit -m "feat(daemon): bind isolated extension registries to sessions"
   ```
 
-## A 验收与交接（不能自动开始 B）
+## A 验收与交接（已完成）
 
-- [ ] Tasks 1–6 各自 RED/GREEN、独立任务审查完成；Task 3 的 dist 子进程与 loader 全能力有实际证据。
-- [ ] 进行 A 范围独立整体审查并关闭 Critical/Important；不以“B 会补”为由跳过本阶段错误。延期 Minor 逐项记录影响与责任任务。
-- [ ] 在最终 A HEAD 新鲜运行门禁 G，记录完整 SHA、命令、实际通过/跳过数、Node/平台、依赖精确版本；检查工作树归属。
-- [ ] 填写并提交 `docs/superpowers/handoffs/2026-11-09-extensions-selection-a-to-b.md`；验收 SHA 指向代码验收点，交接文档提交可以在其后，不用循环改写自身 SHA。
-- [ ] 核对 Plan B 的最小接口契约与实际代码；任何偏离先更新受影响契约/任务并说明原因，不能口头交接。
-- [ ] 所有条件满足后才把交接状态改为 READY，报告“A 基础服务完成，协议接线未做”，等待 B 的实施授权。
+- [x] Tasks 1–6 各自 RED/GREEN、独立任务审查完成；Task 3 的 dist 子进程与 loader 全能力有实际证据。
+- [x] 进行 A 范围独立整体审查并关闭 Critical/Important（无 Critical；2 项 Important 已关闭：验收 SHA 三运行时矩阵补录、交接文档重写）。延期 Minor 已逐项处置见交接 §6。
+- [x] 在最终 A HEAD 新鲜运行门禁 G，记录完整 SHA、命令、实际通过/跳过数、Node/平台、依赖精确版本；检查工作树归属。
+- [x] 填写并提交 `docs/superpowers/handoffs/2026-11-09-extensions-selection-a-to-b.md`；验收 SHA 指向代码验收点 `e57f793`，交接文档提交在其后。
+- [x] 核对 Plan B 的最小接口契约与实际代码；偏差写入交接 §4.1（无 `Context.effectiveFor`、`validateQueue` 仅未确认、`applyDeclarations` 含未确认定义、`prepare` 不校验选择/目录、`tools` 只读规则、模块未从包入口再导出）。
+- [x] 交接状态改为 READY，报告“A 基础服务完成，协议接线未做”，等待 B 的实施授权。
 
-**范围自审：** 设计 §4/5/6/7 由 Tasks 1/2/3/6 覆盖；§8.3–8.4 的纯语义及装配由 Tasks 4/5 覆盖；五项 Review Focus 均有本计划测试。A 不得更新 HLD/DDS 宣称新路由可用，不需要为交接重读 B 全文。
+**范围自审：** 设计 §4/5/6/7 由 Tasks 1/2/3/6 覆盖；§8.3–8.4 的纯语义及装配由 Tasks 4/5 覆盖；五项 Review Focus 均有本计划测试。A 未更新 HLD/DDS 宣称新路由可用（路由接线属 B）。

@@ -1,102 +1,106 @@
-# Extensions Selection：当前工作交接 / A → B 门禁
+# Extensions Selection：A → B 交接门禁
 
-**状态：Task 3 已完成并通过独立审查；A 进行中（Tasks 4–6 未开始）。仍为 NOT READY，不能启动 Plan B。**
+**状态：READY。A（Tasks 1–6）代码验收与 A 范围整体审查已完成；Plan B 仍未获实施授权，不得据本文件自动开始。**
 
-用户此前要求交接，随后完成选型并批准 jiti 局部补丁设计；计划确认后 Task3 已实现（`6527e0f`/`e033032`）并通过独立审查。本文件是恢复入口，不是新实施计划；不要恢复整段旧对话，也不要重做已完成任务。所有子智能体继续使用 **`deepseek-flash`**。
+本文件是 B 的实施入口：只读本文件、Plan B 与共同门禁即可工作，不需要恢复旧对话、重读 Plan A 全文或重做已验收任务。所有子智能体继续显式使用 **`deepseek-flash`**，不得静默升级模型。
 
-**最新进展：** 用户已批准 [jiti 替换设计](../specs/2026-11-09-extension-loader-jiti-patch-design.md)，[Task3 专项修订计划](../plans/2026-11-09-extension-loader-jiti-patch.md) 已获用户确认并进入正式实现；[选型报告](../research/2026-11-09-extension-loader-selection.md) 保留实测证据。两个候选在本地 Node 22.19/24.11/26.13 均通过共用 17 测试；额外 6 项独立边界检查中，最终 jiti 补丁全部通过，esbuild 有 3 项语义失败。原产品两个 CJS 身份断言在本轮实现前为 RED；当前按既定 deepseek-flash SDD 完成实现与证据，验收和独立审查尚未通过；不重复选型或重做 Tasks1–2。
+## 1. 仓库、授权与环境
 
-## 1. 仓库与授权
-
-| 项目 | 实际状态 |
+| 项目 | 实际值 |
 |---|---|
-| 分支 / HEAD | `dev-pi` / `e033032067743fe39dade4919ef20d243eeb195b`（Task3 验收；A 尚未结束） |
-| 计划索引 | [共同门禁与执行约束](../plans/2026-11-09-extensions-selection.md) |
-| 当前计划 | [Plan A：Tasks 1–6](../plans/2026-11-09-extensions-selection-a-foundations.md)，已获实施授权 |
-| 后续计划 | [Plan B：Tasks 7–11](../plans/2026-11-09-extensions-selection-b-integration.md)，未获实施授权 |
+| 分支 | `dev-pi`（不建 worktree、不向 main 提交、不 push/merge） |
+| **A 代码验收 SHA** | **`e57f793f6d746759d67122a134ca1c24c7c7c52`** |
+| 计划索引 / 门禁 G | [共同门禁与执行约束](../plans/2026-11-09-extensions-selection.md) |
+| Plan A（已完成） | [Plan A：Tasks 1–6](../plans/2026-11-09-extensions-selection-a-foundations.md) |
+| Plan B（未授权） | [Plan B：Tasks 7–11](../plans/2026-11-09-extensions-selection-b-integration.md) |
 | 设计 | [已批准设计](../specs/2026-11-09-extensions-selection-design.md) |
-| A 验收 SHA | **不存在**；Tasks 3–6 未完成，整体审查未进行 |
-| 环境 | Node v26.13.0、pnpm 12.8.1、Linux x86_64；远端 CI 未运行 |
+| 环境 | Node v26.13.0；pnpm 12.8.1；Linux x86_64 |
+| 远端 CI | **未运行**；不得声称通过 |
+| 跨 UID / 真实 socket 验收 | 属 Plan B，尚未进行 |
 
-用户已授权 A、选型并批准补丁设计；当前要求修订计划，确认后才恢复 Task3 正式实现，不能把原型当成已修复产品。继续现有 checkout，不建 worktree、不向 main 提交、不 push/merge、不清理旧 SDD。当前有刻意保留的未提交 RED 测试，不能 reset/clean/delete 掉。
+## 2. 验收证据（在 `e57f793`）
 
-## 2. 已完成，不要重复实施
+完整门禁 G，仓库根逐条执行，日志见 `.superpowers/sdd/2026-11-09-extension-loader-jiti-patch/a-g-*.log`：
 
-| 工作 | 提交 | 实施与独立审查结论 |
-|---|---|---|
-| 基线 mkdir 竞争修复 | `62c2720` | 仅 EEXIST 进入 fresh stat，保留目录安全检查；已审查接受 |
-| Task 1 配置与哈希 | `51bbf4c`、`acfdb35` | 完成；深层 JSON 异常归一化修复已限定复审接受 |
-| Task 2 声明式清点 | `2f8bf16`、`0a503e5`、`e4776e6` | 完成；5 个生产缺陷及异步 schema 崩溃回归补强已审查接受 |
-| Task 3 主路径加载器 | `fd5e158` | 部分实现，不是能力验收点 |
-| Task 3 I1 装载前错误边界 | `e7d937d` | 已限定复审：ADDRESSED，无新增阻断；**不解除 I2 阻塞** |
-| Tasks 4–6 | 无 | 未开始；Core 选择视图/执行资格、独立 binding 尚不存在 |
-
-精确依赖：Ajv **8.20.0**、tinyglobby **0.2.17**、jiti **2.7.0**，已精确锁定。没有直接 get-tsconfig 依赖；当前 jiti 包内嵌 4.14.0。
-
-## 3. 当前阻塞：CJS 传递依赖绕过宿主映射
-
-实际 fixture：TS 入口导入扩展自己的 `node_modules/cjs-dep/index.cjs`；该依赖 `require("@pisces/core")`，扩展目录另有一份不同的宿主包。其 `ToolDeniedError` 与真实宿主类不相等。
-
-已测结果：
-- 源码模式真实身份断言失败。
-- 无 Vitest resolver 的 dist 子进程输出 `{"host":false}`。
-- jiti 的 virtualModules 只拦截经过 jiti 的解析；原生 CJS require 绕过它。
-- `transformModules:["cjs-dep"]` 可以修正已知 `.js` 依赖，但实测仍无法修正 `.cjs` 依赖。不能靠枚举已知包名保证任意传递依赖图。
-
-**硬门槛未通过。** 不能仅文档披露第二份宿主包、降低 instanceof/身份断言、删除/跳过测试、修改 Node 全局加载器/cache 或猜测扫描整个依赖树来宣称通过。选型与补充设计审批、专项计划确认均已完成；当前执行正式 TDD/补丁安装与 dist 验证，随后交独立审查；验收未通过前不改产品边界。
-
-### 必须保留的未提交文件
-
-`packages/daemon/test/extensions-loader-cjs.test.ts`：本轮新增、未跟踪，含源码与 dist 两个正向身份断言，当前均 RED；不是用户的其他改动。不得 `.skip` / `.todo` / `.fails` 或移出测试集。
-
-```bash
-pnpm exec vitest run packages/daemon/test/extensions-loader-cjs.test.ts
-```
-
-预期当前结果：exit 1，2 个身份测试失败。文件已通过 tsc 和定点 Biome；子进程有 15 秒 SIGKILL 限时并等待 close，fixture 在 finally 清理。早期曾临时归档该用例，后已恢复；旧的 **825 通过 / 1 跳过**提交前结果没有包含它，不能当作硬门槛成功。
-
-## 4. 上次交接完整门禁（历史，非本轮候选测试）
-
-Controller 已在当前 HEAD、保留 RED 测试的工作树重新执行全部门禁：
-
-| 门禁 | 本轮结果 |
+| 命令 | 结果 |
 |---|---|
-| native build、两次 dist build | 全部 exit 0 |
-| 完整 Vitest | **exit 1：54 文件，1 失败 / 53 通过；2 failed / 825 passed / 1 skipped** |
-| 失败范围 | 仅上述 CJS 源码与 dist 身份断言；不是 collection/import 错误 |
-| tsc -p | exit 0 |
-| 只读 Biome | exit 0 |
-| Core / protocol 边界扫描 | exit 1 / 1，均符合“无匹配”预期 |
-| git diff --check | exit 0 |
+| `node packages/daemon/native/build.mjs` | 0 |
+| `pnpm exec tsc -b tsconfig.build.json` | 0 |
+| `pnpm exec vitest run` | 0 — **62 文件 / 925 通过 / 1 预存在 skip** |
+| `pnpm exec tsc -p tsconfig.json` | 0 |
+| `pnpm exec tsc -b tsconfig.build.json` | 0 |
+| `pnpm exec biome check .` | 0（144 文件） |
+| `rg ... packages/core/src` | 1（无匹配，符合预期） |
+| `rg ... packages/protocol/src` | 1（无匹配，符合预期） |
+| `git diff --check` | 0；工作树干净 |
 
-日志位于本地 SDD：`handoff-gate-summary.log`、`handoff-vitest.log` 及其他 `handoff-*.log`。这证明当前阻塞仍可复现，**不是 A 验收成功**。远端 CI 未运行。
+loader 聚焦矩阵（8 个 loader/引擎测试文件，66 用例）在验收 SHA 上实际执行：Node **22.19.0**、**24.11.0**、**26.13.0** 各 66 通过、exit 0，日志 `.superpowers/sdd/.../a-matrix-node{22,24,26}.log`（含 runtime 路径、版本、命令、exit）。
 
-本轮有 4 个已跟踪文档改动：本记录、计划索引、Plan A、设计状态页；另有上述 1 个未跟踪 RED 测试，均属本轮工作。它们保留为未提交改动：完整测试门禁有已知阻塞，故不擅自豁免“每次提交前全门禁”规则来制造收尾提交。没有暂存、push/merge，所有后台智能体均已结束。
+Task 3 专项证据（真实 dist 子进程、隔离冻结安装、缺补丁/坏补丁负控各自失败）：`.superpowers/sdd/2026-11-09-extensions-selection-a-foundations/task-3-jiti-patch-report.md` 与同目录 `task-3-jiti-patch-*.log`；补丁 provenance：[`patches/jiti-2.7.0.md`](../../../patches/jiti-2.7.0.md)。
 
-## 5. 接口和已记录裁定
+精确依赖：Ajv **8.20.0**、tinyglobby **0.2.17**、jiti **2.7.0**（pnpm `patchedDependencies` 精确固定，patch 文件 SHA-256 `128e860385ec4366a7945e5ca6b241357f652a920be95ab13af25bd1e2a794a1`）。无直接 get-tsconfig 依赖（jiti 内嵌 4.14.0）。
 
-现有 daemon `extensions/` 模块：`types.ts`、`hash.ts`、`config.ts`、`metadata.ts`、`discovery.ts`、`loader.ts`。公开的 binding/Extensions/Core 接口仍是后续计划契约，**尚未实现**，不要误读 Plan B 的接口表为现有代码。
+## 3. 已完成，不要重复实施
 
-恢复时保留以下裁定，细节见台账：
-- 未知顶层配置键及工作区 defaultWorkspace：固定安全 `config.unknown_key`；其他无效配置：`config.invalid`。
-- 深层 JSON 处理异常安全归一化，不新增任意深度限制或改变哈希配方。
-- 拒绝 Ajv 异步 schema，调用前隔离；崩溃用例已做移除 guard 的真实 mutation sensitivity，不能冒称原始 TDD RED。
-- wrapper schema 校验最终合并配置；允许用户补全 partial defaults。无用户覆盖时无效默认隔离条目；显式最终配置无效或目标不可用则 `config.invalid`。
-- 入口 canonical realpath 用于包内身份/去重/加载；logical path 用于相邻 sidecar 和名称，同目标按逻辑路径排序选代表。
-- 枚举错误以安全 issue 隔离最小来源，不阻断健康包。
-- 已实测 JSX 范围是 automatic runtime + 本地 pragma；**不支持仅靠 tsconfig jsx/ jsxImportSource 选择运行时**，不能宣称全量 TS compiler options 支持。
-- Task 6 预计需要最小扩宽 Core wrapper factory 类型到 `ToolWrapper | Promise<ToolWrapper>`；尚未改动，不能漏掉既有预检裁定。
+| 工作 | 提交 | 结论 |
+|---|---|---|
+| 基线 mkdir 竞争修复 | `62c2720` | EEXIST 后 fresh lstat，保留目录安全检查 |
+| Task 1 配置与哈希 | `51bbf4c`、`acfdb35` | 五键、层级合并、canonical SHA-256；深 JSON 异常安全归一化 |
+| Task 2 声明式清点 | `2f8bf16`、`0a503e5`、`e4776e6` | 同步 draft-07 校验、最终 defaults+override、canonical 身份/去重、冻结 |
+| Task 3 loader 主路径 + I1 | `fd5e158`、`e7d937d` | 惰性、摘要校验、每 loader promise 缓存含失败、安全错误边界 |
+| Task 3 jiti 局部补丁 | `6527e0f`、`e033032` | 实例模式、图私有 raw JSON、格式拒绝、标记 fail-closed；原 CJS 两个身份断言现为 GREEN |
+| Task 3 验收文档 | `66969ed` | 状态与延期 Minor 记账 |
+| Task 4 Core 纯选择/资格 | `a3faddc`、`41500e1` | 单一重放/XOR 引擎、§8.4 五类规则、legacy 模式不变 |
+| Task 5 A/C 重校验 + driver | `7b4e4a9` | `viewFor`/`validateQueue`、`executionSelection`、幸存窗口重算 |
+| Task 6 每会话 binding | `e8c0cd1`、`e57f793` | 每 prepare 独立 Tools/loader、惰性代理、冻结配置与来源副本 |
 
-## 6. 证据与未决事项
+## 4. A 实际公开接口（B 的最小契约）
 
-本地台账及全部日志：`.superpowers/sdd/2026-11-09-extensions-selection-a-foundations/`（git-ignored，必须保留）。
+以下均为**已存在代码**，不是计划契约。`extensions/` 模块**没有**从 `packages/daemon/src/index.ts` 再导出；按契约表从 `packages/daemon/src/extensions/extensions.js` 直接导入。
 
-优先读：`progress.md`、`task-3-report.md` 的 fix1/恢复测试段、`task-3-fix1-review.md`。阻塞日志：`task-3-cjs-red.log`、`task-3-fix1-i2-probe.log`；早期独立 review 的 Approved 结尾不能覆盖其两个 Important，最新限定复审明确 I2 OPEN/BLOCKED。
+- `createExtensions(options): Extensions`；`Extensions.readGlobalConfig(): Promise<ExtensionConfig>`；`Extensions.prepare(workspace): Promise<ExtensionBinding>`。
+- `ExtensionBinding` 恰为八个字段：`workspace`、`config`、`inventory`、`issues`、`entries`、`skills`、`sources`、`tools`。内部 records/loader 不外泄。
+- `ContextEntries`：`kind`、`selected`、`get`，外加可选纯同步 `matchesDefinition(definition)`（`ExtensionBinding` 总是提供）。
+- Core 导出的纯函数：`viewFor`/`validateQueue` 在 `Context` 上；`replaySelection`、`applyDeclarations`、`evaluateSelection`、`SelectionView`、`SelectionEvaluation`、`EffectiveEntry` 从 `packages/core/src/index.ts` 公开。
+- `AssembledContext.executionSelection?`；driver 使用 `assembled.executionSelection ?? assembled.selection`。
+- loader `ExtensionModule { default: unknown; config?: unknown }`、`ExtensionLoader.load(entry)` 为 daemon 内部实现，不在 B 契约内。
 
-后续 A 整体审查必须重看各任务延期 Minor，不能视为已修复：基线测试诊断/覆盖；Task1 稀疏数组及程序化非 JSON 输入、UTF-8/验证前提与证据边界；Task2 logical sidecar 越界别名、类型只读性、schema 正则风险和枚举诊断；Task3 虚拟模块继承键、tsconfig stat 吞错、额外宿主身份覆盖与 JSX 限制。完整逐项记录在台账及 `task-N-review.md`。
+### 4.1 必须知道的接口偏差（不要让 B 猜）
 
-## 7. 新会话恢复指令
+1. **不存在 `Context.effectiveFor`。** B 需自行组合 `evaluateSelection(await ctx.viewFor(nodeId), binding.entries)`；设计 §8.2 只是“建议”该查询。
+2. **`validateQueue(nodeId?)` 只校验未确认条目** 针对目标分支历史；已确认但未提交的冲突由 assemble C 段在不可逆写入前重校验。不得假设确认前已全覆盖。
+3. **`applyDeclarations(view, pending)` 返回的视图包含未确认定义**，只可用于校验，不得当作已持久化快照对外暴露（§8.2 的 `snapshot.effective` 必须来自 `replaySelection`）。
+4. **`prepare` 不校验** `config.extensions` 成员/重复、`defaultProvider/Model` 组合，也不验证 workspace 是否为目录（`realpath` 对文件成功，随后扩展目录读作空）。这些属于 B Task 8；`config.invalid` 同时用于“工作区不可访问”。
+5. **strict 资格规则只在 `entries.matchesDefinition` 存在时生效**（`ExtensionBinding` 恒有），旧嵌入式/手动注入路径保持原语义。
+6. **`binding.tools` 是完整 `Tools`，带注册/变更方法**（计划强制）。B Task 7 只能读 `selected`/`invoke`，不得注册、替换或 `forInventory`，否则会破坏冻结保证。
+7. **同名跨 workspace** 各自独立实现；不同 prepare 之间不共享模块身份或 promise 缓存（同 workspace 新 binding 会重新求值一次，含失败）。
 
-> 读取本交接、最新选型报告、Plan A 和本地 progress.md；核对 HEAD、分支、未提交文件归属，保留 extensions-loader-cjs.test.ts。Tasks 1/2 已完成，不重派。用户已批准 jiti 补丁设计并确认专项计划，不重做选型/设计；以 deepseek-flash SDD 继续 Task3，不能把临时绿结果当作产品验收。额外未提交研究报告属于本轮；不直接执行 Tasks 4–6，更不能进入 B。所有子智能体 deepseek-flash；不依赖旧对话。
+## 5. 残余风险与边界（B 必须继承）
 
-只有 Task3 硬门槛、Tasks4–6、A 整体审查和最终完整门禁均完成，才可填写 A 验收 SHA 并将本记录改为 READY；之后仍需 B 的实施授权。
+- 扩展 `source` 只能由宿主产生：strict 模式只把**分支内**内容节点当作 §8.4 证据，`applyDeclarations` 看不到队列来源证据；若 B 允许客户端选择 `source`，会打开同名重义漏洞。
+- loader **不是沙箱**：显式 `createRequire`、`process.getBuiltinModule`、`data:` URL 等原生逃逸不在身份隔离承诺内；扩展入口依赖的 `.node`/未知格式在模式内拒绝，但宿主自身 N-API 不受影响。
+- 仅入口字节按摘要冻结，不冻结依赖树、不提供热重载/依赖重放。
+- JSX 仅支持 automatic runtime + 扩展自带 runtime/pragma；**不支持**仅靠 tsconfig `jsx`/`jsxImportSource`。
+- 仓库新增 `.gitattributes`：`patches/*.patch whitespace=-blank-at-eol`，仅豁免生成补丁内的 vendored 上游空白，源码/测试仍全量检查。
+- 运行 `git status` 时注意 `.superpowers/sdd/` 为被忽略的本地证据区，不属于产品改动。
+
+## 6. 延期 Minor 处置（A 整体审查已分类）
+
+**READY 前已关闭：** handoff 重写（本文件）、验收 SHA 三运行时矩阵补录。
+
+**移交 B / 文档任务：**
+- `validateQueue` 未确认范围与 `applyDeclarations` 含未确认定义：必须写入 B 的 Task 8/9 契约（见 §4.1）。
+- adapter 级 bare builtin 正控标签不准（`node:fs` 用了两次）；引擎级 bare `fs` 已覆盖。
+- `data:` URL 需在补丁边界文档补一句。
+- `binding.tools` 只读规则需在 Task 7 审查中把门。
+- binding 测试中 tool 与 wrapper 共用一个 sentinel 日志，弱化单产物加载计数证据。
+- issue `source` 在重复/根故障时使用条目名或目录标签而非包名（分类学瑕疵）。
+
+**接受现状（不修）：** `compareNames` 冗余、`frozenDefinition` 防御分支与文案差异、legacy 分类重复、`isContentNode` 非类型谓词、ad-hoc kind 联合、无 matchesDefinition 短路测试、`source_failed` 两处构造、materialize 双重投影、重复 definition map、两个重放入口、type-only 循环导入、`validateQueue`/`viewFor` 无 spy 测试、`task-5-focused-vitest.log` 标签错误、Tools 变更方法暴露、`info.definition?.parameters ?? {}` 死防御、inventory/records 双份结构等价定义、未冻结 binding 字面量、缺 binding 级 `readGlobalConfig` 测试、空 `{}` 导出在无 sidecar defaults 时被接受。
+
+## 7. B 启动条件（严格）
+
+1. 用户**单独**授权 Plan B；本文件 READY 不等于授权。
+2. 先核对 `dev-pi` 上是否存在 `e57f793` 及其后的文档提交，工作树归属清楚。
+3. 按 Plan B 的接口表逐项对照 §4；任何不符立即暂停并修正契约，不得口头交接。
+4. 每次提交前运行共同门禁 G；显式暂存；不跳过跨 UID 真实 socket 验收（无法建立异 UID 宿主时必须失败而非跳过）。
