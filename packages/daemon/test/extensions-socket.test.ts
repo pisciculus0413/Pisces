@@ -686,7 +686,7 @@ test("edits and removes queue entries, locks confirmed ones and isolates subscri
 }, async () => {
   const root = await tempRoot();
   const workspace = await workspaceDir(root, "ws");
-  await installDemo(workspace, root);
+  const paths = await installDemo(workspace, root);
   await writeWorkspaceConfig(workspace, { defaultProvider: "p", defaultModel: "m" });
   const configDir = join(root, "config");
   const gateFirst = gate();
@@ -732,6 +732,9 @@ test("edits and removes queue entries, locks confirmed ones and isolates subscri
   expect(steered.mode).toBe("steer");
   const confirmedQueue = (await readSession(client, first.id)).queue;
   expect(confirmedQueue.filter((entry) => entry.confirmedAt !== undefined)).toHaveLength(2);
+  // Confirming the declaration through steer never imports the selected tool or wrapper.
+  expect(await exists(paths.toolImport)).toBe(false);
+  expect(await exists(paths.wrapperImport)).toBe(false);
   const locked = await client.request("queue.edit", {
     sessionId: first.id,
     id: declaration.ids[0],
@@ -833,7 +836,10 @@ test("filters deselected content, reuses reviewed bodies and retries a zero-frag
     (event) =>
       event.event === "turn.ended" && (event.data as { sessionId: string }).sessionId === second.id,
   );
-  expect(ended).toBeDefined();
+  expect(ended?.data).toMatchObject({
+    reason: "failed",
+    error: { code: "turn.empty", message: "Context has no visible messages" },
+  });
   await writeText(paths.emptyFlag, "ready\n");
   await startTurn(client, second.id);
   await turnIdle(client);
@@ -1364,6 +1370,7 @@ test("rejects a real cross-UID client before it reads any protocol byte", {
   await chmod(paths.runDir, 0o755);
   await chmod(paths.socketPath, 0o666);
   expect((await lstat(paths.socketPath)).mode & 0o777).toBe(0o666);
+  const socketIdentity = await lstat(paths.socketPath);
 
   const payload = `${JSON.stringify({
     id: "foreign",
@@ -1393,7 +1400,10 @@ test("rejects a real cross-UID client before it reads any protocol byte", {
   } finally {
     await foreign.reap();
   }
-  expect(await lstat(paths.socketPath)).toBeDefined();
+  const socketAfter = await lstat(paths.socketPath);
+  // The refused peer must not have replaced or unlinked the daemon's socket.
+  expect(socketAfter.ino).toBe(socketIdentity.ino);
+  expect(socketAfter.mode & 0o777).toBe(0o666);
 });
 
 test("stops cleanly and shows a stale definition until the entry is reselected", {

@@ -75,14 +75,14 @@ await host.stop();
 - host 用同一个 `dataDir` 构造 `SessionStore`、`ActiveTurnStore`、`EventBus`、`Concurrency`、
   `Gateway` 与监听器；公开 API 不接受外部 store/marker 注入，避免锁路径与存储路径不一致。
 - `extensions` 只接受目录配置 `{ configDir, builtinDir? }`，不接受 `Extensions` 服务实例；
-  它在 lock 获取后、native 自检与绑定之前构造。与 `defaults`、`createTools`、`entries`、`skills`、
+  它在 lock 获取与原生自检之后、`bootstrapGateway` 之前构造。与 `defaults`、`createTools`、`entries`、`skills`、
   `sources` 任一同时出现即 `daemon.start_failed`，走既有失败清理（释放锁、不 unlink 存活 socket）。
   `builtinDir` 缺省由 daemon 模块 URL 推导到 `<repo>/extensions/builtin`，与进程工作目录无关。
 - 当前已路由的扩展相关方法：`session.create`（可带 `extensions` 数组）、`entries.snapshot`、
   `queue.enqueue/edit/remove/clear`、`turn.start`（含 steer）。`session.list`、`template.*`、
   `client.*` 仍未路由（`protocol.unknown_method`）。扩展契约见 `docs/extensions.md`。
 - 启动顺序：平台与 `getuid() === geteuid()` 检查 → 私有运行目录 → `run/pisces.lock` 的
-  `flock` → 互斥检查 → 原生 peer 凭据自检 → 陈旧 socket 处理 → `bootstrapGateway`（存储初始化与 turn 恢复）
+  `flock` → 互斥检查 → 原生 peer 凭据自检 → 陈旧 socket 处理 → 构造扩展服务 → `bootstrapGateway`（存储初始化与 turn 恢复）
   → 绑定并校验 `pisces.sock` → 接受连接。任何一步失败都按逆序关闭已获取资源，并保留锁文件本身。
 - 单实例由锁保证：第二个进程以 `daemon.lock_busy` 失败，且不会删除存活实例的 socket。
 

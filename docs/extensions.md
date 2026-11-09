@@ -12,7 +12,7 @@
 
 | 来源 | 路径 |
 |---|---|
-| 内置 | `<daemon 模块目录>/extensions/builtin`（默认由 daemon 模块 URL 推导，不从工作目录推导） |
+| 内置 | `<repo>/extensions/builtin`（由 daemon 模块 URL 向上推导到仓库根，与进程工作目录无关） |
 | 软件配置目录 | `<configDir>/extensions/` |
 | 工作区 | `<workspace>/.pisces/extensions/` |
 
@@ -217,7 +217,7 @@ demo/
 
 ## 7. stale 与重启
 
-- 每个会话在创建（或重启后首次加载）时冻结自己的绑定；进程存活期间不重新扫描。
+- 每个会话在创建（或重启后首次加载）时冻结自己的绑定；已有会话的绑定不重建，新建会话会重新扫描。
 - `SessionMeta`/`schemaVersion` 不含选择或清点；已审查定义只存在于持久化的 declaration 节点中。
 - 扩展代码、sidecar 或 `entryConfig` 改变后：
 
@@ -227,7 +227,7 @@ demo/
 | 旧会话、仅包装器 `configHash` 变化 | 同上，`stale = true` |
 | 旧会话、内容条目（技能/上下文） | 复用历史节点正文，不重新清点、不重新导入 |
 | 新会话 | 使用新清点 |
-| 旧会话重新选择（关闭再打开同一名称） | 写入当前冻结定义，`stale` 恢复为 `false` |
+| 旧会话重新选择（关闭再打开同一名称） | 用该会话绑定中的定义重新声明，`stale` 视绑定与当前清点是否一致而定 |
 
 - 重新选择必须显式发送声明；daemon 不会在重启时偷偷覆盖已审查定义，也不会自动重放工具调用。
 - 旧定义哈希原本可能来自更早版本，无法匹配时只显示 stale。
@@ -382,7 +382,7 @@ await host.stop();
 - **CLI**：没有 `extensions list/install/enable`、`run`、`config` 等命令；安装与更新由 npm/git
   完成，配置由用户直接编辑 JSON。
 - **沙箱**：扩展代码与工具以 daemon 用户权限运行，没有进程/文件系统隔离。
-- **热重载**：进程存活期间不重新发现、不重建绑定、不重载模块；改变扩展后需新会话或重启 daemon。
+- **热重载**：已有会话的绑定不重建、已装载模块不重载；进程存活期间新建会话仍会重新发现并冻结新定义，而仍存活的已固化会话只显示 `stale`。改变扩展后不需要重启进程，但已有会话不会自动刷新。
 - **依赖树锁定**：只哈希条目文件本身（`definitionHash`）与合并后的包装器配置
   （`configHash`），不哈希被导入的依赖；修改扩展的依赖不会让旧定义变 stale。
 - **技能/上下文历史清理**：已写入的历史正文只按选择过滤，不会被删除或重新固化为新版本。
@@ -396,8 +396,7 @@ await host.stop();
 断线不取消 turn、取消不回滚已提交节点、超限快照后连接可用、协议转录不含配置/路径/原因/源码，
 以及真实跨 UID 拒绝与停机/重启 stale 可见性。
 
-- 本机结果：该文件 11 个用例全部通过（见
-  `.superpowers/sdd/2026-11-09-extensions-selection-b-integration/task-11-green.log`）。
+- 本机结果：该文件 11 个用例全部通过（`pnpm exec vitest run packages/daemon/test/extensions-socket.test.ts`）。
 - 平台：Linux x86_64，Node v26.13.0，pnpm 12.8.1。
 - 跨 UID 回归使用 `unshare --map-auto` + `packages/daemon/test/fixtures/cross-uid-client.mjs`；
   缺少 subordinate-ID 映射时该用例**失败**而不是跳过。
