@@ -2026,28 +2026,35 @@ interface ClientRegistry {
 
 CLI 生命周期约定（已实现）：
 
-- 退出码：`0` 成功，`1` 运行时失败（已在运行、未知属主、启动失败、停止超时、socket 无属主），`2`
-  用法或配置错误（用法错误、`config.invalid`、`config.missing_api_key`、`daemon.insecure_directory`、
-  pid 文件写入失败）。
-- 用户可见输出只有固定码与固定消息：`config.invalid`、`config.missing_api_key`、
+- 退出码：`0` 成功，`1` 运行时失败（已在运行、未知属主、启动失败、停止超时、socket 无属主、
+  pid 文件写入或清除失败），`2` 用法或配置错误（用法错误、`config.invalid`、
+  `config.missing_api_key`、`daemon.insecure_directory`）。
+- 用户可见输出只有固定码与固定消息：`config.invalid`（`Invalid configuration`）、
+  `config.missing_api_key`（`Missing API key environment variable`）、
   `daemon.already_running`、`daemon.unknown_owner`、`daemon.start_failed`、`daemon.stop_timeout`、
   `daemon.insecure_directory`、`daemon.unmanaged`、`storage.io`；`start` 失败额外打印
   `log: <dataDir>/daemon.log`。不打印密钥、环境变量名、配置值或原始错误。
 - 文件位置与权限：`<dataDir>/daemon.pid`（`0600`，单条 JSON `{pid, socketPath, startedAt}`，以
   `open(..., "wx", 0o600)` 独占创建）、`<dataDir>/daemon.log`（`0600`，子进程 stdout/stderr）、
   `<dataDir>/run/pisces.sock` 与 `<dataDir>/run/pisces.lock`（`0600`，由 daemon 维护）。
-  `dataDir` 必须是当前 uid 拥有、无 group/world 写位的绝对路径，CLI 以 `0700` 创建。
+  `dataDir` 策略（绝对路径、当前 uid 拥有、无 group/world 写位、`0700` 创建）**只由 `start` 执行**；
+  `status`/`stop` 不校验该策略，只读 pid 记录并探测由 dataDir 推导的 socket。
 - `start`：一个 10 s 墙钟预算覆盖预检探测与就绪轮询；轮询 50 ms，要求子进程存活、pid 记录仍指向
-  该子进程、且本 dataDir 的 socket 握手成功。失败时 SIGTERM 自己的子进程、仅在记录仍指向它时删除
-  记录。并发启动靠独占 pid 记录选出唯一赢家，输家不改写、不清理赢家的记录。
+  该子进程、且由 dataDir 推导的 socket 握手成功。子进程句柄携带 `'error'` 监听，libuv 启动失败
+  （EAGAIN/EMFILE/ENOMEM）只表现为 `daemon.start_failed`，不崩溃、不打印原始错误。失败时 SIGTERM
+  自己的子进程、仅在记录仍指向它时删除记录。并发启动靠独占 pid 记录选出唯一赢家，输家不改写、
+  不清理赢家的记录。
 - 陈旧/损坏 pid 文件：记录中的进程已退出时 `status` 报 `stopped (stale pid file)`（`1`）并删除，
   `stop` 报 `not running`（`0`）并删除，`start` 回收后启动；文件内容不可解析时视为无属主记录，
   `status`/`stop` 按未运行处理，`start` 在确认本 dataDir 的 socket 不应答后清除它。
-- `daemon.unknown_owner` 恢复：记录中的 pid 存活但 socket 不应答时，`start`/`stop` 都退出 `1`，
-  **不发送任何信号**并保留记录（防止 PID 复用误杀）。必须先 `ps -p <pid>` 确认该进程身份；是本
+- `daemon.unknown_owner` 恢复：记录中的 pid 存活但由 dataDir 推导的 socket 不应答（或记录中的
+  `socketPath` 与推导路径不一致）时，`start`/`status`/`stop` 都退出 `1`，**不发送任何信号**并保留
+  记录（防止 PID 复用误杀）。身份只由推导路径证明，记录里的 `socketPath` 仅作诊断，`status`/
+  `stop` 的输出与 `status --json` 也只输出推导路径。必须先 `ps -p <pid>` 确认该进程身份；是本
   dataDir 的 daemon 才可人工 SIGTERM，否则只删除 `daemon.pid`。详见 `docs/cli.md` §7。
-- `stop` 先握手再发信号，握手失败不调用 `kill`；`stop` 超时保留记录并以 `daemon.stop_timeout` 退出
-  `1`；无记录但 socket 应答时报 `daemon.unmanaged`（`1`），同样不发送信号。
+- `stop` 先握手再发信号，握手失败不调用 `kill`；`stop` 输出 `stopped (pid N, socket S)`，其中 `S`
+  是推导路径；`stop` 超时保留记录并以 `daemon.stop_timeout` 退出 `1`；无记录但 socket 应答时报
+  `daemon.unmanaged`（`1`），同样不发送信号。
 
 ## 8 非功能设计、错误与可测试性
 

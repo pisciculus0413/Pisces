@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,9 +9,11 @@ import {
   type ChildHandle,
   type CommandDeps,
   type CommandIo,
+  type SpawnedChild,
   startCommand,
   statusCommand,
   stopCommand,
+  wrapChild,
 } from "../src/commands.js";
 import { readPidRecord, socketPathFor } from "../src/lifecycle.js";
 
@@ -413,7 +416,7 @@ test("start reports a missing api key without spawning", async () => {
   const code = await startCommand({ configPath, io: rec.io }, fakeDeps());
 
   expect(code).toBe(2);
-  expect(rec.err.join("\n")).toContain("config.missing_api_key");
+  expect(rec.err).toEqual(["error: config.missing_api_key: Missing API key environment variable"]);
   expect(rec.err.join("\n")).not.toContain(ABSENT_KEY_ENV);
   expect(rec.err.join("\n")).not.toContain(SECRET);
 });
@@ -602,7 +605,7 @@ test("stop signals a responsive daemon and waits for it to exit", async () => {
   expect(code).toBe(0);
   expect(signals).toEqual([{ pid: 1111, signal: "SIGTERM" }]);
   expect(waits).toEqual([10_000]);
-  expect(rec.out).toEqual(["stopped (pid 1111)"]);
+  expect(rec.out).toEqual([`stopped (pid 1111, socket ${socketPathFor(dataDir)})`]);
   expect(await readPidRecord(dataDir)).toBeUndefined();
 });
 
@@ -649,4 +652,172 @@ test("stop keeps the record when the daemon does not exit in time", async () => 
   expect(code).toBe(1);
   expect(rec.err.join("\n")).toContain("daemon.stop_timeout");
   expect((await readPidRecord(dataDir))?.pid).toBe(1111);
+});
+
+test("stop prints the derived socket path", async () => {
+  const { dataDir, configPath } = await fixture();
+  await mkdir(dataDir, { mode: 0o700 });
+  writeRecord(dataDir, 1111);
+  const rec = recorder();
+
+  const code = await stopCommand(
+    { configPath, io: rec.io },
+    fakeDeps({ isAlive: () => true, probe: async () => true, waitForExit: async () => true }),
+  );
+
+  expect(code).toBe(0);
+  expect(rec.out).toEqual([`stopped (pid 1111, socket ${socketPathFor(dataDir)})`]);
+});
+
+test("status and stop never trust the record's socketPath", async () => {
+  const { dataDir, configPath } = await fixture();
+  await mkdir(dataDir, { mode: 0o700 });
+  const foreign = join(dataDir, "elsewhere", "other.sock");
+  writeRecord(dataDir, 1111, foreign);
+
+  const probes: string[] = [];
+  const signals: NodeJS.Signals[] = [];
+  const deps = fakeDeps({
+    isAlive: () => true,
+    // Only the foreign path answers; the derived socket is dead.
+    probe: async (socketPath) => {
+      probes.push(socketPath);
+      return socketPath === foreign;
+    },
+    signal: (_pid, signal) => {
+      signals.push(signal);
+    },
+  });
+
+  const status = recorder();
+  expect(await statusCommand({ configPath, io: status.io }, deps)).toBe(1);
+  expect(status.err).toEqual([
+    "error: daemon.unknown_owner: A process owns the runtime but did not answer; check manually",
+  ]);
+  expect(status.out).toEqual([]);
+
+  const json = recorder();
+  expect(await statusCommand({ configPath, json: true, io: json.io }, deps)).toBe(1);
+  expect(json.out).toEqual([]);
+  expect(json.err.join("\n")).toContain("daemon.unknown_owner");
+
+  const stop = recorder();
+  expect(await stopCommand({ configPath, io: stop.io }, deps)).toBe(1);
+  expect(stop.err.join("\n")).toContain("daemon.unknown_owner");
+  expect(signals).toEqual([]);
+  expect(probes).toEqual([]);
+  expect((await readPidRecord(dataDir))?.socketPath).toBe(foreign);
+});
+
+test("stop probes the socket derived from the data directory", async () => {
+  const { dataDir, configPath } = await fixture();
+  await mkdir(dataDir, { mode: 0o700 });
+  writeRecord(dataDir, 1111);
+  const probes: string[] = [];
+  const rec = recorder();
+
+  const code = await stopCommand(
+    { configPath, io: rec.io },
+    fakeDeps({
+      isAlive: () => true,
+      probe: async (socketPath) => {
+        probes.push(socketPath);
+        return true;
+      },
+      waitForExit: async () => true,
+    }),
+  );
+
+  expect(code).toBe(0);
+  expect(probes).toEqual([socketPathFor(dataDir)]);
+});
+
+test("start reports a pid-record write failure as a runtime failure", async () => {
+  const { dataDir, configPath } = await fixture();
+  // Read-only data directory: the record cannot be created.
+  await mkdir(dataDir, { mode: 0o500 });
+  const child = fakeChild();
+  const rec = recorder();
+
+  const code = await startCommand(
+    { configPath, io: rec.io },
+    fakeDeps({ spawnChild: () => child, isAlive: () => true, waitForExit: async () => true }),
+  );
+
+  expect(code).toBe(1);
+  expect(rec.err).toEqual(["error: storage.io: Daemon pid file could not be written"]);
+  expect(child.signals).toEqual(["SIGTERM"]);
+  expect(child.unrefs).toBe(1);
+
+  await rm(dataDir, { recursive: true, force: true });
+});
+
+test("start reports a pid-record cleanup failure as a runtime failure", async () => {
+  const { dataDir, configPath } = await fixture();
+  await mkdir(dataDir, { mode: 0o700 });
+  // An unremovable pid "file": unlink on a directory fails.
+  await mkdir(join(dataDir, "daemon.pid"));
+  const deps = fakeDeps();
+  const spawn = vi.spyOn(deps, "spawnChild");
+  const rec = recorder();
+
+  const code = await startCommand({ configPath, io: rec.io }, deps);
+
+  expect(code).toBe(1);
+  expect(rec.err).toEqual(["error: storage.io: Daemon pid file could not be written"]);
+  expect(spawn).not.toHaveBeenCalled();
+});
+
+interface FakeSpawned extends EventEmitter {
+  exitCode: number | null;
+  kills: NodeJS.Signals[];
+  unrefs: number;
+}
+
+function fakeSpawned(): FakeSpawned {
+  const spawned = Object.assign(new EventEmitter(), {
+    exitCode: null as number | null,
+    kills: [] as NodeJS.Signals[],
+    unrefs: 0,
+    kill(signal: NodeJS.Signals): boolean {
+      spawned.kills.push(signal);
+      return true;
+    },
+    unref(): void {
+      spawned.unrefs += 1;
+    },
+  });
+  return spawned;
+}
+
+test("a spawn error marks the wrapped child as exited instead of crashing", () => {
+  const spawned = fakeSpawned();
+  const handle = wrapChild(spawned as unknown as SpawnedChild, 4242);
+
+  expect(handle.pid).toBe(4242);
+  expect(handle.exitCode).toBeNull();
+
+  expect(() => spawned.emit("error", new Error("EMFILE: too many open files"))).not.toThrow();
+  expect(handle.exitCode).not.toBeNull();
+});
+
+test("a child exit marks the wrapped handle as exited", () => {
+  const spawned = fakeSpawned();
+  const handle = wrapChild(spawned as unknown as SpawnedChild, 4242);
+
+  spawned.exitCode = 0;
+  spawned.emit("exit", 0, null);
+
+  expect(handle.exitCode).toBe(0);
+});
+
+test("the wrapped handle forwards kill and unref", () => {
+  const spawned = fakeSpawned();
+  const handle = wrapChild(spawned as unknown as SpawnedChild, 4242);
+
+  handle.kill("SIGTERM");
+  handle.unref();
+
+  expect(spawned.kills).toEqual(["SIGTERM"]);
+  expect(spawned.unrefs).toBe(1);
 });

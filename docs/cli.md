@@ -91,7 +91,7 @@ OpenAI 兼容示例：
 ## 4. 凭据：只来自环境变量
 
 - `start` 会逐个检查配置中每个 provider 的 `apiKeyEnv` 在当前环境中非空；缺任何一个就
-  `error: config.missing_api_key: An API key is missing from the environment`，退出 2，且不启动、
+  `error: config.missing_api_key: Missing API key environment variable`，退出 2，且不启动、
   不打印变量名。
 - 密钥只在运行时从环境读取，交给后台 daemon 进程；不写入配置、argv、pid 文件、日志或
   `status --json`。后台进程继承 `start` 的完整环境。
@@ -146,6 +146,9 @@ $ pisces status --json
 | 进程存活但 socket 不应答 | `unresponsive (pid N)`，保留记录 | `unresponsive` | 1 |
 | socket 应答但无 pid 记录 | `unmanaged (socket S)` | `unmanaged` | 1 |
 
+`status` 里的 `S` 与 JSON 的 `socketPath` 始终是由 dataDir 推导的 `<dataDir>/run/pisces.sock`；
+pid 记录里的 `socketPath` 与它不一致时，按 `daemon.unknown_owner` 退出 1，不删记录。
+
 JSON 只含 `state`、`pid`（仅进程存活的记录）、`socketPath`、`dataDir`；不含密钥、变量名或 provider
 配置。
 
@@ -153,7 +156,7 @@ JSON 只含 `state`、`pid`（仅进程存活的记录）、`socketPath`、`data
 
 ```console
 $ pisces stop
-stopped (pid 187181)
+stopped (pid 187181, socket /home/me/.local/state/pisces/run/pisces.sock)
 $ echo $?
 0
 $ pisces stop
@@ -162,13 +165,15 @@ $ echo $?
 0
 ```
 
-`stop` 只在同一个 pid 仍存活、且本 dataDir 的 socket 完成握手后，才向该 pid 发送 `SIGTERM`；随后
-最多等待 10 s 退出，成功才删除 pid 记录。已停止时重复 `stop` 是幂等的，退出 0。
+`stop` 只在同一个 pid 仍存活、且由本 dataDir 推导出的 socket（`<dataDir>/run/pisces.sock`）完成
+握手后，才向该 pid 发送 `SIGTERM`；随后最多等待 10 s 退出，成功才删除 pid 记录。pid 记录里
+写的 `socketPath` 与推导路径不一致时，按未知属主处理（退出 1，不发信号，保留文件）。已停止时重复
+`stop` 是幂等的，退出 0。
 
 | 命令 | 退出码 |
 |---|---|
 | 全部命令成功 | 0 |
-| 已在运行 / 未知属主 / 启动失败 / 停止超时 / socket 无属主 | 1 |
+| 已在运行 / 未知属主 / 启动失败 / 停止超时 / socket 无属主 / pid 记录写入或清除失败 | 1 |
 | 用法错误、配置不合法、缺少密钥、数据目录不可用 | 2 |
 
 选项：
@@ -194,8 +199,14 @@ $ echo $?
 | `<dataDir>/sessions/` | 会话记录（由 daemon 维护） | 目录 |
 | `<configDir>/pisces/config.json` | 本文件所述的配置 | 用户自定 |
 
-- `dataDir` 必须存在或可创建、属于当前有效 uid、且不带 group/world 写位；CLI 以 `0700` 创建。
-  不满足时 `error: daemon.insecure_directory: Data directory is not private`，退出 2。
+- **只有 `start` 会创建并校验 `dataDir` 策略**：路径必须是绝对路径（`--data-dir` 相对路径直接
+  以 `daemon.insecure_directory` 退出 2）、存在或可创建、属于当前有效 uid、且不带 group/world
+  写位；`start` 以 `0700` 创建。不满足时 `error: daemon.insecure_directory: Data directory is not
+  private`，退出 2。
+- `status`/`stop` **不**校验该策略：它们只读 `<dataDir>/daemon.pid`，并探测由 dataDir 推导的
+  `<dataDir>/run/pisces.sock`；目录不安全只会表现为探测失败（`unresponsive`/`unknown_owner`）。
+- `daemon.pid` 写入或清除失败时打印 `error: storage.io: Daemon pid file could not be written`，
+  退出 1（运行时失败）。
 - `daemon.log` 会记录 socket 路径与错误码，不会记录密钥。
 - `stop` 后 `daemon.pid` 被删除；`run/` 与 `sessions/` 目录保留。
 
@@ -205,8 +216,10 @@ $ echo $?
   记录；`stop` 打印 `not running`（退出 0）并删除记录；`start` 直接回收该记录后启动。
 - **pid 文件内容损坏**：视为无属主记录。`status`/`stop` 按未运行处理；`start` 在确认本 dataDir 的
   socket 不应答后清除该文件并正常启动。
-- **`daemon.unknown_owner`**（进程存活、但 socket 不应答）：`start` 与 `stop` 都退出 1，**保留**
-  pid 记录、不发送任何信号（防止 PID 复用误杀）。恢复步骤：
+- **`daemon.unknown_owner`**（进程存活、但本 dataDir 推导的 socket 不应答，或者记录里的
+  `socketPath` 与推导路径不一致）：`start`、`status` 与 `stop` 都退出 1，**保留** pid 记录、不发送任何
+  信号（防止 PID 复用误杀）。`start`/`status`/`stop` 只信任推导路径，记录里的 `socketPath` 仅作诊断
+  参考（`status --json` 也输出推导路径）。恢复步骤：
   1. `ps -p <记录中的 pid> -o pid,cmd` 查看该进程是什么；
   2. 若确实是本 dataDir 的 `daemon-child.js`，可自行 `kill -TERM <pid>`，再 `pisces stop` 或
      `pisces start`；若进程异常，必要时 `kill -KILL` 后删除 `daemon.pid`；
@@ -258,7 +271,9 @@ daemon，覆盖：
 - `daemon.log` 存在且不含密钥值；
 - `stop` 退出 0 后记录消失、socket 不再应答、子进程不再存活；重复 `stop` 退出 0；
 - 手写死亡 pid 记录被 `status`/`stop` 清理；
-- 手写“存活但不应答”的记录使 `stop` 退出 1 且保留文件；
+- 手写“存活但不应答”的记录（socket 路径为推导路径但无人监听）使 `stop` 退出 1 且保留文件；
+- 手写记录指向另一个**确实应答**的 socket（pid 仍存活）时，`stop` 退出 1、保留文件、不杀该进程，
+  外部 socket 仍然应答；
 - 两个并发 `start` 恰好一个退出 0、另一个退出 1，只留一个 pid 记录，应答的 daemon 唯一。
 
 运行方式（先构建原生插件与 dist）：

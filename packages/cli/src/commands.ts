@@ -40,7 +40,7 @@ const CHILD_ENTRY = fileURLToPath(new URL("./daemon-child.js", import.meta.url))
 
 const MESSAGES: Readonly<Record<string, string>> = {
   "config.invalid": "Invalid configuration",
-  "config.missing_api_key": "An API key is missing from the environment",
+  "config.missing_api_key": "Missing API key environment variable",
   "daemon.already_running": "A daemon is already running",
   "daemon.unknown_owner": "A process owns the runtime but did not answer; check manually",
   "daemon.start_failed": "Daemon could not start; see the log",
@@ -57,6 +57,47 @@ export interface ChildHandle {
   exitCode: number | null;
   kill(signal: NodeJS.Signals): void;
   unref(): void;
+}
+
+/** The slice of `ChildProcess` the wrapper needs, so tests can drive a fake handle. */
+export interface SpawnedChild {
+  readonly exitCode: number | null;
+  kill(signal: NodeJS.Signals): unknown;
+  unref(): void;
+  once(event: "error", listener: (error: Error) => void): unknown;
+  once(
+    event: "exit",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): unknown;
+}
+
+/**
+ * Wraps a spawned child so a libuv `'error'` (EAGAIN/EMFILE/ENOMEM and friends)
+ * can never crash the CLI with an unhandled event: the first `'error'` or
+ * `'exit'` marks the handle as exited, so `waitForReady` fails fast with
+ * `daemon.start_failed` instead of burning the start budget. The raw error is
+ * never printed.
+ */
+export function wrapChild(spawned: SpawnedChild, pid: number): ChildHandle {
+  let exited = false;
+  const markExited = (): void => {
+    exited = true;
+  };
+  spawned.once("error", markExited);
+  spawned.once("exit", markExited);
+
+  return {
+    pid,
+    get exitCode() {
+      return exited ? (spawned.exitCode ?? -1) : spawned.exitCode;
+    },
+    kill(signal) {
+      spawned.kill(signal);
+    },
+    unref() {
+      spawned.unref();
+    },
+  };
 }
 
 export interface CommandDeps {
@@ -237,7 +278,7 @@ export async function startCommand(
       await clearPidRecord(dataDir);
     } catch {
       fail(io, "storage.io");
-      return 2;
+      return 1;
     }
   }
 
@@ -266,7 +307,7 @@ export async function startCommand(
   } catch {
     await abortChild(child, deps);
     fail(io, "storage.io");
-    return 2;
+    return 1;
   }
 
   if (!created) {
@@ -297,13 +338,20 @@ export async function statusCommand(
   if (resolved === undefined) return 2;
 
   const { dataDir } = resolved;
+  // Identity is always this dataDir's socket; a record naming any other path
+  // proves nothing about who owns the runtime.
+  const socketPath = socketPathFor(dataDir);
   const record = await readPidRecord(dataDir);
-  const socketPath = record?.socketPath ?? socketPathFor(dataDir);
 
   let state: StatusState;
   let code: number;
   let pid: number | undefined;
   let line: string;
+
+  if (record !== undefined && record.socketPath !== socketPath) {
+    fail(io, "daemon.unknown_owner");
+    return 1;
+  }
 
   if (record === undefined) {
     state = (await deps.probe(socketPath)) ? "unmanaged" : "stopped";
@@ -344,15 +392,23 @@ export async function stopCommand(
   if (resolved === undefined) return 2;
 
   const { dataDir } = resolved;
+  const socketPath = socketPathFor(dataDir);
   const record = await readPidRecord(dataDir);
 
   if (record === undefined) {
-    if (await deps.probe(socketPathFor(dataDir))) {
+    if (await deps.probe(socketPath)) {
       fail(io, "daemon.unmanaged");
       return 1;
     }
     io.out("not running");
     return 0;
+  }
+
+  // A record pointing at another socket names an owner this CLI cannot prove;
+  // never signal it and never remove the file.
+  if (record.socketPath !== socketPath) {
+    fail(io, "daemon.unknown_owner");
+    return 1;
   }
 
   if (!deps.isAlive(record.pid)) {
@@ -362,7 +418,7 @@ export async function stopCommand(
   }
 
   // Never signal a pid until this dataDir's socket proves it is our daemon.
-  if (!(await deps.probe(record.socketPath))) {
+  if (!(await deps.probe(socketPath))) {
     fail(io, "daemon.unknown_owner");
     return 1;
   }
@@ -379,7 +435,7 @@ export async function stopCommand(
   }
 
   await discardRecord(dataDir, record.pid);
-  io.out(`stopped (pid ${record.pid})`);
+  io.out(`stopped (pid ${record.pid}, socket ${socketPath})`);
   return 0;
 }
 
@@ -404,18 +460,9 @@ export const productionDeps: CommandDeps = {
         throw new PiscesError("daemon.start_failed", "Daemon could not start; see the log");
       }
       const pid = spawned.pid;
-      return {
-        pid,
-        get exitCode() {
-          return spawned.exitCode;
-        },
-        kill(signal) {
-          spawned.kill(signal);
-        },
-        unref() {
-          spawned.unref();
-        },
-      };
+      // The wrapper owns the `'error'` listener, so a failed spawn is a fast
+      // `daemon.start_failed` rather than an unhandled-event crash.
+      return wrapChild(spawned, pid);
     } finally {
       closeSync(fd);
     }

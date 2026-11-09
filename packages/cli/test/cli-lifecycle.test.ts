@@ -1,7 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "vitest";
 import { probeDaemon, readPidRecord, socketPathFor } from "../src/lifecycle.js";
@@ -32,8 +33,13 @@ interface Fixture {
 const roots: string[] = [];
 const children = new Set<ChildProcess>();
 const observedPids = new Set<number>();
+const servers = new Set<Server>();
 
 afterEach(async () => {
+  for (const server of servers) {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  servers.clear();
   for (const child of children) {
     if (child.exitCode === null && child.signalCode === null) {
       try {
@@ -217,6 +223,26 @@ async function writePidFile(fixture: Fixture, pid: number, socketPath: string): 
   );
 }
 
+/**
+ * A separate Unix-socket daemon that answers the handshake, so a test can prove
+ * the CLI never signals a pid merely because *some* socket answers.
+ */
+async function startFakeDaemon(socketPath: string): Promise<Server> {
+  await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
+  const server = createServer((socket) => {
+    socket.on("error", () => {});
+    socket.on("data", () => {
+      socket.write(`${JSON.stringify({ id: "fake", result: { compatible: true } })}\n`);
+    });
+  });
+  servers.add(server);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => resolve());
+  });
+  return server;
+}
+
 test(
   "start, status and stop drive a real daemon",
   async () => {
@@ -295,7 +321,8 @@ test(
   "stop refuses a live pid that does not answer and keeps the record",
   async () => {
     const fixture = await makeFixture();
-    await writePidFile(fixture, process.pid, join(fixture.dataDir, "run", "missing.sock"));
+    // The derived socket path, but nothing listens on it.
+    await writePidFile(fixture, process.pid, socketPathFor(fixture.dataDir));
     const pidFile = join(fixture.dataDir, "daemon.pid");
     const before = await readFile(pidFile, "utf8");
 
@@ -304,6 +331,30 @@ test(
     expect(stopped.stderr).toContain("daemon.unknown_owner");
     expect(await readFile(pidFile, "utf8")).toBe(before);
     expect(isAlive(process.pid)).toBe(true);
+  },
+  TEST_TIMEOUT_MS,
+);
+
+test(
+  "stop never signals a live pid whose record points at another socket",
+  async () => {
+    const fixture = await makeFixture();
+    const foreignSocket = join(fixture.root, "foreign", "daemon.sock");
+    await startFakeDaemon(foreignSocket);
+    // The pid is alive and *a* daemon answers, but not this dataDir's socket.
+    await writePidFile(fixture, process.pid, foreignSocket);
+    const pidFile = join(fixture.dataDir, "daemon.pid");
+    const before = await readFile(pidFile, "utf8");
+
+    expect(await probeDaemon(foreignSocket)).toBe(true);
+
+    const stopped = await run(command(fixture, ["stop"]));
+    expect(stopped.code).toBe(1);
+    expect(stopped.stderr).toContain("daemon.unknown_owner");
+    expect(await readFile(pidFile, "utf8")).toBe(before);
+    expect(isAlive(process.pid)).toBe(true);
+    // The foreign daemon is untouched and still answering.
+    expect(await probeDaemon(foreignSocket)).toBe(true);
   },
   TEST_TIMEOUT_MS,
 );

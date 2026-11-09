@@ -223,6 +223,6 @@ test("runCli stops a responsive daemon", async () => {
 
   expect(code).toBe(0);
   expect(signals).toEqual(["SIGTERM"]);
-  expect(rec.out).toEqual(["stopped (pid 1111)"]);
+  expect(rec.out).toEqual([`stopped (pid 1111, socket ${join(dataDir, "run", "pisces.sock")})`]);
   expect(await readPidRecord(dataDir)).toBeUndefined();
 });
