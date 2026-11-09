@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync } from "node:fs";
-import { chmod, cp, lstat, mkdtemp, rm } from "node:fs/promises";
+import { chmod, cp, type FileHandle, lstat, mkdtemp, rm } from "node:fs/promises";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -658,6 +658,68 @@ test("retries a failed lock release instead of treating it as released", async (
   await lock.release();
   const again = await acquireDaemonLock(paths.lockPath);
   await again.release();
+});
+
+test("retries a transient lock close failure when startup fails", async () => {
+  const dataDir = await tempDir();
+  const paths = await prepareRuntimePaths(dataDir);
+  const realClose = daemonLockFs.close;
+  let closes = 0;
+  daemonLockFs.close = async (handle) => {
+    closes += 1;
+    if (closes === 1) throw new Error("close failed");
+    await realClose(handle);
+  };
+  try {
+    const hostModule = await loadHost();
+    await expect(
+      hostModule.startDaemonWithSeams(hostOptions(dataDir), {
+        probePeerCredentials: async () => {
+          throw new PiscesError("daemon.peercred_probe_failed", "peer credential probe failed");
+        },
+      }),
+    ).rejects.toMatchObject({ code: "daemon.peercred_probe_failed" });
+    // The first close fails transiently; failed-start cleanup must retry the same handle.
+    expect(closes).toBe(2);
+  } finally {
+    daemonLockFs.close = realClose;
+  }
+  // A retried release must leave the single-instance lock free for the next start.
+  const lock = await acquireDaemonLock(paths.lockPath);
+  await lock.release();
+});
+
+test("keeps the safe startup error when failed-start lock close keeps failing", async () => {
+  const dataDir = await tempDir();
+  const realClose = daemonLockFs.close;
+  let closes = 0;
+  let held: FileHandle | undefined;
+  daemonLockFs.close = async (handle) => {
+    closes += 1;
+    held = handle;
+    throw new Error("close failed");
+  };
+  try {
+    const hostModule = await loadHost();
+    const failed = hostModule.startDaemonWithSeams(hostOptions(dataDir), {
+      probePeerCredentials: async () => {
+        throw new PiscesError("daemon.peercred_probe_failed", "peer credential probe failed");
+      },
+    });
+    const error = await failed.catch((cause: unknown) => cause);
+    // The original safe startup error survives; the raw close failure never becomes the
+    // reported error and the failure is not claimed as recovered.
+    expect(error).toMatchObject({
+      code: "daemon.peercred_probe_failed",
+      message: "peer credential probe failed",
+    });
+    expect(closes).toBeGreaterThanOrEqual(2);
+  } finally {
+    daemonLockFs.close = realClose;
+    // Persistent close failure cannot be recovered here; close the retained handle so the
+    // test does not leak a descriptor into later runs.
+    if (held !== undefined) await realClose(held);
+  }
 });
 
 test("does not report stopped when lock release fails, and retries the stop", async () => {

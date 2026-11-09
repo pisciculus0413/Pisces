@@ -1,4 +1,11 @@
-import type { EngineEvent, JsonValue, SessionId, SessionMeta, TurnId } from "@pisces/core";
+import type {
+  EngineEvent,
+  JsonValue,
+  LlmAdapter,
+  SessionId,
+  SessionMeta,
+  TurnId,
+} from "@pisces/core";
 import { MAX_EVENT_BYTES, type ProtocolEvent } from "@pisces/protocol";
 import { afterEach, expect, test, vi } from "vitest";
 import type { GatewayResponse, TurnListResult, TurnStartResult } from "../src/gateway/protocol.js";
@@ -101,6 +108,22 @@ const blockedExecute = () =>
       else signal?.addEventListener("abort", () => resolve(), { once: true });
     });
   };
+
+const failingAdapter: LlmAdapter = {
+  dialect: "test",
+  buildRequest() {
+    return { path: "/v1/chat/completions", body: "{}" };
+  },
+  parseChunk() {
+    return [
+      {
+        type: "error",
+        code: "provider.transport",
+        message: "upstream rejected Authorization: Bearer SENTINEL-SECRET",
+      },
+    ];
+  },
+};
 
 function deltaEvent(sessionId: SessionId, seq: number, delta: string): EngineEvent {
   return {
@@ -472,6 +495,185 @@ test("authoritative routing metadata wins over payload fields", async () => {
       },
     },
   ]);
+});
+
+test("never projects a raw adapter error message into a subscribed turn.ended", async () => {
+  const h = await openHarness({ adapter: failingAdapter });
+  const { meta } = await h.seed([draftUser("hello")]);
+  const events = attach(h, "c");
+  await subscribe(h, "c", meta.id);
+
+  const turnId = turnIdOf(await turnStart(h, meta.id));
+  await h.waitForTurnEnd(turnId);
+  await vi.waitFor(() => {
+    expect(events.some((event) => event.event === "turn.ended")).toBe(true);
+  });
+
+  const ended = events.find((event) => event.event === "turn.ended");
+  expect(ended).toEqual({
+    event: "turn.ended",
+    data: {
+      sessionId: meta.id,
+      seq: expect.any(Number),
+      at: expect.any(String),
+      turnId,
+      reason: "failed",
+      endedAt: expect.any(String),
+      error: { code: "internal.error", message: "Turn failed" },
+    },
+  });
+  const wire = JSON.stringify(events);
+  for (const forbidden of [
+    "SENTINEL-SECRET",
+    "Authorization",
+    "provider.transport",
+    "upstream",
+    "cause",
+    "headers",
+    "credential",
+  ]) {
+    expect(wire).not.toContain(forbidden);
+  }
+});
+
+test("preserves the allowlisted turn.empty code with a fixed message", async () => {
+  const h = await openHarness({ validateWorkspace: async () => true });
+  const events = attach(h, "c");
+  const created = await h.gateway.handle({
+    id: "create",
+    method: "session.create",
+    params: { workspace: "/workspace", provider: "p", model: "m" } as unknown as JsonValue,
+  });
+  const meta = created.result as unknown as SessionMeta;
+  await subscribe(h, "c", meta.id);
+
+  const turnId = turnIdOf(await turnStart(h, meta.id));
+  await h.waitForTurnEnd(turnId);
+  await vi.waitFor(() => {
+    expect(events.some((event) => event.event === "turn.ended")).toBe(true);
+  });
+
+  expect(events.find((event) => event.event === "turn.ended")).toEqual({
+    event: "turn.ended",
+    data: {
+      sessionId: meta.id,
+      seq: expect.any(Number),
+      at: expect.any(String),
+      turnId,
+      reason: "failed",
+      endedAt: expect.any(String),
+      error: { code: "turn.empty", message: "Context has no visible messages" },
+    },
+  });
+  expect(h.executed).toEqual([]);
+});
+
+test("projects a fixed safe payload for turn.ended and drops extra fields", async () => {
+  const h = await openHarness();
+  const { meta } = await h.seed([draftUser("hello")]);
+  const events = attach(h, "c");
+  await subscribe(h, "c", meta.id);
+
+  expect(() =>
+    h.bus.publish({
+      type: "turn.ended",
+      sessionId: meta.id,
+      seq: 12,
+      at: FIXED_AT,
+      data: {
+        turnId: "turn-ended",
+        reason: "failed",
+        endedAt: FIXED_AT,
+        error: {
+          code: "provider.transport",
+          message: "upstream Authorization: Bearer secret",
+          cause: { headers: { authorization: "Bearer secret" } },
+          credential: "secret",
+        },
+        cause: { raw: true },
+        credential: "secret",
+      },
+    }),
+  ).not.toThrow();
+  expect(events).toEqual([
+    {
+      event: "turn.ended",
+      data: {
+        sessionId: meta.id,
+        seq: 12,
+        at: FIXED_AT,
+        turnId: "turn-ended",
+        reason: "failed",
+        endedAt: FIXED_AT,
+        error: { code: "internal.error", message: "Turn failed" },
+      },
+    },
+  ]);
+  const wire = JSON.stringify(events);
+  for (const forbidden of [
+    "Authorization",
+    "Bearer",
+    "upstream",
+    "provider.transport",
+    "cause",
+    "headers",
+    "credential",
+    "raw",
+  ]) {
+    expect(wire).not.toContain(forbidden);
+  }
+
+  expect(() =>
+    h.bus.publish({
+      type: "turn.ended",
+      sessionId: meta.id,
+      seq: 13,
+      at: FIXED_AT,
+      data: {
+        turnId: "turn-ok",
+        reason: "completed",
+        endedAt: FIXED_AT,
+        error: { code: "provider.transport", message: "leaked" },
+      },
+    }),
+  ).not.toThrow();
+  expect(events[1]).toEqual({
+    event: "turn.ended",
+    data: {
+      sessionId: meta.id,
+      seq: 13,
+      at: FIXED_AT,
+      turnId: "turn-ok",
+      reason: "completed",
+      endedAt: FIXED_AT,
+    },
+  });
+});
+
+test("drops turn.ended events without a valid turn id, reason or endedAt", async () => {
+  const h = await openHarness();
+  const { meta } = await h.seed([draftUser("hello")]);
+  const events = attach(h, "c");
+  await subscribe(h, "c", meta.id);
+
+  const invalid = [
+    { turnId: "bad turn", reason: "failed", endedAt: FIXED_AT },
+    { turnId: "turn-x", reason: "exploded", endedAt: FIXED_AT },
+    { turnId: "turn-y", reason: "completed", endedAt: 42 },
+    { reason: "completed", endedAt: FIXED_AT },
+  ];
+  for (const [index, data] of invalid.entries()) {
+    expect(() =>
+      h.bus.publish({
+        type: "turn.ended",
+        sessionId: meta.id,
+        seq: 20 + index,
+        at: FIXED_AT,
+        data: data as unknown as { [key: string]: JsonValue },
+      }),
+    ).not.toThrow();
+  }
+  expect(events).toHaveLength(0);
 });
 
 test("dispose detaches the gateway handler", async () => {

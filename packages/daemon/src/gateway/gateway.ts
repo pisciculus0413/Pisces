@@ -112,6 +112,13 @@ const SESSION_ID = /^[A-Za-z0-9_-]+$/;
 const TURN_ID = SESSION_ID;
 const CLEANUP_FAILED_CODE = "storage.io";
 const CLEANUP_FAILED_MESSAGE = "Active turn marker could not be removed";
+// Only client-meaningful turn failure codes are allowed on the wire, each with its own
+// fixed safe message; every other code is replaced so raw adapter/upstream details never leak.
+const TURN_ENDED_ERROR_MESSAGES: Record<string, string> = {
+  "turn.empty": "Context has no visible messages",
+};
+const TURN_ENDED_FALLBACK_CODE = "internal.error";
+const TURN_ENDED_FALLBACK_MESSAGE = "Turn failed";
 const ROUTING_KEYS = new Set(["sessionId", "seq", "at"]);
 const ENCODER = new TextEncoder();
 const SESSION_EVENT_TYPES = new Set([
@@ -148,6 +155,37 @@ function projectSessionEvent(event: EngineEvent): ProtocolEvent | undefined {
         message: CLEANUP_FAILED_MESSAGE,
       },
     };
+  }
+
+  if (event.type === "turn.ended") {
+    const turnId = payload.turnId;
+    if (typeof turnId !== "string" || !TURN_ID.test(turnId)) return undefined;
+    const reason = payload.reason;
+    if (reason !== "completed" && reason !== "cancelled" && reason !== "failed") return undefined;
+    const endedAt = payload.endedAt;
+    if (typeof endedAt !== "string") return undefined;
+    const data: { [key: string]: JsonValue } = {
+      sessionId: event.sessionId,
+      seq: event.seq,
+      at: event.at,
+      turnId,
+      reason,
+      endedAt,
+    };
+    if (reason === "failed") {
+      // Never copy the raw code, message, cause or extra fields: the adapter controls them.
+      const error = payload.error;
+      const requested = isRecord(error) && typeof error.code === "string" ? error.code : undefined;
+      const code =
+        requested !== undefined && Object.hasOwn(TURN_ENDED_ERROR_MESSAGES, requested)
+          ? requested
+          : TURN_ENDED_FALLBACK_CODE;
+      data.error = {
+        code,
+        message: TURN_ENDED_ERROR_MESSAGES[code] ?? TURN_ENDED_FALLBACK_MESSAGE,
+      };
+    }
+    return { event: event.type, data };
   }
 
   // Routing metadata is authoritative: payload copies of these keys are discarded.

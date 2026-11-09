@@ -358,7 +358,7 @@ interface Event<E = JsonValue> {
 - 不支持在 JSON 对象内嵌裸换行；字符串内的换行必须转义。
 - 客户端可以在同一连接上并发发送多个请求；响应通过 `id` 关联。
 - 事件可以与响应交错；客户端不得依赖事件与某个响应的固定先后顺序。
-- 连接建立后，`protocol.hello` 必须是第一个请求；在此之前收到其他请求返回 `protocol.hello_required`，连接仍可继续握手。重复 hello 返回 `protocol.invalid_request`。
+- 连接建立后，任何业务方法成功分派前必须完成 `protocol.hello`；在此之前收到其他请求返回 `protocol.hello_required`，该请求被拒绝但连接仍可随后完成握手。重复 hello 返回 `protocol.invalid_request`。
 
 ### 3.2 握手与版本
 
@@ -742,10 +742,10 @@ type ProtocolEvent =
 - `selection.updated` 携带已持久化记录的完整名称集合，不分片；若本次写入需通知的新集合超过双封装事件预算，在 C 段写库前以 `context.selection_too_large` 原子拒绝（§4.2.7）。队列声明 delta 通过 `queue.updated` 传递，客户端自行叠加。
 - `turn.started` 在首次 assemble 之前发布，且不携带 `mode`；`mode` 只在 `TurnStartResult` 中出现。
 - `turn.step` 的 `step` 从 1 开始；`usage` 在供应商提供时出现。
-- `turn.ended.reason` 为 `failed` 时带 `error`。
+- `turn.ended.reason` 为 `failed` 时带 `error`；线上 `error` 只含白名单 code 与固定安全文案（当前保留 `turn.empty`），其余 code 统一替换为 `internal.error` 与固定文案，绝不透传 adapter/供应商提供的原始 code、message、cause 或任意附加字段。`completed`/`cancelled` 的 `error` 即使存在也丢弃。
 - `turn.cleanup_failed` 在 `turn.ended` 之后、标记删除失败时发布，携带 `turnId`、固定 `code="storage.io"` 与固定安全文案；不携带原始异常、cause 或任意细节，也不表示 turn 已注销：标记与登记项仍会阻塞同会话新 turn，直到重启恢复。
 - 本阶段只转发上列八个会话事件；`client.launched`（客户端进程成功启动后推送）仍属目标设计，客户端方法尚未路由。
-- `Gateway` 把引擎事件投影为线上事件 `{ event: type, data: { sessionId, seq, at, ...payload } }`；`sessionId`、`seq`、`at` 以引擎事件为准，payload 中的同名键被丢弃。未知事件类型或缺失路由字段的事件被忽略。
+- `Gateway` 把引擎事件投影为线上事件 `{ event: type, data: { sessionId, seq, at, ...payload } }`；`sessionId`、`seq`、`at` 以引擎事件为准，payload 中的同名键被丢弃。`turn.ended` 与 `turn.cleanup_failed` 例外：二者按固定字段显式构造，校验 `turnId`、`reason`、`endedAt` 等字段并丢弃所有其他附加字段。未知事件类型或缺失/非法路由字段的事件被忽略。
 - 事件只发送给订阅该会话的连接；`client.launched` 是连接级事件，不受会话订阅限制。
 - 事件不重放；重连后客户端重新 `session.read`。
 

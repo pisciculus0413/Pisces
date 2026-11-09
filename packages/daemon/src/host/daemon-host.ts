@@ -15,7 +15,7 @@ import {
   probePeerCredentials,
   type UnixTransport,
 } from "../transport/unix-transport.js";
-import { acquireDaemonLock } from "./lock.js";
+import { acquireDaemonLock, type DaemonLock } from "./lock.js";
 import { clearStaleSocket, prepareRuntimePaths } from "./runtime-paths.js";
 
 /**
@@ -47,6 +47,8 @@ import { clearStaleSocket, prepareRuntimePaths } from "./runtime-paths.js";
 /** Public stop deadlines: admitted-request drain and turn-cancellation cleanup. */
 const STOP_DRAIN_TIMEOUT_MS = 5000;
 const STOP_CANCEL_TIMEOUT_MS = 5000;
+/** Bounded failed-start lock release retries; the handle keeps ownership until close resolves. */
+const START_LOCK_RELEASE_ATTEMPTS = 3;
 
 const START_CODES = new Set([
   "daemon.unsupported_platform",
@@ -127,6 +129,22 @@ const normalizeStartError = (error: unknown): PiscesError => {
     if (START_CODES.has(error.code)) return error;
   }
   return startFailed();
+};
+
+/**
+ * Failed-start cleanup only. A transient close failure leaves the lock owned, so retry the same
+ * handle a bounded number of times. Persistent failure is deliberately not claimed as released:
+ * the caller still receives the original safe startup error and the lock stays observably held.
+ */
+const releaseStartLock = async (lock: DaemonLock): Promise<void> => {
+  for (let attempt = 0; attempt < START_LOCK_RELEASE_ATTEMPTS; attempt++) {
+    try {
+      await lock.release();
+      return;
+    } catch {
+      // Retry while attempts remain.
+    }
+  }
 };
 
 const drainWithin = async (waits: Promise<void>[], timeoutMs: number): Promise<boolean> => {
@@ -297,7 +315,7 @@ export async function startDaemonWithSeams(
   } catch (error) {
     await transport?.close().catch(() => {});
     gateway?.dispose();
-    await lock.release().catch(() => {});
+    await releaseStartLock(lock);
     throw normalizeStartError(error);
   }
 }

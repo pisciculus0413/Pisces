@@ -15,8 +15,8 @@
 
 ## 构建
 
-前置条件：Linux、C 工具链（`gcc`/`make`/`python3`）与 Node 头文件下载能力。原生插件在
-安装时按当前 Node ABI 编译，不下载预编译二进制。
+前置条件：Linux、C 工具链（`gcc`/`make`/`python3`）与 Node 头文件下载能力。原生插件**不会**在
+安装时自动编译：安装后必须显式执行下方的 `build:native`，按当前 Node ABI 编译，不下载预编译二进制。
 
 ```bash
 pnpm install --frozen-lockfile
