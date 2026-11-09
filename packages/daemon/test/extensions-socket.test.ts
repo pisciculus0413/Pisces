@@ -1555,20 +1555,6 @@ test("runs the built-in shell over a real socket with selection, output and cwd 
   });
 
   // The built-in shell comes from the module-derived builtin dir, not from workspace config.
-  const unselected = await createSession(client, { workspace, systemPrompt: ["plain"] });
-  const unselectedSnapshot = await snapshot(client, unselected.id);
-  expect(unselectedSnapshot.entries.map((entry) => entry.name)).toContain(SHELL);
-  expect(unselectedSnapshot.selection).toEqual([]);
-  await startTurn(client, unselected.id);
-  await turnIdle(client);
-  // No selection yet: the shell is in the inventory but never declared to the provider.
-  expect(record).toHaveLength(1);
-  expect(record[0]?.tools).toBeUndefined();
-  const unselectedRead = await readSession(client, unselected.id);
-  // The turn really ran to completion; it simply had no tool to declare or call.
-  expect(nodeTexts(unselectedRead)).toContain("done");
-  expect(toolResultBlocks(unselectedRead)).toEqual([]);
-
   const created = await createSession(client, {
     workspace,
     extensions: [SHELL],
@@ -1581,8 +1567,26 @@ test("runs the built-in shell over a real socket with selection, output and cwd 
   // The create-time declaration is queued, not a persisted selection.
   expect(before.selection).toEqual([]);
   expect(before.effective).toEqual([]);
+  const queuedDeclaration = declarationEntry((await readSession(client, created.id)).queue);
+  expect(declarationPayload(queuedDeclaration).toggle).toEqual([SHELL]);
 
-  // turn.start confirms the pending declaration; the selected shell is declared and invoked.
+  // Drop the queued declaration: the first turn on this session has nothing to declare.
+  await ok(client, "queue.remove", { sessionId: created.id, id: queuedDeclaration.id });
+  await startTurn(client, created.id);
+  await turnIdle(client);
+  // No selection and no queued declaration: the shell is inventoried but not declared.
+  expect(record[0]?.tools).toBeUndefined();
+  const idleRead = await readSession(client, created.id);
+  // The turn really ran to completion; it simply had no tool to declare or call.
+  expect(nodeTexts(idleRead)).toContain("done");
+  expect(toolResultBlocks(idleRead)).toEqual([]);
+  expect((await snapshot(client, created.id)).selection).toEqual([]);
+
+  // Enqueue the toggle on the same session; the next turn.start confirms it.
+  await ok(client, "queue.enqueue", {
+    sessionId: created.id,
+    entries: [toggleInput([SHELL])],
+  });
   await startTurn(client, created.id);
   await turnIdle(client);
   const declared = [

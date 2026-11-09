@@ -253,7 +253,8 @@ demo/
 - 子进程不继承 daemon 环境变量：只看到显式 `env` 与基础 `PATH`（`/usr/local/bin:/usr/bin:/bin`），
   stdin 关闭；daemon 只 kill 直接子进程，不建进程组。
 - 安全失败：参数非法 → `tool.failed` + `Invalid shell arguments`；上下文缺少 `files`/`exec` →
-  `tool.failed` + `Execution host is unavailable`；无法启动命令 → `tool.failed` + `Shell command could not be run`。
+  `tool.failed` + `Execution host is unavailable`；`cwd` 解析的非越界失败（如 I/O 错误）→
+  `tool.failed` + `Workspace access failed`；无法启动命令 → `tool.failed` + `Shell command could not be run`。
   这些文案固定，不回显参数或路径。
 
 **没有沙箱**：命令以 daemon 用户身份运行，可以读写工作区之外的文件、访问网络、spawn 任意进程；
@@ -297,7 +298,7 @@ demo/
 | `turn.active` | 会话已有活跃/未清理 turn |
 | `turn.empty` | 装配后没有可见消息（例如只有零片段来源与声明） |
 | `tool.wrapper_invalid` | 包装器改动声明字段、加载失败或模块 `config` 与 sidecar 不一致 |
-| `tool.failed` / `tool.denied` | 工具执行失败 / 工具拒绝执行（含内置 shell 的 `cwd` 越出工作区）；固定文案，不终止 turn |
+| `tool.failed` / `tool.denied` | 工具执行失败 / 工具拒绝执行（含内置 shell 的 `cwd` 越出工作区与工作区访问 I/O 失败）；固定文案，不终止 turn |
 
 问题码（不是协议错误，只出现在 `ExtensionBinding.issues`，当前没有协议方法导出它们）：
 `extensions.invalid`、`extensions.duplicate`、`extensions.unsupported_contribution`。
