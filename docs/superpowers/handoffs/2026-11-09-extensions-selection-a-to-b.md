@@ -1,8 +1,8 @@
 # Extensions Selection：当前工作交接 / A → B 门禁
 
-**状态：BLOCKED / NOT READY。Plan A 的 Task 3 正式 jiti 补丁实现进行中，硬门槛未验收；不能启动 Tasks 4–6 或 Plan B。**
+**状态：Task 3 已完成并通过独立审查；A 进行中（Tasks 4–6 未开始）。仍为 NOT READY，不能启动 Plan B。**
 
-用户此前要求交接，随后完成选型并批准 jiti 局部补丁设计；当前已确认修订计划并进入正式实现，产品验收尚未通过。本文件是恢复入口，不是新实施计划；不要恢复整段旧对话，也不要重做已完成任务。所有子智能体继续使用 **`deepseek-flash`**。
+用户此前要求交接，随后完成选型并批准 jiti 局部补丁设计；计划确认后 Task3 已实现（`6527e0f`/`e033032`）并通过独立审查。本文件是恢复入口，不是新实施计划；不要恢复整段旧对话，也不要重做已完成任务。所有子智能体继续使用 **`deepseek-flash`**。
 
 **最新进展：** 用户已批准 [jiti 替换设计](../specs/2026-11-09-extension-loader-jiti-patch-design.md)，[Task3 专项修订计划](../plans/2026-11-09-extension-loader-jiti-patch.md) 已获用户确认并进入正式实现；[选型报告](../research/2026-11-09-extension-loader-selection.md) 保留实测证据。两个候选在本地 Node 22.19/24.11/26.13 均通过共用 17 测试；额外 6 项独立边界检查中，最终 jiti 补丁全部通过，esbuild 有 3 项语义失败。原产品两个 CJS 身份断言在本轮实现前为 RED；当前按既定 deepseek-flash SDD 完成实现与证据，验收和独立审查尚未通过；不重复选型或重做 Tasks1–2。
 
@@ -10,7 +10,7 @@
 
 | 项目 | 实际状态 |
 |---|---|
-| 分支 / HEAD | `dev-pi` / `e7d937db06a8a9a4fa4b5e4401889957fc735672` |
+| 分支 / HEAD | `dev-pi` / `e033032067743fe39dade4919ef20d243eeb195b`（Task3 验收；A 尚未结束） |
 | 计划索引 | [共同门禁与执行约束](../plans/2026-11-09-extensions-selection.md) |
 | 当前计划 | [Plan A：Tasks 1–6](../plans/2026-11-09-extensions-selection-a-foundations.md)，已获实施授权 |
 | 后续计划 | [Plan B：Tasks 7–11](../plans/2026-11-09-extensions-selection-b-integration.md)，未获实施授权 |

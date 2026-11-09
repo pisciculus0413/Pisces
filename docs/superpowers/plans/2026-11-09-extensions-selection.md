@@ -1,6 +1,6 @@
 # Extensions Selection：分阶段计划入口
 
-**本文件已替代原单体计划，仅是导航与共同门禁，不是第三份实施计划。** 用户已批准 Plan A 并授权基线修复；基线与 Tasks 1–2 已完成；Task 3 正式 jiti 补丁实现进行中（硬门槛与独立审查未通过），Tasks 4–6 未开始。Plan B 未获实施授权。当前恢复入口见下方交接记录。
+**本文件已替代原单体计划，仅是导航与共同门禁，不是第三份实施计划。** 用户已批准 Plan A 并授权基线修复；基线与 Tasks 1–3 已完成（Task 3 补丁与独立审查通过），Tasks 4–6 未开始。Plan B 未获实施授权。当前恢复入口见下方交接记录。
 
 ## 执行顺序
 
@@ -10,12 +10,12 @@
 | [Plan B：Gateway 与宿主闭环](2026-11-09-extensions-selection-b-integration.md) | 7–11 | 消费 A 契约，完成真实 socket 验收与文档 |
 
 设计：[`2026-11-09-extensions-selection-design.md`](../specs/2026-11-09-extensions-selection-design.md)。
-Task3 专项修订：[jiti 补丁计划](2026-11-09-extension-loader-jiti-patch.md)（已批准补充设计，计划已由用户确认并进入正式实现；替代 A 内旧 Task3 正文，不新增阶段、不重复 Tasks1–2）。
+Task3 专项修订：[jiti 补丁计划](2026-11-09-extension-loader-jiti-patch.md)（已批准补充设计；实现与独立审查完成 `6527e0f`/`e033032`，残余 Minor 留 A 整体审查；替代 A 内旧 Task3 正文，不新增阶段、不重复 Tasks1–2）。
 交接：[`2026-11-09-extensions-selection-a-to-b.md`](../handoffs/2026-11-09-extensions-selection-a-to-b.md)，**当前 NOT READY**；A 完成者填写真实验收 SHA、接口偏差、依赖能力、验证和残余问题后才能 READY。
 
 ## 上下文与交接规则
 
-- 当前用户已批准 jiti 补丁设计并确认专项计划，Task3 正式实现进行中，验收尚未通过；先读交接记录与本地台账，不重做选型或 Tasks1–2。沿既定 deepseek-flash SDD 继续 Task3，不需要旧对话或 PlanB 全文。
+- 当前 Task3 已完成并通过独立审查，下一任务是 Plan A Task 4；先读交接记录与本地台账，不重做选型、Task3 或 Tasks1–2。沿既定 deepseek-flash SDD 继续 Tasks4–6，不需要旧对话或 PlanB 全文。
 - 给单任务智能体只发送该任务、共同约束/门禁、直接接口、对应设计段落和短报告；不传全部计划或继承整个父会话。继续逐任务 TDD 与独立审查，不并行修改共享 checkout。
 - 每任务保存实际提交、RED/GREEN、审查/修复和下一步。暂停时写清当前任务/步骤、未提交文件归属、下一命令、失败日志路径，不能只说“继续”。本地详细日志可留 `.superpowers/sdd/2026-11-09-extensions-selection/`；A→B 必要结论必须进入受版本控制的交接记录。
 - A 的交付边界为 `Extensions.prepare → ExtensionBinding` 和 Core 视图/资格接口。B 携带最小契约；A 任何接口调整都需同步 B 和交接记录，不让后继猜测。

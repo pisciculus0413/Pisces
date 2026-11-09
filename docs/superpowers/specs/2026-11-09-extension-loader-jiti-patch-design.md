@@ -1,6 +1,6 @@
 # 扩展 Loader 修订：jiti 实例级局部补丁
 
-**状态：用户已批准设计，并要求修订实施计划。用户已确认 [Task3 修订计划](../plans/2026-11-09-extension-loader-jiti-patch.md) 并授权开始正式实现；验收尚未通过。**
+**状态：已实现并通过独立 Task3 审查（`6527e0f`、`e033032`）；残余 Minor 留 A 整体审查。**
 
 本修订仅补充 [原设计 §7](2026-11-09-extensions-selection-design.md#7-惰性装载与贡献契约)，解除 Plan A Task 3 的 CJS 宿主身份阻塞，不改变模块 ABI、指纹配方、Core/Gateway 边界或 Plan B 授权。依据：[本地选型验证报告](../research/2026-11-09-extension-loader-selection.md)。
 

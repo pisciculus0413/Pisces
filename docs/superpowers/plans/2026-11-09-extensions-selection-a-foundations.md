@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 本计划已获用户实施授权。当前基线及 Tasks 1–2 已完成；Task 3 的 CJS 传递宿主身份硬门槛失败，Tasks 4–6 未开始。先读 [当前交接](../handoffs/2026-11-09-extensions-selection-a-to-b.md)；下方任务正文/checkbox 保留规划模板，不得据此重复已完成任务。在 `dev-pi` 顺序工作，不建 worktree、不向 main 提交、不 push/merge，保留旧 SDD 资料。
+- 本计划已获用户实施授权。当前基线及 Tasks 1–2 已完成；Task 3 已实现并通过独立审查（残余 Minor 留账），Tasks 4–6 未开始。先读 [当前交接](../handoffs/2026-11-09-extensions-selection-a-to-b.md)；下方任务正文/checkbox 保留规划模板，不得据此重复已完成任务。在 `dev-pi` 顺序工作，不建 worktree、不向 main 提交、不 push/merge，保留旧 SDD 资料。
 - 必须读入口索引 `2026-11-09-extensions-selection.md` 的门禁 G；每次提交执行原生构建、完整 Vitest、两项 tsc、Biome、边界扫描，仅显式暂存本任务文件。
 - Core 无文件/环境 I/O，不依赖 daemon/protocol；发现不执行扩展代码，工具/包装器 invoke 时才装载，来源按需固化。
 - `package#name`；`foo.ts.meta.json`；技能相邻 `foo.meta.json` + `SKILL.md`；只有 wrapper 接受条目配置。
@@ -103,15 +103,15 @@
 
 ### Task 3: 正式 jiti 局部补丁与宿主身份硬门槛（专项修订）
 
-**唯一执行正文：** [Task3 jiti 补丁实施计划](2026-11-09-extension-loader-jiti-patch.md)。用户已批准补丁设计并确认修订计划，当前处于正式实现阶段（验收未通过）；原版 loader 已存在，不重新建文件/解析浮动 jiti@2，也不重新选型。原任务模板由该专项计划替代，Tasks4–6 不变。
+**唯一执行正文：** [Task3 jiti 补丁实施计划](2026-11-09-extension-loader-jiti-patch.md)。已完成：正式补丁、adapter 接线、三组行为 RED→GREEN、三版本/dist/隔离安装门禁、完整 G 与独立审查（`6527e0f`、`e033032`；审查两项 Important 已修复并经限定复审 clean）。原版 loader 已存在，不重新建文件/解析浮动 jiti@2，也不重新选型。原任务模板由该专项计划替代，Tasks4–6 不变。
 
 **Interfaces（保持不变）：** `DiscoveredEntry`/`sha256` → `ExtensionModule { default: unknown; config?: unknown }`、`ExtensionLoader { load(entry: DiscoveredEntry): Promise<ExtensionModule> }`；`createExtensionLoader(): ExtensionLoader` 按 entryPath+entryDigest 缓存 promise/失败。
 
-- [ ] 按专项计划完成模式/JSON/格式的逐组行为 RED→GREEN 与正式 adapter 接线。
-- [ ] 三个本地 Node 版本、真实 dist、隔离冻结安装/负控及原 CJS 两项正向身份断言通过。
-- [ ] 完整 G 后提交，独立审查从原 Task3 BASE e4776e6 生成全部 diff，关闭 Critical/Important。
+- [x] 按专项计划完成模式/JSON/格式的逐组行为 RED→GREEN 与正式 adapter 接线。
+- [x] 三个本地 Node 版本、真实 dist、隔离冻结安装/负控及原 CJS 两项正向身份断言通过。
+- [x] 完整 G 后提交，独立审查从原 Task3 BASE e4776e6 生成全部 diff，关闭 Critical/Important。
 
-未完成以上硬门槛不进入 Task4；历史 I1 已接受与延期 Minor 保留。
+硬门槛已由 controller 接受（审查无 Critical；两项 Important 已修复并限定复审 clean）。延期 Minor 留 A 整体审查：宿主子路径错误消息未在设计中枚举、adapter 级 bare builtin 正控标签不准、测试 helper 重复/重复编译 N-API、`data:` URL 绕过未写入边界文档、交接 HEAD 值待重刷。历史 I1 已接受结论保留。
 
 ### Task 4: Core 纯选择视图与历史类型规则
 
