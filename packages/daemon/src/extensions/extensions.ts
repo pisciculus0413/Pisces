@@ -7,6 +7,7 @@ import {
   type EntryName,
   type JsonObject,
   type JsonValue,
+  PiscesError,
   type SkillEntry,
   type Skills,
   type ToolDeclaration,
@@ -47,15 +48,17 @@ function toolExecute(loader: ExtensionLoader, record: DiscoveredEntry): ToolFunc
 }
 
 // The factory promise is cached by Tools per binding; this closure only runs once.
+// Module `config` must describe the sidecar defaults, never hidden or merged values.
 function wrapperFactory(
   loader: ExtensionLoader,
   record: DiscoveredEntry,
   config: JsonObject,
+  defaults: JsonObject,
 ): () => Promise<ToolWrapper> {
   return async () => {
     const module = await loader.load(record);
-    if (module.config !== undefined && !configMatches(module.config, config)) {
-      throw new ExtensionLoadError("Extension wrapper config does not match the frozen config");
+    if (module.config !== undefined && !configMatches(module.config, defaults)) {
+      throw new ExtensionLoadError("Extension wrapper config does not match the declared defaults");
     }
     const create = module.default as (config: JsonObject) => ToolWrapper | Promise<ToolWrapper>;
     const wrapper = await create(structuredClone(config));
@@ -105,7 +108,12 @@ function createBinding(
     } else if (info.type === "wrapper") {
       registry.registerWrapper(
         info.name,
-        wrapperFactory(loader, record, record.wrapperConfig ?? {}),
+        wrapperFactory(
+          loader,
+          record,
+          record.wrapperConfig ?? {},
+          record.wrapperConfigSpec?.defaults ?? {},
+        ),
       );
     } else if (info.type === "context") {
       sources.set(info.name, contextSource(loader, record));
@@ -152,7 +160,11 @@ function createBinding(
 
   const sourceRegistry: ContextSourceRegistry = {
     get(name: EntryName): ContextSource | undefined {
-      return sources.get(name);
+      const source = sources.get(name);
+      // Frozen copy: callers cannot overwrite id/resolve or mutate the internal registry.
+      return source === undefined
+        ? undefined
+        : Object.freeze({ id: source.id, resolve: source.resolve });
     },
   };
 
@@ -172,8 +184,14 @@ export function createExtensions(options: ExtensionsOptions): Extensions {
   return {
     readGlobalConfig: () => readGlobalLayer(options.configDir),
     async prepare(workspace: string): Promise<ExtensionBinding> {
-      // realpath identifies the workspace; an inaccessible path fails instead of falling back.
-      const canonical = await realpath(workspace);
+      // realpath identifies the workspace; an inaccessible path fails with the module's
+      // existing safe configuration error instead of falling back or leaking Node details.
+      let canonical: string;
+      try {
+        canonical = await realpath(workspace);
+      } catch {
+        throw new PiscesError("config.invalid", "Invalid extension configuration");
+      }
       const config = deepFreeze(await readWorkspaceConfig(options.configDir, canonical));
       // Every prepare rescans and freezes a new inventory without importing module code.
       const discovery = await discoverExtensions(options, canonical, config);

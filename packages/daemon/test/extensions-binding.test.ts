@@ -279,7 +279,14 @@ test("loads no module code until a tool is invoked, a source resolved, or a wrap
 
   const source = binding.sources.get(NOTE);
   expect(source).toBeDefined();
-  const fragments = await (source as NonNullable<typeof source>).resolve({
+  const exposed = source as NonNullable<typeof source>;
+  expect(Object.isFrozen(exposed)).toBe(true);
+  expect(Reflect.set(exposed, "id", "demo#other")).toBe(false);
+  expect(Reflect.set(exposed, "resolve", async () => [])).toBe(false);
+  expect(exposed.id).toBe(NOTE);
+  expect(binding.sources.get(NOTE)).not.toBe(exposed);
+  expect(Object.isFrozen(binding.sources.get(NOTE))).toBe(true);
+  const fragments = await exposed.resolve({
     sessionId: "s1" as SessionId,
     workspace: ws,
   });
@@ -323,7 +330,7 @@ test("feeds the frozen merged wrapper config to the factory and rejects mismatch
   const goodWs = workspace("config-good");
   await addPackage(goodWs, "demo", { "tools/run.ts": toolModule(goodToolLog, "ran") });
   await addPackage(goodWs, "configpkg", {
-    "wrappers/audit.ts": wrapperModule(goodWrapperLog, { limit: 1, nested: { a: 1, b: 2 } }),
+    "wrappers/audit.ts": wrapperModule(goodWrapperLog, { limit: 1, nested: { a: 1 } }),
     "wrappers/audit.ts.meta.json": JSON.stringify({
       config: {
         defaults: { limit: 1, nested: { a: 1 } },
@@ -350,6 +357,7 @@ test("feeds the frozen merged wrapper config to the factory and rejects mismatch
   await writeJson(join(goodWs, ".pisces", "config.json"), {
     entryConfig: { "configpkg#audit": { limit: 7, nested: { b: 9 } } },
   });
+  // The module exports the sidecar defaults, not the merged values; the factory gets merged.
   expect(await invokeText(good, RUN, [RUN, audit])).toBe('{"limit":1,"nested":{"a":1,"b":2}}');
   expect(await invokeText(good, RUN, [RUN, audit])).toBe('{"limit":1,"nested":{"a":1,"b":2}}');
   expect(await loadCount(goodToolLog)).toBe(0);
@@ -371,6 +379,20 @@ test("feeds the frozen merged wrapper config to the factory and rejects mismatch
   const again = await invoke(bad, RUN, [RUN, audit]);
   expect(again.code).toBe("tool.wrapper_invalid");
   expect(await loadCount(badLog)).toBe(1);
+
+  // A module export is never a hidden default source when the sidecar declares none.
+  const hiddenWs = workspace("config-hidden");
+  const hiddenToolLog = join(root, "hidden-tool.log");
+  const hiddenWrapperLog = join(root, "hidden-wrapper.log");
+  await addPackage(hiddenWs, "demo", { "tools/run.ts": toolModule(hiddenToolLog, "ran") });
+  await addPackage(hiddenWs, "hidden", {
+    "wrappers/audit.ts": wrapperModule(hiddenWrapperLog, { mode: "hidden" }),
+  });
+  const hiddenBinding = await extensions.prepare(hiddenWs);
+  const hidden = "hidden#audit" as EntryName;
+  expect((await invoke(hiddenBinding, RUN, [RUN, hidden])).code).toBe("tool.wrapper_invalid");
+  expect(await loadCount(hiddenWrapperLog)).toBe(1);
+  expect(await loadCount(hiddenToolLog)).toBe(0);
 
   const asyncWs = workspace("config-async");
   const asyncLog = join(root, "async-wrapper.log");
@@ -477,4 +499,12 @@ test("rejects explicit user config errors and isolates frozen wrapper failures",
   expect(binding.tools.selected([broken])).toEqual([]);
   expect(await invokeText(binding, RUN)).toBe("ran");
   expect(await loadCount(log)).toBe(1);
+});
+
+test("maps a missing workspace to the safe configuration error", async () => {
+  const extensions = createExtensions(options);
+  await expect(extensions.prepare(join(root, "missing"))).rejects.toMatchObject({
+    code: "config.invalid",
+    message: "Invalid extension configuration",
+  });
 });
