@@ -193,8 +193,17 @@ export type WrapperValidator = (value: JsonObject) => boolean;
 
 export function compileWrapperSchema(schema: JsonObject): WrapperValidator | undefined {
   try {
-    const validate = new Ajv(AJV_OPTIONS).compile(schema);
-    return (value: JsonObject) => validate(value) === true;
+    const validate = new Ajv(AJV_OPTIONS).compile(schema) as unknown as {
+      (value: JsonObject): unknown;
+      $async?: boolean;
+    };
+    // Never invoke a compiled async validator: its rejected promise would be unhandled.
+    if (validate.$async === true) return undefined;
+    return (value: JsonObject) => {
+      const result = validate(value);
+      if (typeof result !== "boolean") throw new InvalidMetadataError();
+      return result;
+    };
   } catch {
     return undefined;
   }

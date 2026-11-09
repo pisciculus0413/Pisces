@@ -45,7 +45,6 @@ import type {
 } from "./types.js";
 
 const INVALID_CONFIG = "Invalid extension configuration";
-const DISCOVERY_FAILED = "Extension discovery failed";
 const KINDS: readonly EntryKind[] = ["tool", "wrapper", "skill", "context"];
 const KIND_DIRS: Record<EntryKind, string> = {
   tool: "tools",
@@ -59,6 +58,19 @@ const MANIFEST_KEYS: Record<EntryKind, "tools" | "wrappers" | "skills" | "contex
   skill: "skills",
   context: "context",
 };
+const SOURCE_LABELS = ["builtin", "config", "workspace"] as const;
+
+// logical: lexical path used for basename/sidecar derivation; canonical: realpath for
+// identity, containment and entry reads.
+interface EntryPath {
+  logical: string;
+  canonical: string;
+}
+
+interface DirListing {
+  names: string[];
+  failed: boolean;
+}
 
 interface Candidate {
   packageRoot: string;
@@ -83,36 +95,51 @@ interface PackageRoot {
 const isNotFound = (error: unknown): boolean =>
   typeof error === "object" && error !== null && (error as { code?: string }).code === "ENOENT";
 
+const isNotDir = (error: unknown): boolean =>
+  typeof error === "object" && error !== null && (error as { code?: string }).code === "ENOTDIR";
+
 const invalidConfig = (): never => {
   throw new PiscesError("config.invalid", INVALID_CONFIG);
 };
 
 const sortNames = (names: readonly string[]): string[] => [...names].sort();
 
-async function readDirNames(dir: string): Promise<string[]> {
-  try {
-    return sortNames(await readdir(dir));
-  } catch (error) {
-    if (isNotFound(error) || (error as { code?: string }).code === "ENOTDIR") return [];
-    throw new PiscesError("extensions.invalid", DISCOVERY_FAILED);
-  }
-}
-
 function within(root: string, target: string): boolean {
   const rel = relative(root, target);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+// Read faults never escape discovery: callers report them as safe issues.
+async function readDirListing(dir: string): Promise<DirListing> {
+  try {
+    return { names: sortNames(await readdir(dir)), failed: false };
+  } catch (error) {
+    if (isNotFound(error) || isNotDir(error)) return { names: [], failed: false };
+    return { names: [], failed: true };
+  }
 }
 
 export function defaultBuiltinDir(): string {
   return fileURLToPath(new URL("../../../../extensions/builtin/", import.meta.url));
 }
 
-async function listPackageRoots(sourceDir: string): Promise<PackageRoot[]> {
+async function listPackageRoots(
+  sourceDir: string,
+  label: string,
+): Promise<{ roots: PackageRoot[]; failures: string[] }> {
   const roots: PackageRoot[] = [];
-  for (const name of await readDirNames(sourceDir)) {
+  const failures: string[] = [];
+  const listing = await readDirListing(sourceDir);
+  if (listing.failed) return { roots, failures: [label] };
+  for (const name of listing.names) {
     if (name.startsWith(".")) continue;
     if (name.startsWith("@")) {
-      for (const child of await readDirNames(join(sourceDir, name))) {
+      const inner = await readDirListing(join(sourceDir, name));
+      if (inner.failed) {
+        failures.push(name);
+        continue;
+      }
+      for (const child of inner.names) {
         if (child.startsWith(".")) continue;
         roots.push({ dir: join(sourceDir, name, child), tag: `${name}/${child}` });
       }
@@ -120,39 +147,48 @@ async function listPackageRoots(sourceDir: string): Promise<PackageRoot[]> {
     }
     roots.push({ dir: join(sourceDir, name), tag: name });
   }
-  return roots;
+  return { roots, failures };
+}
+
+function dedupeEntryPaths(paths: readonly EntryPath[]): EntryPath[] {
+  const ordered = [...paths].sort((left, right) =>
+    left.logical < right.logical ? -1 : left.logical > right.logical ? 1 : 0,
+  );
+  const seen = new Map<string, EntryPath>();
+  for (const path of ordered) {
+    if (!seen.has(path.canonical)) seen.set(path.canonical, path);
+  }
+  return [...seen.values()];
+}
+
+async function literalPath(
+  packageRoot: string,
+  kind: EntryKind,
+  literal: string,
+): Promise<EntryPath | undefined> {
+  const logical = isAbsolute(literal) ? literal : join(packageRoot, literal);
+  const canonical = await realpath(logical).catch(() => undefined);
+  if (canonical === undefined) return undefined;
+  const info = await stat(canonical).catch(() => undefined);
+  if (info === undefined || !within(packageRoot, canonical)) return undefined;
+  if (kind === "skill") return info.isDirectory() ? { logical, canonical } : undefined;
+  if (!info.isFile() || !isScriptFile(basename(logical))) return undefined;
+  return { logical, canonical };
 }
 
 async function resolveExplicit(
   packageRoot: string,
   kind: EntryKind,
   patterns: readonly string[],
-): Promise<{ paths: string[]; invalid: boolean }> {
+): Promise<{ paths: EntryPath[]; invalid: boolean }> {
   const directories = kind === "skill";
-  const found = new Set<string>();
   let invalid = false;
 
+  // Literal positives are only validated here; membership comes from the single glob pass
+  // so `!` exclusions also apply to them.
   for (const literal of patterns) {
     if (literal.startsWith("!") || isDynamicPattern(literal)) continue;
-    const candidate = isAbsolute(literal) ? literal : join(packageRoot, literal);
-    let resolved: string;
-    try {
-      resolved = await realpath(candidate);
-    } catch {
-      invalid = true;
-      continue;
-    }
-    const info = await stat(resolved).catch(() => undefined);
-    if (info === undefined || !within(packageRoot, resolved)) {
-      invalid = true;
-      continue;
-    }
-    const matches = directories ? info.isDirectory() : info.isFile();
-    if (!matches || (!directories && !isScriptFile(basename(resolved)))) {
-      invalid = true;
-      continue;
-    }
-    found.add(resolved);
+    if ((await literalPath(packageRoot, kind, literal)) === undefined) invalid = true;
   }
 
   let matches: string[];
@@ -167,53 +203,72 @@ async function resolveExplicit(
       dot: false,
     });
   } catch {
-    return { paths: sortNames([...found]), invalid: true };
+    return { paths: [], invalid: true };
   }
 
+  const found: EntryPath[] = [];
   for (const match of matches) {
     const trimmed = match.endsWith("/") ? match.slice(0, -1) : match;
-    const candidate = isAbsolute(trimmed) ? trimmed : join(packageRoot, trimmed);
-    let resolved: string;
-    try {
-      resolved = await realpath(candidate);
-    } catch {
+    const logical = isAbsolute(trimmed) ? trimmed : join(packageRoot, trimmed);
+    const canonical = await realpath(logical).catch(() => undefined);
+    if (canonical === undefined) {
       invalid = true;
       continue;
     }
-    if (!within(packageRoot, resolved)) {
+    if (!within(packageRoot, canonical)) {
       invalid = true;
       continue;
     }
-    if (!directories && !isScriptFile(basename(resolved))) continue;
-    found.add(resolved);
+    if (!directories && !isScriptFile(basename(logical))) continue;
+    found.push({ logical, canonical });
   }
 
-  return { paths: sortNames([...found]), invalid };
+  return { paths: dedupeEntryPaths(found), invalid };
 }
 
-async function conventionalPaths(packageRoot: string, kind: EntryKind): Promise<string[]> {
+async function conventionalPaths(
+  packageRoot: string,
+  kind: EntryKind,
+  onFault: () => void,
+): Promise<EntryPath[]> {
   const dir = join(packageRoot, KIND_DIRS[kind]);
-  const found: string[] = [];
-  for (const name of await readDirNames(dir)) {
+  const listing = await readDirListing(dir);
+  if (listing.failed) {
+    onFault();
+    return [];
+  }
+  const found: EntryPath[] = [];
+  for (const name of listing.names) {
     if (name.startsWith(".") || name.endsWith(SIDECAR_SUFFIX)) continue;
-    const full = join(dir, name);
-    const info = await stat(full).catch(() => undefined);
-    if (info === undefined) continue;
+    const logical = join(dir, name);
+    const info = await stat(logical).catch(() => undefined);
+    if (info === undefined) {
+      onFault();
+      continue;
+    }
     if (kind === "skill") {
       if (!info.isDirectory()) continue;
     } else if (!info.isFile() || !isScriptFile(name)) {
       continue;
     }
-    found.push(await realpath(full));
+    const canonical = await realpath(logical).catch(() => undefined);
+    if (canonical === undefined || !within(packageRoot, canonical)) {
+      onFault();
+      continue;
+    }
+    found.push({ logical, canonical });
   }
-  return sortNames(found);
+  return dedupeEntryPaths(found);
 }
 
-async function readSidecar(kind: EntryKind, entryPath: string): Promise<EntrySidecar | undefined> {
+async function readSidecar(
+  kind: EntryKind,
+  logicalPath: string,
+): Promise<EntrySidecar | undefined> {
   const path =
     kind === "skill"
-      ? join(dirname(entryPath), `${basename(entryPath)}${SIDECAR_SUFFIX}`)
-      : `${entryPath}${SIDECAR_SUFFIX}`;
+      ? join(dirname(logicalPath), `${basename(logicalPath)}${SIDECAR_SUFFIX}`)
+      : `${logicalPath}${SIDECAR_SUFFIX}`;
   let text: string;
   try {
     text = await readFile(path, "utf8");
@@ -228,10 +283,10 @@ async function readCandidate(
   packageRoot: string,
   packageName: string,
   kind: EntryKind,
-  entryPath: string,
+  path: EntryPath,
 ): Promise<Candidate> {
-  const sidecar = await readSidecar(kind, entryPath);
-  const namePart = sidecar?.name ?? entryBaseName(kind, basename(entryPath));
+  const sidecar = await readSidecar(kind, path.logical);
+  const namePart = sidecar?.name ?? entryBaseName(kind, basename(path.logical));
   const name = packageEntryName(packageName, namePart);
   const description = sidecar?.description ?? "";
 
@@ -240,7 +295,7 @@ async function readCandidate(
   if (kind === "skill") {
     let text: string;
     try {
-      const bytes = await readFile(join(entryPath, SKILL_FILE));
+      const bytes = await readFile(join(path.canonical, SKILL_FILE));
       entryDigest = sha256(bytes);
       text = bytes.toString("utf8");
     } catch {
@@ -249,7 +304,7 @@ async function readCandidate(
     skillContent = skillContentFor(text);
   } else {
     try {
-      entryDigest = sha256(await readFile(entryPath));
+      entryDigest = sha256(await readFile(path.canonical));
     } catch {
       throw new InvalidMetadataError();
     }
@@ -259,7 +314,7 @@ async function readCandidate(
     packageRoot,
     packageName,
     kind,
-    entryPath,
+    entryPath: path.canonical,
     entryDigest,
     name,
     description,
@@ -323,6 +378,15 @@ function buildInfo(candidate: Candidate, definition: DefinitionSnapshot | undefi
   return info;
 }
 
+function mergedConfigValid(candidate: Candidate, merged: JsonObject): boolean {
+  try {
+    return candidate.validator?.(merged) === true;
+  } catch (error) {
+    if (error instanceof InvalidMetadataError) return false;
+    throw error;
+  }
+}
+
 export async function discoverExtensions(
   options: ExtensionsOptions,
   workspace: string,
@@ -338,14 +402,20 @@ export async function discoverExtensions(
   const seenRoots = new Set<string>();
   const candidates: Candidate[] = [];
 
-  for (const sourceDir of sources) {
-    for (const listed of await listPackageRoots(sourceDir)) {
+  for (const [index, sourceDir] of sources.entries()) {
+    const label = SOURCE_LABELS[index] ?? "extensions";
+    const listed = await listPackageRoots(sourceDir, label);
+    for (const failure of listed.failures) {
+      pushIssue(issues, "extensions.invalid", failure);
+    }
+    for (const packageEntry of listed.roots) {
       let packageRoot: string;
       let isDirectory = false;
       try {
-        packageRoot = await realpath(listed.dir);
+        packageRoot = await realpath(packageEntry.dir);
         isDirectory = (await stat(packageRoot)).isDirectory();
       } catch {
+        pushIssue(issues, "extensions.invalid", packageEntry.tag);
         continue;
       }
       if (!isDirectory || seenRoots.has(packageRoot)) continue;
@@ -357,7 +427,7 @@ export async function discoverExtensions(
         packageJson = await readFile(packageFile, "utf8");
       } catch (error) {
         if (isNotFound(error)) continue;
-        pushIssue(issues, "extensions.invalid", listed.tag);
+        pushIssue(issues, "extensions.invalid", packageEntry.tag);
         continue;
       }
 
@@ -368,7 +438,7 @@ export async function discoverExtensions(
         name = parsed.name;
         manifest = parsed.manifest;
       } catch {
-        pushIssue(issues, "extensions.invalid", listed.tag);
+        pushIssue(issues, "extensions.invalid", packageEntry.tag);
         continue;
       }
 
@@ -381,22 +451,26 @@ export async function discoverExtensions(
         }
       }
 
+      const reportFault = (): void => {
+        pushIssue(issues, "extensions.invalid", name);
+      };
+
       for (const kind of KINDS) {
-        let paths: string[];
+        let paths: EntryPath[];
         if (manifest === undefined) {
-          paths = await conventionalPaths(packageRoot, kind);
+          paths = await conventionalPaths(packageRoot, kind, reportFault);
         } else {
           const patterns = manifest[MANIFEST_KEYS[kind]] ?? [];
           const resolved = await resolveExplicit(packageRoot, kind, patterns);
-          if (resolved.invalid) pushIssue(issues, "extensions.invalid", name);
+          if (resolved.invalid) reportFault();
           paths = resolved.paths;
         }
-        for (const entryPath of paths) {
+        for (const path of paths) {
           try {
-            candidates.push(await readCandidate(packageRoot, name, kind, entryPath));
+            candidates.push(await readCandidate(packageRoot, name, kind, path));
           } catch (error) {
             if (error instanceof InvalidMetadataError) {
-              pushIssue(issues, "extensions.invalid", name);
+              reportFault();
               continue;
             }
             throw error;
@@ -422,26 +496,39 @@ export async function discoverExtensions(
   const byName = new Map<EntryName, Candidate>();
   for (const candidate of survivors) byName.set(candidate.name, candidate);
 
-  for (const key of Object.keys(config.entryConfig ?? {})) {
+  const userConfig = config.entryConfig ?? {};
+  for (const key of Object.keys(userConfig)) {
     const candidate = byName.get(key as EntryName);
     if (candidate === undefined || candidate.kind !== "wrapper") invalidConfig();
   }
 
+  // Design §6.2: schema applies to merged defaults < user override. Defaults may be partial;
+  // only a failing merged config with an explicit user override is a user config error.
+  const kept: Candidate[] = [];
   for (const candidate of survivors) {
-    if (candidate.kind !== "wrapper") continue;
+    if (candidate.kind !== "wrapper") {
+      kept.push(candidate);
+      continue;
+    }
     const spec = normalizeWrapperSpec(candidate.configSpec);
-    const override = config.entryConfig?.[candidate.name] ?? {};
+    const hasUserConfig = Object.hasOwn(userConfig, candidate.name);
+    const override = hasUserConfig ? (userConfig[candidate.name] ?? {}) : {};
     const merged = mergeWrapperConfig(spec.defaults, override);
-    if (candidate.validator === undefined || !candidate.validator(merged)) invalidConfig();
+    if (!mergedConfigValid(candidate, merged)) {
+      if (hasUserConfig) invalidConfig();
+      pushIssue(issues, "extensions.invalid", candidate.packageName, candidate.name);
+      continue;
+    }
     candidate.configSpec = spec;
     candidate.wrapperConfig = merged;
+    kept.push(candidate);
   }
 
   const records = new Map<EntryName, DiscoveredEntry>();
   const entries: EntryInfo[] = [];
   const descriptors: InventoryDescriptor[] = [];
 
-  for (const candidate of survivors) {
+  for (const candidate of kept) {
     const definition = buildDefinition(candidate);
     const info = deepFreeze(buildInfo(candidate, definition));
     entries.push(info);

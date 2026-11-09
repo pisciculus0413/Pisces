@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -636,4 +637,348 @@ test("defaultBuiltinDir is module-relative and absent by default without being c
 
   expect(result.inventory.entries).toEqual([]);
   expect(await exists(expected)).toBe(false);
+});
+
+interface ChildResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+// Bounded child helper: kill and reap the child if it outlives the timeout.
+function runBoundedChild(args: string[], timeoutMs: number): Promise<ChildResult> {
+  const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  return new Promise((resolveChild) => {
+    let settled = false;
+    let timedOut = false;
+    let killTimer: NodeJS.Timeout;
+    let reapTimer: NodeJS.Timeout;
+    const done = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      clearTimeout(reapTimer);
+      resolveChild({ code, stdout, stderr, timedOut });
+    };
+    killTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    reapTimer = setTimeout(() => done(null), timeoutMs + 5_000);
+    child.once("close", (code) => done(code));
+    child.once("error", () => done(null));
+  });
+}
+
+const sidecarWrapper = async (packageName: string, sidecar: unknown): Promise<string> => {
+  const pkg = extensionsDir(packageName);
+  await makePackage(pkg, {
+    name: packageName,
+    manifest: { wrappers: ["wrappers/w.ts"] },
+    files: { "wrappers/w.ts": wrapperSource(sentinel) },
+  });
+  await writeSidecar(pkg, "wrappers/w.ts", sidecar);
+  return pkg;
+};
+
+test("rejects async wrapper schemas in a bounded fresh dist process", async () => {
+  const pkg = extensionsDir("async-schema");
+  await makePackage(pkg, {
+    name: "async-schema",
+    manifest: { wrappers: ["wrappers/async.ts"], tools: ["tools/ok.ts"] },
+    files: {
+      "wrappers/async.ts": wrapperSource(sentinel),
+      "tools/ok.ts": toolSource(sentinel),
+    },
+  });
+  await writeSidecar(pkg, "wrappers/async.ts", {
+    config: { defaults: {}, schema: { $async: true, type: "object" } },
+  });
+
+  const distPath = fileURLToPath(new URL("../dist/extensions/discovery.js", import.meta.url));
+  const childPath = fileURLToPath(
+    new URL("./fixtures/extensions-async-child.mjs", import.meta.url),
+  );
+  expect(await exists(distPath)).toBe(true);
+  const child = await runBoundedChild(
+    [childPath, distPath, configDir, workspace, builtinDir],
+    20_000,
+  );
+  const label = `exit=${child.code} timedOut=${child.timedOut} stderr=${child.stderr} stdout=${child.stdout}`;
+  expect(child.timedOut, label).toBe(false);
+  expect(child.code, label).toBe(0);
+  expect(child.stderr, label).toBe("");
+  const payload = JSON.parse(child.stdout) as { names: string[]; codes: string[] };
+  expect(payload.names).toEqual(["async-schema#ok"]);
+  expect(payload.codes).toContain("extensions.invalid");
+  expect(await exists(sentinel)).toBe(false);
+});
+
+test("isolates wrappers whose merged defaults fail their schema without user config", async () => {
+  const pkg = extensionsDir("bad-defaults");
+  await makePackage(pkg, {
+    name: "bad-defaults",
+    manifest: { wrappers: ["wrappers/bad.ts"], tools: ["tools/ok.ts"] },
+    files: {
+      "wrappers/bad.ts": wrapperSource(sentinel),
+      "tools/ok.ts": toolSource(sentinel),
+    },
+  });
+  await writeSidecar(pkg, "wrappers/bad.ts", {
+    config: {
+      defaults: { limit: "not-a-number" },
+      schema: { type: "object", properties: { limit: { type: "number" } } },
+    },
+  });
+
+  const result = await discoverExtensions(options(), workspace, {});
+
+  expect(result.inventory.entries.map((entry) => entry.name)).toEqual(["bad-defaults#ok"]);
+  expect(result.records.has(entryName("bad-defaults#bad"))).toBe(false);
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({ code: "extensions.invalid", source: "bad-defaults" }),
+  );
+  expect(await exists(sentinel)).toBe(false);
+});
+
+test("accepts a valid user override that completes partial defaults", async () => {
+  const pkg = await sidecarWrapper("partial-defaults", {
+    config: {
+      defaults: {},
+      schema: {
+        type: "object",
+        required: ["limit"],
+        properties: { limit: { type: "number" } },
+      },
+    },
+  });
+
+  const result = await discoverExtensions(options(), workspace, {
+    entryConfig: { "partial-defaults#w": { limit: 2 } },
+  });
+  const record = result.records.get(entryName("partial-defaults#w"));
+
+  expect(result.issues).toEqual([]);
+  expect(record?.wrapperConfig).toEqual({ limit: 2 });
+  expect(record?.info.definition?.configHash).toBe(hashJson({ limit: 2 }));
+  expect(await exists(join(pkg, "wrappers/w.ts"))).toBe(true);
+  expect(await exists(sentinel)).toBe(false);
+});
+
+test("keeps config.invalid for explicit entryConfig on invalid or duplicate wrappers", async () => {
+  const invalid = extensionsDir("invalid-target");
+  await makePackage(invalid, {
+    name: "invalid-target",
+    manifest: { wrappers: ["wrappers/w.ts"] },
+    files: { "wrappers/w.ts": wrapperSource(sentinel) },
+  });
+  await writeSidecar(invalid, "wrappers/w.ts", {
+    config: { defaults: {}, schema: { type: 5 } },
+  });
+  await rejectsConfig(() =>
+    discoverExtensions(options(), workspace, {
+      entryConfig: { "invalid-target#w": {} },
+    }),
+  );
+
+  await makePackage(extensionsDir("dupe-wrapper"), {
+    name: "dupe-wrapper",
+    manifest: { wrappers: ["wrappers/w.ts"] },
+    files: { "wrappers/w.ts": wrapperSource(sentinel) },
+  });
+  await makePackage(join(workspace, ".pisces", "extensions", "two"), {
+    name: "dupe-wrapper",
+    manifest: { wrappers: ["wrappers/w.ts"] },
+    files: { "wrappers/w.ts": wrapperSource(sentinel) },
+  });
+  await rejectsConfig(() =>
+    discoverExtensions(options(), workspace, {
+      entryConfig: { "dupe-wrapper#w": {} },
+    }),
+  );
+  expect(await exists(sentinel)).toBe(false);
+});
+
+test("applies literal and absolute exclusions to positive literal entries", async () => {
+  const relative = extensionsDir("literal-exclusion");
+  await makePackage(relative, {
+    name: "literal-exclusion",
+    manifest: { tools: ["tools/a.ts", "!tools/a.ts"] },
+    files: { "tools/a.ts": toolSource(sentinel) },
+  });
+  const absoluteName = "absolute-exclusion";
+  const absolute = extensionsDir(absoluteName);
+  const absoluteEntry = join(absolute, "tools", "b.ts");
+  await makePackage(absolute, {
+    name: absoluteName,
+    manifest: { tools: [absoluteEntry, `!${absoluteEntry}`] },
+    files: { "tools/b.ts": toolSource(sentinel) },
+  });
+  const globNegative = extensionsDir("literal-glob-negative");
+  await makePackage(globNegative, {
+    name: "literal-glob-negative",
+    manifest: { tools: ["tools/keep.ts", "!tools/*.ts"] },
+    files: { "tools/keep.ts": toolSource(sentinel) },
+  });
+
+  const result = await discoverExtensions(options(), workspace, {});
+
+  expect(result.inventory.entries).toEqual([]);
+  expect(result.issues).toEqual([]);
+  expect(await exists(sentinel)).toBe(false);
+});
+
+test("deduplicates conventional aliases and derives the alias sidecar logically", async () => {
+  const pkg = extensionsDir("alias");
+  await makePackage(pkg, {
+    name: "alias",
+    files: { "tools/real.ts": toolSource(sentinel) },
+  });
+  await symlink("real.ts", join(pkg, "tools", "alias.ts"));
+  await writeSidecar(pkg, "tools/alias.ts", {
+    name: "aliased",
+    description: "from alias sidecar",
+  });
+  await writeSidecar(pkg, "tools/real.ts", { name: "real-name" });
+
+  const result = await discoverExtensions(options(), workspace, {});
+
+  expect(result.inventory.entries.map((entry) => entry.name)).toEqual(["alias#aliased"]);
+  expect(result.inventory.entries[0]?.description).toBe("from alias sidecar");
+  expect(result.issues).toEqual([]);
+  const record = result.records.get(entryName("alias#aliased"));
+  expect(record?.entryPath).toBe(join(resolve(pkg), "tools/real.ts"));
+  expect(await exists(sentinel)).toBe(false);
+});
+
+test("collapses duplicate conventional aliases to one lexical representative", async () => {
+  const pkg = extensionsDir("multi-alias");
+  await makePackage(pkg, {
+    name: "multi-alias",
+    files: { "tools/real.ts": toolSource(sentinel) },
+  });
+  await symlink("real.ts", join(pkg, "tools", "b.ts"));
+  await symlink("real.ts", join(pkg, "tools", "a.ts"));
+
+  const result = await discoverExtensions(options(), workspace, {});
+
+  expect(result.inventory.entries.map((entry) => entry.name)).toEqual(["multi-alias#a"]);
+  expect(result.issues).toEqual([]);
+  expect(await exists(sentinel)).toBe(false);
+});
+
+test("rejects conventional and explicit entries whose realpath escapes the package", async () => {
+  await writeText(join(root, "outside.ts"), toolSource(sentinel));
+  const conventional = extensionsDir("conventional-escape");
+  await makePackage(conventional, {
+    name: "conventional-escape",
+    files: { "tools/in.ts": toolSource(sentinel) },
+  });
+  await symlink(join(root, "outside.ts"), join(conventional, "tools", "out.ts"));
+
+  const explicit = extensionsDir("explicit-escape");
+  await makePackage(explicit, {
+    name: "explicit-escape",
+    manifest: { tools: ["tools/escape.ts"] },
+    files: { "tools/keep.ts": toolSource(sentinel) },
+  });
+  await symlink(join(root, "outside.ts"), join(explicit, "tools", "escape.ts"));
+
+  const result = await discoverExtensions(options(), workspace, {});
+
+  expect(result.inventory.entries.map((entry) => entry.name)).toEqual(["conventional-escape#in"]);
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({ code: "extensions.invalid", source: "conventional-escape" }),
+  );
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({ code: "extensions.invalid", source: "explicit-escape" }),
+  );
+  expect(JSON.stringify(result.issues)).not.toContain(root);
+  expect(await exists(sentinel)).toBe(false);
+});
+
+test("uses the logical skill alias for sidecar and basename", async () => {
+  const pkg = extensionsDir("skill-alias");
+  await makePackage(pkg, {
+    name: "skill-alias",
+    files: { "skills/real/SKILL.md": "Aliased body\n" },
+  });
+  await symlink("real", join(pkg, "skills", "link"));
+  await writeSidecar(pkg, "skills/link", { name: "linked" });
+
+  const result = await discoverExtensions(options(), workspace, {});
+
+  expect(result.inventory.entries.map((entry) => entry.name)).toEqual(["skill-alias#linked"]);
+  expect(result.records.get(entryName("skill-alias#linked"))?.skillContent).toEqual([
+    { type: "text", text: "Aliased body\n" },
+  ]);
+  expect(result.issues).toEqual([]);
+});
+
+test("isolates unreadable conventional kind directories with ELOOP", async () => {
+  const pkg = extensionsDir("kind-loop");
+  await makePackage(pkg, {
+    name: "kind-loop",
+    files: { "wrappers/w.ts": wrapperSource(sentinel) },
+  });
+  await symlink("tools", join(pkg, "tools"));
+
+  const result = await discoverExtensions(options(), workspace, {});
+
+  expect(result.inventory.entries.map((entry) => entry.name)).toEqual(["kind-loop#w"]);
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({ code: "extensions.invalid", source: "kind-loop" }),
+  );
+  expect(JSON.stringify(result.issues)).not.toContain(root);
+  expect(await exists(sentinel)).toBe(false);
+});
+
+test("isolates ELOOP scoped containers and package roots", async () => {
+  await mkdir(join(configDir, "extensions"), { recursive: true });
+  await symlink("@scope", join(configDir, "extensions", "@scope"));
+  await symlink("looped", join(configDir, "extensions", "looped"));
+  await makePackage(extensionsDir("healthy"), {
+    name: "healthy",
+    files: { "tools/good.ts": toolSource(sentinel) },
+  });
+
+  const result = await discoverExtensions(options(), workspace, {});
+
+  expect(result.inventory.entries.map((entry) => entry.name)).toEqual(["healthy#good"]);
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({ code: "extensions.invalid", source: "@scope" }),
+  );
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({ code: "extensions.invalid", source: "looped" }),
+  );
+  expect(JSON.stringify(result.issues)).not.toContain(root);
+  expect(await exists(sentinel)).toBe(false);
+});
+
+test("isolates ELOOP entry symlinks and keeps healthy siblings", async () => {
+  const pkg = extensionsDir("entry-loop");
+  await makePackage(pkg, {
+    name: "entry-loop",
+    files: { "tools/good.ts": toolSource(sentinel) },
+  });
+  await symlink("bad.ts", join(pkg, "tools", "bad.ts"));
+
+  const result = await discoverExtensions(options(), workspace, {});
+
+  expect(result.inventory.entries.map((entry) => entry.name)).toEqual(["entry-loop#good"]);
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({ code: "extensions.invalid", source: "entry-loop" }),
+  );
+  expect(await exists(sentinel)).toBe(false);
 });
