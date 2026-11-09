@@ -1,6 +1,6 @@
 # 扩展系统与透明选择闭环：阶段设计
 
-**状态：用户于 2026-11-09 批准，进入实施计划阶段；尚未授权开始实施。**
+**状态：设计与 Plan A 已获用户批准实施；当前 Tasks 1–2 完成，Task 3 正式 jiti 补丁实现进行中。用户已批准 [jiti 局部补丁修订设计](2026-11-09-extension-loader-jiti-patch-design.md)，并确认 [专项实施计划](../plans/2026-11-09-extension-loader-jiti-patch.md)；硬门槛与独立审查尚未通过；Plan B 未授权。恢复入口见 [当前交接](../handoffs/2026-11-09-extensions-selection-a-to-b.md)。原有设计约束未放宽。**
 
 ## 1. 目标、权威与范围
 

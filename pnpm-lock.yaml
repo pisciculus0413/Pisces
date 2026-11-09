@@ -162,6 +162,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  jiti@2.7.0: c04801585f96b3dc40fda777710054320127565261f6965380490832f71b1ed6
+
 importers:
 
   .:
@@ -177,7 +180,7 @@ importers:
         version: 7.0.2
       vitest:
         specifier: ^5.0.3
-        version: 5.0.3(@types/node@26.6.3)(vite@8.3.1(@types/node@26.6.3)(jiti@2.7.0))
+        version: 5.0.3(@types/node@26.6.3)(vite@8.3.1(@types/node@26.6.3)(jiti@2.7.0(patch_hash=c04801585f96b3dc40fda777710054320127565261f6965380490832f71b1ed6)))
 
   packages/core: {}
 
@@ -194,7 +197,7 @@ importers:
         version: 8.20.0
       jiti:
         specifier: 2.7.0
-        version: 2.7.0
+        version: 2.7.0(patch_hash=c04801585f96b3dc40fda777710054320127565261f6965380490832f71b1ed6)
       tinyglobby:
         specifier: 0.2.17
         version: 0.2.17
@@ -1038,14 +1041,14 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  '@vitest/mocker@5.0.3(vite@8.3.1(@types/node@26.6.3)(jiti@2.7.0))':
+  '@vitest/mocker@5.0.3(vite@8.3.1(@types/node@26.6.3)(jiti@2.7.0(patch_hash=c04801585f96b3dc40fda777710054320127565261f6965380490832f71b1ed6)))':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       '@vitest/spy': 5.0.3
       estree-walker: 3.0.3
       magic-string: 1.4.2
     optionalDependencies:
-      vite: 8.3.1(@types/node@26.6.3)(jiti@2.7.0)
+      vite: 8.3.1(@types/node@26.6.3)(jiti@2.7.0(patch_hash=c04801585f96b3dc40fda777710054320127565261f6965380490832f71b1ed6))
 
   '@vitest/spy@5.0.3': {}
 
@@ -1093,7 +1096,7 @@ snapshots:
 
   isexe@4.0.0: {}
 
-  jiti@2.7.0: {}
+  jiti@2.7.0(patch_hash=c04801585f96b3dc40fda777710054320127565261f6965380490832f71b1ed6): {}
 
   json-schema-traverse@1.0.0: {}
 
@@ -1262,7 +1265,7 @@ snapshots:
 
   undici@6.29.1: {}
 
-  vite@8.3.1(@types/node@26.6.3)(jiti@2.7.0):
+  vite@8.3.1(@types/node@26.6.3)(jiti@2.7.0(patch_hash=c04801585f96b3dc40fda777710054320127565261f6965380490832f71b1ed6)):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.7
@@ -1272,12 +1275,12 @@ snapshots:
     optionalDependencies:
       '@types/node': 26.6.3
       fsevents: 2.3.3
-      jiti: 2.7.0
+      jiti: 2.7.0(patch_hash=c04801585f96b3dc40fda777710054320127565261f6965380490832f71b1ed6)
 
-  vitest@5.0.3(@types/node@26.6.3)(vite@8.3.1(@types/node@26.6.3)(jiti@2.7.0)):
+  vitest@5.0.3(@types/node@26.6.3)(vite@8.3.1(@types/node@26.6.3)(jiti@2.7.0(patch_hash=c04801585f96b3dc40fda777710054320127565261f6965380490832f71b1ed6))):
     dependencies:
       '@types/chai': 5.2.3
-      '@vitest/mocker': 5.0.3(vite@8.3.1(@types/node@26.6.3)(jiti@2.7.0))
+      '@vitest/mocker': 5.0.3(vite@8.3.1(@types/node@26.6.3)(jiti@2.7.0(patch_hash=c04801585f96b3dc40fda777710054320127565261f6965380490832f71b1ed6)))
       chai: 6.2.2
       es-module-lexer: 2.3.2
       expect-type: 1.4.0
@@ -1288,7 +1291,7 @@ snapshots:
       tinybench: 6.2.0
       tinyexec: 1.3.1
       tinyglobby: 0.2.17
-      vite: 8.3.1(@types/node@26.6.3)(jiti@2.7.0)
+      vite: 8.3.1(@types/node@26.6.3)(jiti@2.7.0(patch_hash=c04801585f96b3dc40fda777710054320127565261f6965380490832f71b1ed6))
       why-is-node-running: 3.2.1
     optionalDependencies:
       '@types/node': 26.6.3

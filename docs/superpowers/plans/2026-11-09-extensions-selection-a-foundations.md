@@ -6,13 +6,13 @@
 
 **Architecture:** 配置/清点/惰性 loader 在 daemon，纯选择与资格判定在 Core。Task 6 将两者组合成独立 binding，作为 Plan B 唯一的服务层交接边界。沿用原任务编号 1–6，不跨阶段提前写接线。
 
-**Tech Stack:** TypeScript/ESM、Node >=22.19.0、pnpm/Vitest；SHA-256、Ajv 8 draft-07、tinyglobby、jiti 2。具体版本/能力尚未验证，Task 3 是停止式能力门槛。
+**Tech Stack:** TypeScript/ESM、Node >=22.19.0、pnpm12.8.1/Vitest；SHA-256、Ajv8.20.0 draft-07、tinyglobby0.2.17、jiti2.7.0。原版 jiti 的 CJS 门槛失败；局部补丁设计已批准，正式实现按 Task3 修订计划验证。
 
-**Spec:** `docs/superpowers/specs/2026-11-09-extensions-selection-design.md`（已批准）；本计划主要对应 §3–7、§8.3–8.4。与后续声明交接相关的 §8.1 保留完整快照语义。
+**Spec:** `docs/superpowers/specs/2026-11-09-extensions-selection-design.md`（已批准）；本计划主要对应 §3–7、§8.3–8.4。Task3 另遵守 [已批准补丁设计](../specs/2026-11-09-extension-loader-jiti-patch-design.md)，其 [专项修订计划](2026-11-09-extension-loader-jiti-patch.md) 已获用户确认并进入正式实现。与后续声明交接相关的 §8.1 保留完整快照语义。
 
 ## Global Constraints
 
-- 本计划待用户审阅，尚未开始实施；在 `dev-pi` 顺序工作，不建 worktree、不向 main 提交、不 push/merge，保留旧 SDD 资料。
+- 本计划已获用户实施授权。当前基线及 Tasks 1–2 已完成；Task 3 的 CJS 传递宿主身份硬门槛失败，Tasks 4–6 未开始。先读 [当前交接](../handoffs/2026-11-09-extensions-selection-a-to-b.md)；下方任务正文/checkbox 保留规划模板，不得据此重复已完成任务。在 `dev-pi` 顺序工作，不建 worktree、不向 main 提交、不 push/merge，保留旧 SDD 资料。
 - 必须读入口索引 `2026-11-09-extensions-selection.md` 的门禁 G；每次提交执行原生构建、完整 Vitest、两项 tsc、Biome、边界扫描，仅显式暂存本任务文件。
 - Core 无文件/环境 I/O，不依赖 daemon/protocol；发现不执行扩展代码，工具/包装器 invoke 时才装载，来源按需固化。
 - `package#name`；`foo.ts.meta.json`；技能相邻 `foo.meta.json` + `SKILL.md`；只有 wrapper 接受条目配置。
@@ -40,7 +40,7 @@
 |---|---|---|
 | daemon `extensions/{types,hash,config}.ts` | 配置与哈希 | 1 |
 | daemon `extensions/{discovery,metadata}.ts`、test `extensions-fixtures.ts` | 只读清点、元数据与临时包 fixture | 2 |
-| daemon `extensions/loader.ts` | 私有 loader、宿主身份、入口指纹 | 3 |
+| daemon `extensions/loader.ts`、`patches/jiti@2.7.0.patch`、workspace/lock、专项测试 | 私有 loader、正式补丁与安装复现；具体文件见 Task3 修订计划 | 3 |
 | Core `context/selection.ts`、types/index | 纯重放与历史类型/资格 | 4 |
 | Core `context/{context,materialize,types}.ts`、`loop/driver.ts` | A/C 重校验、executionSelection | 5 |
 | daemon `extensions/extensions.ts`、types | 每会话 binding 组合 | 6 |
@@ -101,31 +101,17 @@
   git commit -m "feat(daemon): discover extension metadata without executing code"
   ```
 
-### Task 3: 惰性 TS/TSX loader 与宿主身份硬门槛
+### Task 3: 正式 jiti 局部补丁与宿主身份硬门槛（专项修订）
 
-**Files:** Create `packages/daemon/src/extensions/loader.ts`; Modify daemon `package.json`、`pnpm-lock.yaml`; Test `packages/daemon/test/extensions-loader.test.ts`（使用 Task 2 fixtures）。
+**唯一执行正文：** [Task3 jiti 补丁实施计划](2026-11-09-extension-loader-jiti-patch.md)。用户已批准补丁设计并确认修订计划，当前处于正式实现阶段（验收未通过）；原版 loader 已存在，不重新建文件/解析浮动 jiti@2，也不重新选型。原任务模板由该专项计划替代，Tasks4–6 不变。
 
-**Interfaces:**
-- Consumes `DiscoveredEntry`、`sha256`。
-- Produces `ExtensionModule { default: unknown; config?: unknown }`、`ExtensionLoader { load(entry: DiscoveredEntry): Promise<ExtensionModule> }`。
-- `createExtensionLoader(): ExtensionLoader`：每个实例私有加载状态，按 entryPath+entryDigest 缓存 promise，包括失败。
+**Interfaces（保持不变）：** `DiscoveredEntry`/`sha256` → `ExtensionModule { default: unknown; config?: unknown }`、`ExtensionLoader { load(entry: DiscoveredEntry): Promise<ExtensionModule> }`；`createExtensionLoader(): ExtensionLoader` 按 entryPath+entryDigest 缓存 promise/失败。
 
-- [ ] **Step 1: 写失败测试。** 临时 TS 工具、TSX+本地 JSX runtime、具有 extends/baseUrl/paths 的 tsconfig、本地 node_modules 依赖、node_modules 内 TS 包；模块静态和动态导入 `@pisces/core` 并抛 ToolDeniedError，要求宿主 `instanceof` 成立。同路径不同会话/不同冻结版本不得复用陈旧模块，单实例并发 load sentinel 只增加一次。
-  ```ts
-  const [a, b] = await Promise.all([loader.load(entry), loader.load(entry)]);
-  expect(a).toBe(b);
-  expect(await readCounter(counter)).toBe(1);
-  expect(loadedError).toBeInstanceOf(ToolDeniedError);
-  ```
-  冻结后修改入口再首次 load 必须拒绝且 sentinel 不存在；语法错误/坏默认导出只影响本 entry；构造 loader 本身不导入任何扩展。
-- [ ] **Step 2: RED。** `pnpm exec vitest run packages/daemon/test/extensions-loader.test.ts`。
-- [ ] **Step 3: 实现 loader 并核实能力。** 执行时核实 jiti 2 文档/元数据后 `pnpm --filter @pisces/daemon add --save-exact jiti@2`；若解析 tsconfig extends/paths 需要独立解析器，使用 `get-tsconfig@4` 并同样 save-exact 锁定。jiti 配置必须禁止绕过入口校验的 native 直载/跨 binding 模块缓存；宿主 alias 指向同一已加载宿主文件，不能映射到扩展自己的副本。原生/转译层的缓存都要由身份测试实际证明，不能仅检查配置对象。load 对三类代码入口的 default 导出验证为函数；wrapper 工厂产物与 config 一致性由 Task 6 验证。
-- [ ] **Step 4: GREEN/能力门槛。** 重跑 loader 测试，并用已编译 dist 入口在有界子进程中再验证宿主身份及无 Vitest resolver 帮助的路径解析。若 jiti 无法满足静态/动态导入、TSX 或跨 binding 隔离，停止 Task 3、记录最小复现，向用户请求等价 loader 方案；不得删测、放宽身份或虚报依赖能力。
-- [ ] **Step 5: 门禁 G，然后提交。**
-  ```bash
-  git add packages/daemon/src/extensions/loader.ts packages/daemon/package.json pnpm-lock.yaml packages/daemon/test/extensions-loader.test.ts
-  git commit -m "feat(daemon): load extension modules lazily with host identity"
-  ```
+- [ ] 按专项计划完成模式/JSON/格式的逐组行为 RED→GREEN 与正式 adapter 接线。
+- [ ] 三个本地 Node 版本、真实 dist、隔离冻结安装/负控及原 CJS 两项正向身份断言通过。
+- [ ] 完整 G 后提交，独立审查从原 Task3 BASE e4776e6 生成全部 diff，关闭 Critical/Important。
+
+未完成以上硬门槛不进入 Task4；历史 I1 已接受与延期 Minor 保留。
 
 ### Task 4: Core 纯选择视图与历史类型规则
 
