@@ -652,16 +652,27 @@ store --> ui : 全树或分支记录（成型为界面视图）
 
 服务层 `Extensions` 在本地发现并读取清单，得到条目及其声明；该过程不执行扩展代码。扩展相关配置由 `Extensions` 读取，扩展代码不直接访问配置文件。
 
-内容条目按类型分派：工具、包装器、技能、上下文来源、供应商进入核心层注册表；客户端登记进客户端启动注册。
+内容条目按类型分派：工具、包装器、技能、上下文来源进入核心层注册表。本阶段**不装配** `providers`
+与 `clients`：清单里出现它们只记录 `extensions.unsupported_contribution`，不进入清点、不参与选择，
+也不登记客户端启动命令。
 
 各内容类型的生效行为：
 
-- `tools`：声明通过 `RequestToolDeclaration` 投影到 `LlmRequest.tools`；运行时身份与实现留在本地，智能体调用条目时执行已选中的实现。
-- `skills`：内容写入系统提示词。
-- `context`：由用户启用的来源在装配时产出片段；片段先追加为会话节点，再参与装配。
-- `providers`：指定使用的大语言模型供应商接口。
-- `wrappers`：按名称顺序添加其实现到工具流水线；智能体调用工具时执行包装器，返回新的工具声明替代原声明。
-- `clients`：登记启动命令；由 `client` 命令经协议 `client.start` 显式启动，不参与选择。
+- `tools`：声明通过 `RequestToolDeclaration` 投影到 `LlmRequest.tools`；实现代码在首次实际调用时才由
+  宿主加载器导入并缓存，运行时身份与实现留在本地。
+- `skills`：正文在发现阶段读取，首次选中装配时写入 `role=system` 的会话节点；取消选择只过滤请求，
+  不删除已写节点，再选时复用历史正文。
+- `context`：由用户启用的来源在首次选中装配时调用一次 `resolve`，片段先追加为会话节点，再参与装配；
+  零片段来源不写入任何节点，并在下一次装配时重试；取消选择后的历史节点仍被保留但不再进入请求。
+- `wrappers`：模块在首次实际调用时导入；工厂接收 sidecar `defaults` 与用户覆盖的合并配置，返回的
+  包装器只能装饰 `execute`，不得修改 `id/name/description/parameters`，否则该次调用安全失败为
+  `tool.wrapper_invalid`。
+- 供应商与客户端：**本阶段未交付**。
+
+选择状态与资格是两件事：`entries.snapshot.selection` 是已持久化的选择；`effective` 是本会话冻结定义
+在当前清点下的资格投影（工具/包装器带 `definitionHash`/`configHash`），定义或配置哈希不再匹配时标记
+`stale`，stale 工具不进 `LlmRequest.tools`、stale 包装器不执行，只能通过重新选择恢复。声明采用 all-toggle
+快照：每次翻转（无论开启还是关闭）都为 tool/wrapper 名称附带完整定义快照，类型变化在覆盖旧定义之前检查。
 
 宿主包 `@pisces/*` 由装载器映射到宿主实例，避免重复实例。
 
@@ -776,7 +787,7 @@ interface Event<E = JsonValue> {
 | 消息队列 | `queue.edit` | `{ sessionId, id, content }` | `{ id }`，仅 `kind=agent` |
 | 消息队列 | `queue.remove` | `{ sessionId, id }` | `{ id }` |
 | 消息队列 | `queue.clear` | `{ sessionId }` | `{ ids }` |
-| 可用条目 | `entries.snapshot` | `{ sessionId }` | `{ entries, selection }` |
+| 可用条目 | `entries.snapshot` | `{ sessionId }` | `{ entries: EntrySnapshot[], selection, effective }` |
 | 模板 | `template.list` | `{}` | `{ templates }` |
 | 模板 | `template.preview` | `{ templateId, workspace }` | `{ directories, files, initScript }` |
 | 模板 | `template.apply` | `{ templateId, workspace, confirmed: true }` | `{ projectId, sessionId }` |
@@ -1053,14 +1064,25 @@ interface Exec {
 }
 ```
 
-- 未提供 `pisces` 字段时，按约定目录发现内容条目。
+- 未提供 `pisces` 字段时，按约定目录发现内容条目：`tools/`、`wrappers/`、`context/` 下的脚本与
+  `skills/<name>/SKILL.md`；sidecar 命名为 `<entry文件>.meta.json`，技能为相邻的
+  `skills/<name>.meta.json`。
 - 工具条目的 `id` 由包名与条目路径生成（`package#entry`），`source` 记录来源包与文件。
 - 路径支持 glob 与排除。
 - 宿主包 `@pisces/*` 由装载器映射到宿主实例，扩展不打包宿主包。
-- 包装器模块导出工厂与配置：工厂接收配置、返回 `ToolWrapper`；`export const config` 给出配置 schema 与默认值。装载器在条目被选中时导入模块、读取配置，并合并软件配置目录中的用户覆盖。
-- 宿主内置 TypeScript 加载器（jiti 或等价实现），按需转译扩展入口，因此可直接分发 `.ts`/`.tsx` 源码；加载器不因文件位于 `node_modules` 而拒绝加载，npm 安装的扩展包无需预构建。
-- 加载器负责宿主包映射：`@pisces/*` 解析到宿主实例，扩展不打包宿主包；`tsconfig` 的 `paths` 与 JSX 由加载器处理。
-- 扩展的依赖安装在其自身目录的 `node_modules` 中，加载器按扩展路径解析。
+- 包装器 sidecar 的 `config` 形如 `{ "defaults": {…}, "schema": {…} }`；合并顺序为
+  sidecar defaults < 用户 `entryConfig` 覆盖，schema 校验合并结果，`configHash` 是合并配置的
+  规范化哈希，在声明确认时随定义冻结。工厂接收合并后的配置；模块导出的 `export const config`
+  必须描述 sidecar defaults（未合并值），不一致时调用安全失败为 `tool.wrapper_invalid`。
+- 工具/包装器/上下文来源的实现代码在首次实际使用（invoke 或 resolve）时才导入；清点、建会话、
+  快照与确认都不执行扩展代码。
+- 宿主内置 TypeScript 加载器（jiti 或等价实现），按需转译扩展入口，因此可直接分发 `.ts`/`.tsx`
+  源码；加载器不因文件位于 `node_modules` 而拒绝加载，npm 安装的扩展包无需预构建。
+- 加载器负责宿主包映射：`@pisces/*` 解析到宿主实例，扩展不打包宿主包；`tsconfig` 的 `paths` 与
+  JSX 由加载器处理。
+- 扩展的依赖安装在其自身目录的 `node_modules` 中，加载器按扩展路径解析；本阶段不哈希依赖树。
+- 清单中的 `providers`、`clients` 不装配，只记录 `extensions.unsupported_contribution`；CLI、沙箱与
+  热重载不在本阶段交付。
 
 ### 6.7 客户端命令与注册
 

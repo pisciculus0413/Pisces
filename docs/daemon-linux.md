@@ -6,8 +6,10 @@
 ## 支持范围
 
 - 仅 Linux x64；Node.js `>=22.19.0`，ESM。
-- 本阶段**没有** CLI、`run` 命令或配置文件加载器。宿主由嵌入程序调用
-  `startDaemon(...)` 启动，provider、工具与默认值由调用方传入。
+- 本阶段**没有** CLI、`run` 命令或通用配置文件加载器。宿主由嵌入程序调用
+  `startDaemon(...)` 启动。provider 与默认值由调用方传入；扩展模式下 provider 仍由调用方注入，
+  扩展选择与包装器配置来自 `<configDir>/config.json` 与 `<workspace>/.pisces/config.json`
+  （见 `docs/extensions.md`）。
 - macOS 与 Windows 在导入原生绑定、绑定 socket 之前以 `daemon.unsupported_platform`
   失败；两者均不是当前实现，Windows 命名管道为目标设计。
 - 本地只在 Node 26.13.0 x64 上验证。CI 配置了 Node 22.19.0 / 24 / 26 x64，但本阶段
@@ -36,10 +38,16 @@ pnpm run build                                  # tsc -b，生成 dist/
 验证命令（每次提交前）：
 
 ```bash
+node packages/daemon/native/build.mjs
+node_modules/.bin/tsc -b tsconfig.build.json
 node_modules/.bin/vitest run
 node_modules/.bin/tsc -p tsconfig.json
 node_modules/.bin/tsc -b tsconfig.build.json
 node_modules/.bin/biome check .
+# 边界扫描：退出码 1 = 无匹配 = 通过；2 = 错误，不得掩盖
+rg -n 'from "(node:)?(fs|http|https|net|tls|dgram|dns)|from "@pisces/(daemon|protocol)"' packages/core/src
+rg -n 'from "@pisces/(daemon|core)"' packages/protocol/src
+git diff --check
 ```
 
 ## 程序化启动
@@ -49,7 +57,9 @@ const host = await startDaemon({
   dataDir: "/absolute/private/dir",
   providers,
   providerHost,
-  // defaults / createTools / entries / skills / sources 等既有可选项
+  // 手动组合（与 extensions 互斥）：defaults / createTools / entries / skills / sources
+  // 或目录驱动的扩展模式：
+  extensions: { configDir: "/home/me/.config/pisces", builtinDir: "/optional/builtin" },
 });
 
 host.socketPath;          // <dataDir>/run/pisces.sock
@@ -64,8 +74,15 @@ await host.stop();
   直接拒绝，不会 chmod 修复。
 - host 用同一个 `dataDir` 构造 `SessionStore`、`ActiveTurnStore`、`EventBus`、`Concurrency`、
   `Gateway` 与监听器；公开 API 不接受外部 store/marker 注入，避免锁路径与存储路径不一致。
+- `extensions` 只接受目录配置 `{ configDir, builtinDir? }`，不接受 `Extensions` 服务实例；
+  它在 lock 获取后、native 自检与绑定之前构造。与 `defaults`、`createTools`、`entries`、`skills`、
+  `sources` 任一同时出现即 `daemon.start_failed`，走既有失败清理（释放锁、不 unlink 存活 socket）。
+  `builtinDir` 缺省由 daemon 模块 URL 推导到 `<repo>/extensions/builtin`，与进程工作目录无关。
+- 当前已路由的扩展相关方法：`session.create`（可带 `extensions` 数组）、`entries.snapshot`、
+  `queue.enqueue/edit/remove/clear`、`turn.start`（含 steer）。`session.list`、`template.*`、
+  `client.*` 仍未路由（`protocol.unknown_method`）。扩展契约见 `docs/extensions.md`。
 - 启动顺序：平台与 `getuid() === geteuid()` 检查 → 私有运行目录 → `run/pisces.lock` 的
-  `flock` → 原生 peer 凭据自检 → 陈旧 socket 处理 → `bootstrapGateway`（存储初始化与 turn 恢复）
+  `flock` → 互斥检查 → 原生 peer 凭据自检 → 陈旧 socket 处理 → `bootstrapGateway`（存储初始化与 turn 恢复）
   → 绑定并校验 `pisces.sock` → 接受连接。任何一步失败都按逆序关闭已获取资源，并保留锁文件本身。
 - 单实例由锁保证：第二个进程以 `daemon.lock_busy` 失败，且不会删除存活实例的 socket。
 
@@ -133,6 +150,12 @@ cause 不进入响应或事件。
 
 测试中的 peer 凭据用例覆盖真实自连接、注入的 UID 不一致、缺失/invalid fd 与原生错误；外部属主 socket 用例仅在 root 下运行，普通用户下跳过。真实跨 UID 回归另见下节；它不是跳过项。
 
+扩展的端到端验收在 `packages/daemon/test/extensions-socket.test.ts`：真实 `startDaemon({ extensions })`、
+真实 Unix socket + NDJSON、真实发现与加载器，覆盖声明/快照投影、首调用装载、队列路由、取消选择过滤、
+零片段重试、包装器配置合并、清点冲突隔离、断线不取消 turn、超限快照后连接可用、秘密不外泄、
+停机/重启 stale 可见性，以及真实跨 UID 拒绝。本机 Node 26.13.0 x64 上该文件 11/11 通过；
+远端矩阵仍未运行。
+
 ### 真实跨 UID 回归与前置条件
 
 `packages/daemon/test/unix-transport.test.ts` 用真实的不同宿主 UID 客户端验证拒绝路径，
@@ -151,5 +174,7 @@ cause 不进入响应或事件。
 - 前置条件：util-linux `unshare`（支持 `--map-auto`，通常 >= 2.38）、用户可用的从属 ID 区间，
   以及 setuid 的 `newuidmap`/`newgidmap`。任一缺失，或宿主观察到的 peer UID 与 daemon UID
   相同，测试都以显式配置错误**失败**而不是跳过，因此 Linux CI 必须提供该映射。
+  同一机制也在 `extensions-socket.test.ts` 中对真实扩展 daemon 复用：异 UID 客户端在认证前被拒绝
+  且读不到任何协议字节，同 UID 客户端随后仍可握手与请求；本机实测通过。
 - 单独的 `unshare -Ur` 不产生宿主可见的 UID 差异（内核把子进程映射回父 UID），不能作为跨 UID
   证据；本回归测试不使用它，也只在本机验证过，远端 Node 矩阵仍未运行。

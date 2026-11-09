@@ -244,6 +244,16 @@ interface EffectiveEntry {
   configHash?: string;
   stale: boolean;
 }
+
+// entries.snapshot 的协议投影（Task 9 实现的契约）
+interface EntrySnapshot {
+  name: EntryName;
+  kind: "tool" | "wrapper" | "skill" | "context";
+  description?: string;
+  parameters?: JsonObject;
+  definitionHash?: string;
+  configHash?: string;
+}
 ```
 
 - `tool`、`wrapper`、`skill`、`context` 是可选择条目。
@@ -399,14 +409,14 @@ interface HelloResult {
 | `queue.edit` | `{ sessionId, id, content }` | `{ id }` |
 | `queue.remove` | `{ sessionId, id }` | `{ id }` |
 | `queue.clear` | `{ sessionId }` | `{ ids: QueueEntryId[] }` |
-| `entries.snapshot` | `{ sessionId }` | `{ entries: EntryInfo[]; effective: EffectiveEntry[]; selection: SelectionState }` |
+| `entries.snapshot` | `{ sessionId }` | `{ entries: EntrySnapshot[]; selection: SelectionState; effective: EffectiveEntry[] }` |
 | `template.list` | `{}` | `{ templates: TemplateInfo[] }` |
 | `template.preview` | `{ templateId, workspace }` | `TemplatePreview` |
 | `template.apply` | `{ templateId, workspace, confirmed: true, overwrite? }` | `{ projectId, sessionId }` |
 | `client.list` | `{}` | `{ clients: ClientRegistration[] }` |
 | `client.start` | `{ id }` | `{ pid: number }` |
 
-- 当前阶段实际路由的 `Gateway` 方法为 `session.create`、`session.read`、`session.configure`、`queue.enqueue`、`turn.start`、`turn.cancel`、`turn.list`、`provider.list`，以及仅在请求带连接上下文时路由的 `session.subscribe`/`session.unsubscribe`；`protocol.hello` 由连接分发器处理，不进入 `Gateway`。不带连接上下文调用 `session.subscribe`/`session.unsubscribe` 仍返回 `protocol.unknown_method`。本表其余方法（`session.list`、`queue.edit`/`queue.remove`/`queue.clear`、`entries.snapshot`、`template.*`、`client.*`）为目标设计，尚未接入路由；当前调用返回 `protocol.unknown_method`。
+- 当前阶段实际路由的 `Gateway` 方法为 `session.create`、`session.read`、`session.configure`、`queue.enqueue`、`queue.edit`、`queue.remove`、`queue.clear`、`entries.snapshot`、`turn.start`、`turn.cancel`、`turn.list`、`provider.list`，以及仅在请求带连接上下文时路由的 `session.subscribe`/`session.unsubscribe`；`protocol.hello` 由连接分发器处理，不进入 `Gateway`。不带连接上下文调用 `session.subscribe`/`session.unsubscribe` 仍返回 `protocol.unknown_method`。本表其余方法（`session.list`、`template.*`、`client.*`）为目标设计，尚未接入路由；当前调用返回 `protocol.unknown_method`。
 - 方法分派只查自有属性：未识别的方法名（包括 `constructor`、`toString`、`__proto__`、`valueOf` 等原型属性名）一律返回 `protocol.unknown_method`，不会落回任何处理函数。
 
 ### 3.4 会话方法
@@ -431,7 +441,7 @@ interface CreateSessionParams {
   - 空数组：不启用任何条目；
   - 显式列表：替换默认选择，不与默认值合并。
 - `extensions` 生成一条 `kind=control`、`role=declaration` 的队列条目，`toggle` 为所选名称；所选为空时不生成。
-- 当前 daemon 没有扩展清点与 definition 来源，无法为声明附加 definition：有效 `extensions`（显式列表或默认选择）非空时，在创建临时会话与运行时之前整体以 `queue.invalid_control` 拒绝；名称不符合 `package#name` 同样以 `queue.invalid_control` 拒绝，重复名称以 `queue.duplicate_name` 拒绝；空列表接受且不生成声明条目。失败不创建会话、不写队列。`templateId` 尚未接入模板解析，出现即返回 `protocol.invalid_request`。
+- 目录驱动模式（`startDaemon({ extensions })`）下，daemon 在入队时用冻结清点为每个 toggle 名称附加完整定义快照（all-toggle snapshots：打开与关闭都携带），客户端只提交 `toggle`。非空列表在创建临时会话与运行时之前整体校验：未知名称、内联 definitions 或类型变化冲突以 `queue.invalid_control` 拒绝，重复名称以 `queue.duplicate_name` 拒绝；失败不创建会话、不写队列。无扩展模式（手动注入）仍拒绝任何有效的 `extensions`（`queue.invalid_control`），空列表不生成声明条目。`templateId` 尚未接入模板解析，出现即返回 `protocol.invalid_request`。
 - `workspace` 显式提供时直接使用；省略时读取全局配置中的 `defaultWorkspace`。两者都没有返回 `session.workspace_required`；路径不存在、不是目录或不可写返回 `session.invalid_workspace`。默认工作区必须是绝对路径，不自动创建；不读取 daemon 工作目录。工作区配置 `.pisces/config.json` 不参与默认工作区解析。
 - `provider`/`model` 只能成对出现：两者均省略时取配置中的 `defaultProvider`/`defaultModel`；只提供一个，或默认值不完整，返回 `session.model_required`；显式组合或默认组合不在 `provider.list` 中，返回 `session.invalid_model`。
 - `templateId` 设计上只用于解析模板级初始配置；不创建目录、不写文件、不执行脚本。工作区初始化只能经 `template.preview`/`template.apply`。当前实现尚未接入模板解析，按上一条拒绝。
@@ -539,11 +549,11 @@ interface QueueEditParams {
 - 大小限制沿用核心错误码：条目超过 `MAX_ENTRY_BYTES` 返回 `queue.entry_too_large`，完整队列超过 `MAX_QUEUE_BYTES` 返回 `queue.too_large`。
 - `queue.enqueue` 只接受 agent/system/user/assistant/tool 与 `role=declaration`；`compaction`、`cancel` 由运行框架写入，客户端提交返回 `queue.invalid_control`。
 - `declaration` 必须由 daemon 附加 definition；客户端内联 definition 被拒绝。`Context.enqueue` 是内部可信边界，接受已附完整 definitions 并校验结构，不从实时 Tools 重新获取定义。
-- 当前 daemon 没有扩展清点与 definition 来源，因此客户端提交的 `kind=control` 条目（包括 `declaration`）一律以 `queue.invalid_control` 拒绝；`queue.edit`、`queue.remove`、`queue.clear` 尚未路由。
+- 当前目录驱动模式下，客户端提交的 `kind=control`/`role=declaration` 在同一会话锁内被同步富化（为每个 toggle 名称附加完整定义快照）后一次入队；未知名称、内联定义或类型冲突返回 `queue.invalid_control`，重复名称返回 `queue.duplicate_name`，失败时整批不改变队列。无扩展的手动注入模式仍一律以 `queue.invalid_control` 拒绝客户端控制条目。
 - 队列按入队顺序排列；不提供重排方法。
-- `queue.edit` 尚未路由（目标设计）；Core 内部编辑未确认的 `kind=agent` 条目，已确认时抛 `queue.entry_locked` 并在内部 `PiscesError.data` 带 `reason="confirmed"`；本阶段线上响应不透传 `data`。
+- `queue.edit` 已路由：Core 内部编辑未确认的 `kind=agent` 条目，已确认时抛 `queue.entry_locked` 并在内部 `PiscesError.data` 带 `reason="confirmed"`；本阶段线上响应不透传 `data`；对 `declaration` 条目返回 `queue.invalid_control`。
 - `queue.remove` 可删除任意尚未装配的条目，包括已确认未装配条目。
-- `queue.clear` 清除全部尚未装配条目并返回完整 ids；有活跃 turn 时整个请求返回 `queue.entry_locked`，不部分清除。
+- `queue.clear` 清除全部尚未装配条目并返回完整 ids；有活跃 turn 时整个请求返回 `turn.active`，不部分清除。
 - 所有不在当前队列中的 id（包括已装配、已删除）在 `edit`/`remove` 时返回 `queue.entry_not_found`；不保留已装配 id 墓碑。
 - 控制消息入队时校验 `role` 与载荷：
   - `declaration`：`toggle` 为名称数组，名称重复以 `queue.duplicate_name` 拒绝；definition 完整；
@@ -555,14 +565,14 @@ interface QueueEditParams {
 
 #### 3.6.1 `entries.snapshot`
 
-- 当前阶段 `entries.snapshot` 尚未路由；本节为目标设计，当前调用返回 `protocol.unknown_method`。
-
 - 返回当前可用的工具、包装器、技能、上下文来源的 `entries`，以及本会话已固化定义的 `effective` 列表；`selection` 按默认分支计算。
-- `entries` 含 `definition/definitionHash`，供确认前审查；`effective` 含 name、configHash、stale。
+- `entries` 是`EntrySnapshot` 投影：只有 `name`、`kind`、`description?`、`parameters?`、`definitionHash?`、`configHash?`，供确认前审查；不含条目路径、配置正文或 `execute`。
+- `effective` 含 name、`definitionHash`、`configHash`、stale；内容条目只有 name 与 stale。
 - `selection` 不包含队列中尚未装配的声明 delta；客户端按队列叠加。
 - 临时会话返回可用条目和空 `selection`。
 - `providers`、`clients` 不进入结果。
 - 条目名称采用 `package#name`，跨包同名不冲突。
+- 响应按 `{id, result}` 的 JSON UTF-8 字节数与 4 MiB 预算比较；超限返回固定文案的 `protocol.frame_too_large`，不关闭连接，后续请求仍可处理。
 
 #### 3.6.2 `turn.start`
 
@@ -777,7 +787,7 @@ type ProtocolEvent =
 | 会话 | `session.invalid_workspace` | 工作区不存在、不是目录或不可写 |
 | 会话 | `session.node_not_found` | `nodeId` 不属于该会话 |
 | 队列 | `queue.entry_not_found` | id 不在当前队列中，包括已出队或已删除 |
-| 队列 | `queue.entry_locked` | 已确认条目不能编辑、活跃 turn 时不能 clear（均为未路由目标方法）；内部 `PiscesError.data.reason="confirmed"` 不透传到线上 |
+| 队列 | `queue.entry_locked` | 已确认条目不能编辑；内部 `PiscesError.data.reason="confirmed"` 不透传到线上（`queue.clear` 在活跃 turn 时返回 `turn.active`） |
 | 队列 | `queue.invalid_control` | 控制消息载荷不合法或客户端提交 compaction/cancel |
 | 队列 | `queue.duplicate_name` | `toggle` 中名称重复 |
 | 队列 | `queue.entry_too_large` | 单条队列入队内容超过 `MAX_ENTRY_BYTES` |
@@ -1351,7 +1361,7 @@ daemon 是用户级单实例进程，负责监听、路由、持久化、扩展�
 - 已受理请求超时、仍有登记 turn（含 `turn.cleanup_failed`）、标记删除失败或监听器/锁释放失败统一抛 `daemon.stop_incomplete`，按其实际状态保留锁、socket、`Gateway` 与 `quiescing`，允许重试；不自动强杀进程，也不声称已优雅停止。操作者终止进程后由下一次启动按 §6.5 恢复。成功返回后 `stop()` 幂等。
 - daemon 崩溃后只恢复已落盘会话；临时会话与消息队列随进程退出丢失。
 - 未完成的热会话在恢复时标记为中断，由用户决定是否继续。
-- 本阶段尚未装配：CLI `start`/`stop`/`status`、软件/工作区配置加载、`Extensions`/`TemplateStore`/`ClientRegistry`/`CredentialStore`；这些仍为目标设计。
+- 本阶段尚未装配：CLI `start`/`stop`/`status`、通用软件/工作区配置加载、`TemplateStore`、`ClientRegistry`、`CredentialStore`，以及清单中的 `providers`/`clients` 扩展装配；这些仍为目标设计。已装配的是目录驱动模式的 `Extensions`（`startDaemon({ extensions: { configDir } })`），它只读取扩展相关配置。
 
 #### 5.1.2 `Transport`
 
@@ -1470,13 +1480,13 @@ interface SessionRuntime {
 
 #### 5.3.2 方法路由
 
-- `session.create`：校验 provider/model、workspace 与 extensions；有效 `extensions`（显式或默认）非空时在创建任何运行时之前整体以 `queue.invalid_control` 拒绝（无扩展清点/definition 来源），空列表不生成声明条目；`templateId` 返回 `protocol.invalid_request`。通过后在会话锁内创建运行时，将 `systemPrompt` 物化为队列条目，返回临时 `SessionMeta`。
+- `session.create`：校验 provider/model、workspace 与 extensions；目录驱动模式下先冻结绑定，把 `systemPrompt` 与一条已富化定义快照的声明入队；显式 `extensions: []` 不生成声明；非空列表的非法名称/内联定义/类型变化按 `queue.invalid_control`，重复名称按 `queue.duplicate_name` 整体拒绝且不创建运行时。无扩展模式沿用旧行为（非空 `extensions` 一律 `queue.invalid_control`）。`templateId` 返回 `protocol.invalid_request`。通过后在会话锁内创建运行时，将 `systemPrompt` 物化为队列条目，返回临时 `SessionMeta`。
 - `session.list`：只查 `SessionStore`；不经过运行时。当前阶段未路由（目标设计）。
 - `session.read`：在会话锁内读取 `meta`、`records`、`queue`、`selection` 与 `seq`；无 `nodeId` 按字节预算分页读全树，有 `nodeId` 读分支；临时会话没有节点。`selection` 由 `Context.selectionFor` 计算，只含已持久化记录；`queue`/`selection` 仅首屏返回。
 - `session.configure`：先检查活跃 turn，存在则整体返回 `turn.active`，不修改队列/meta；无活跃 turn 时校验后先写 `SessionStore.updateMeta`，成功后调用 `Context.updateMeta`；`systemPrompt` 只更新或新增 `source="instruction"` 队列条目。
 - `session.subscribe` / `session.unsubscribe`：仅在请求带连接上下文时路由；不带连接上下文时按未知方法返回 `protocol.unknown_method`。订阅集合按连接保存；校验会话（含临时会话）与安装订阅在同一会话锁内完成，重复订阅幂等；退订不发事件，断开清理。事件推送与 `detach` 不中止活跃 turn，也不影响其他连接。
-- `queue.enqueue`：在会话锁内加载/复用运行时、`initialize`，拒绝任何客户端 `kind=control` 条目（`queue.invalid_control`），再委托 `Context.enqueue`；返回 `{ ids }`，成功后按最终队列推送 `queue.updated`；条目/队列超限沿用 `queue.entry_too_large`/`queue.too_large`，失败时整批不改变队列。`queue.edit` / `remove` / `clear` 不在路由内。
-- `entries.snapshot`：从 `Extensions` 取得当前清点，从 `Context` 取得已持久化选择与 effective 列表；不合并队列。当前阶段未路由（目标设计）。
+- `queue.enqueue`：在会话锁内加载/复用运行时、`initialize`；目录驱动模式下把声明类条目按冻结绑定富化（每个 toggle 名称带完整定义快照，all-toggle），无扩展模式仍拒绝客户端控制条目（`queue.invalid_control`），再委托 `Context.enqueue`；返回 `{ ids }`，成功后按最终队列推送 `queue.updated`；条目/队列超限沿用 `queue.entry_too_large`/`queue.too_large`，失败时整批不改变队列。`queue.edit` / `remove` / `clear` 均已路由；`clear` 在有活跃 turn 时整体返回 `turn.active`。
+- `entries.snapshot`：从冻结绑定取得当前清点（`EntrySnapshot` 投影），从 `Context.viewFor` 取得已持久化选择与 `effective` 列表；不合并队列，不导入扩展代码，不解析来源。
 - `turn.start`：在 `runExclusive` 回调内只完成“读 activeTurn → 校验 → 写标记（已落盘会话）/暂存标记（临时会话）→ `context.confirm()` → `registerTurn` → 置运行时 `running`”；无活跃 turn 时生成 `turnId`，已落盘会话在锁内写 `active-turn.json` 标记，临时会话只记录 `pendingMarker`（由首次 `Sessions.create` 提交后补写），并返回 `{turnId, mode:"new"}`；已有活跃 turn 且运行时为 `running` 时只 `confirm` 并返回该 turn 的 `turnId` 与 `mode=steer`，不写新标记；运行时处于 `cleanup`/`cleanup_failed` 时整体返回 `turn.active`，不确认、不 steer。`AgentLoopDriver.run` 必须在 `runExclusive` 回调完全返回、会话锁释放之后才启动（锁外 fire-and-forget）；不得在锁回调内同步调用或 await `run`，否则触发非重入 `TypeError` 或死锁。
 - 临时会话标记：`turn.start` 不写盘标记；`Gateway` 包装的 `Sessions.create` 在首次提交成功后写 `active-turn.json`（`startOffset=0`，无 `startNodeId`）。写失败以 `storage.io`（“Active turn marker could not be written”）失败，且发生在任何供应商请求之前：已提交节点与已确认队列的消费保持不变量、不回滚，磁盘无标记。提交成功到写标记之间的进程崩溃窗口不可恢复，本设计不声称覆盖。
 - `turn.list`：从 `Concurrency` 返回活跃 turn 快照。
@@ -1638,7 +1648,7 @@ interface EntryMetadata {
   name: string;
   description?: string;
   parameters?: JsonObject;
-  config?: JsonObject;
+  config?: { defaults: JsonObject; schema: JsonObject }; // 仅 wrapper
 }
 
 interface Inventory {
@@ -1647,10 +1657,10 @@ interface Inventory {
 }
 ```
 
-- 发现阶段只读取清单、sidecar 元数据与资源文件，不执行扩展代码；sidecar 命名为 `<entry>.meta.json`，提供 `name/description/parameters/config`。
+- 发现阶段只读取清单、sidecar 元数据与资源文件，不执行扩展代码；工具/包装器/上下文来源的 sidecar 命名为 `<entry>.meta.json`（与脚本同目录，如 `tools/run.ts.meta.json`），技能为相邻的 `skills/<name>.meta.json` 加正文 `skills/<name>/SKILL.md`；sidecar 只允许 `name/description/parameters/config`。
 - 条目名称统一为 `package#name`：`package` 取扩展包名，`name` 取 sidecar 的 `name`；无 sidecar 时取文件/目录基名。
-- 同一 `package#name` 重复出现时，该条目不可用并记录清点错误；不同包同名不冲突。
-- `providers` 解析为 `ProviderDescriptor`；`clients` 登记到 `ClientRegistry`。
+- 同一 `package#name` 重复出现时，该条目不可用并记录 `extensions.duplicate`；不同包同名不冲突。
+- 清单中的 `providers`、`clients` 本阶段**不装配**：只记录 `extensions.unsupported_contribution`，不注册供应商或客户端，也不进入清点。
 - `tools`、`wrappers`、`context` 的代码按需导入；`skills` 读取目录内容并转为 text 块。
 - 工作区扩展在 `session.create` 确定 workspace 后清点，按 `realpath(workspace)` 缓存并冻结 `Inventory.hash`；`entries.snapshot` 使用冻结 inventory，新会话重扫。
 - `Tools.forInventory` 使用该 inventory；不同 workspace 的同名工具不共享注册表。
@@ -1663,6 +1673,8 @@ interface Inventory {
 - `defaultWorkspace` 必须是绝对路径；`config` 只校验格式，存在性与可写性在 `session.create` 时检查。
 - `config` CLI 只影响此后创建的会话；不修改既有会话的 `SessionMeta`。
 - 新会话的默认扩展选择来自配置；`session.create.extensions` 显式列表替换默认选择。
+- `entryConfig` 的键必须是当前清点中存在的 `wrapper` 条目，否则 `config.invalid`；它的合并顺序为 sidecar `config.defaults` < 用户覆盖（深合并），schema 校验合并结果：无用户覆盖时不合法只丢弃该包装器（`extensions.invalid`），有用户覆盖时不合法使整个 `prepare` 以 `config.invalid` 失败。
+- 合并后配置的 `configHash`（SHA-256 + 键排序 JSON）在声明被确认时随定义冻结；声明与快照不包含配置正文。
 - 配置键不存在或类型错误返回 `config.invalid` / `config.unknown_key`。
 - 扩展代码不直接访问配置文件；由 `Extensions` 读取并注入。
 
@@ -1672,19 +1684,20 @@ interface Inventory {
 - 宿主包 `@pisces/*` 映射到 daemon 内的宿主实例，扩展不打包宿主包。
 - 扩展依赖从其自身目录的 `node_modules` 解析。
 - 装载器不因文件位于 `node_modules` 而拒绝加载；扩展无需预构建。
-- 工具、包装器、上下文来源、供应商、客户端按类型登记到对应注册表。
-- 包装器模块导出工厂与 `config` schema；config 在 `invoke` 首次加载时读取，合并优先级为工作区 > 软件配置目录 > 内置默认。
-- 工具声明需要的 `description/parameters` 来自 sidecar，不执行代码；实现代码在首次 invoke 时加载并缓存 promise。
+- 工具、包装器、上下文来源、技能按类型登记到对应注册表；`providers`/`clients` 不装配。
+- 包装器模块导出工厂与 `export const config`；工厂接收**合并后**的 sidecar defaults + 用户覆盖配置。模块只应在首次实际 invoke 时被导入，并且 `config` 必须描述 sidecar defaults（不是合并值），不一致时该次调用安全失败为 `tool.wrapper_invalid`，不透传模块异常文案。
+- 工具声明需要的 `description/parameters` 来自 sidecar，不执行代码；实现代码在首次 invoke 时加载并缓存 promise；上下文来源在首次被选中装配时导入并 `resolve`。
 - 一个扩展装载失败只标记该扩展不可用，不阻断 daemon 启动。
-- 包装器执行顺序无关；选择只决定是否加入工具流水线；包装器只能装饰 `execute`，不得修改 `id/name/description/parameters`，违规返回 `tool.wrapper_invalid`。
+- 包装器按名称排序加入工具流水线；选择只决定是否加入；包装器只能装饰 `execute`，不得修改 `id/name/description/parameters`，违规返回 `tool.wrapper_invalid`。
 
 #### 5.5.5 清点与选择
 
-- `entries.snapshot` 返回工具、包装器、技能、上下文来源；返回 `package#name`、类型、来源、描述与 `definitionHash`。
-- `entries.snapshot` 同时返回本会话 `effective` 列表：已固化名称、`definitionHash`、`configHash`、`stale`。
+- `entries.snapshot` 返回工具、包装器、技能、上下文来源的 `EntrySnapshot` 投影：`name`、`kind`、`description?`、`parameters?`、`definitionHash?`、`configHash?`；不含条目路径、配置正文或执行函数。
+- `entries.snapshot` 同时返回本会话 `effective` 列表：已固化名称、`definitionHash`、`configHash`、`stale`；内容条目的 effective 只有 name 与 stale。
 - 工具与包装器的声明只序列化 `wireName`、`description`、`parameters`；实现代码留在本地。
 - 技能内容作为系统消息进入装配；上下文来源片段按 `Context` 规则追加。
-- 定义/配置哈希与当前清点不一致的条目对该会话标记 `stale`，不进入 `LlmRequest.tools`、不参与包装；只能通过重新选择恢复。
+- 声明采用 all-toggle 快照：每个 toggle（无论打开或关闭）都为 tool/wrapper 名称附带完整定义；类型变化在覆盖旧定义前检查，重新打开冲突类型按 `queue.invalid_control` 拒绝，关闭保留历史证据。
+- 历史分支已记录的内容条目（技能/上下文）在扩展被删除或改类型后仍可复用正文；工具/包装器的定义或配置哈希与当前清点不一致时标记 `stale`，不进 `LlmRequest.tools`、不参与包装，只能通过重新选择恢复。
 - `providers`、`clients` 不参与选择。
 - 扩展的安装、更新与移除由 npm、git 完成，不在本软件生命周期内。
 
@@ -1798,8 +1811,8 @@ interface ClientRegistry {
 
 - 公开装配路径是 `startDaemon`（§5.1.1）：宿主用同一个 `dataDir` 构造 store/marker/EventBus/Concurrency，再调用 `bootstrapGateway(deps)` 完成 `SessionStore.initialize()`、`markers.scan()` 恢复（逐会话隔离损坏标记）与 `createGateway`，最后绑定并校验 socket。`bootstrapGateway` 本身不做锁、socket 或 `Transport` 装配；返回 `{ gateway, initializationIssues, recoveryIssues }`，且须在任何请求被服务前完成。
 - `Gateway` 依赖 `SessionStore`、`ActiveTurnStore`、`EventBus`、`Concurrency`、`ProviderManagement`、`ProviderHost`，以及可选的默认值、工具/条目/技能/来源工厂与 id/时间工厂。
-- 本阶段未装配 `Extensions`、`TemplateStore`、`ClientRegistry`、`CredentialStore` 与 CLI；下列依赖关系为目标设计。
-- `Extensions` 依赖 `Tools`、`Skills`、`Context`、`ProviderManagement`、`ClientRegistry`（目标设计）。
+- 目录驱动模式已装配 `Extensions`：`startDaemon({ extensions })` 在 lock 获取后构造真实服务并传入 `GatewayDeps.extensions`；该模式与手动注入互斥。`TemplateStore`、`ClientRegistry`、`CredentialStore` 与 CLI 仍未装配。
+- `Extensions` 依赖 `Tools`、`Skills`、`Context`；`providers`/`clients` 清单项本阶段不装配（`ClientRegistry` 为目标设计）。
 - `ProviderHost` 依赖 `CredentialStore` 与 `ProviderManagement`（目标设计）。
 - `TemplateStore` 依赖 `WorkspaceAccess`、`ExecHost`、`projects.json`（目标设计）。
 - 核心层不引用服务层；服务层通过接口注入。
@@ -1809,12 +1822,12 @@ interface ClientRegistry {
 
 ### 6.1 新建会话与首次落盘
 
-本阶段已路由的路径如下；模板、扩展清点、`session.list` 和 `entries.snapshot` 是未来目标方法（§3.3），不能作为现有客户端流程。
+本阶段已路由的路径如下；模板、`session.list` 和 `client.*` 仍是未来目标方法（§3.3），不能作为现有客户端流程。
 
-1. 客户端调用 `session.create`，显式提供绝对、存在且可写的 `workspace` 和有效的 `(provider, model)`，或由调用方传入 `startDaemon` 的 `defaults` 补全；本阶段没有配置加载器。可选的 `systemPrompt` 是字符串数组。出现 `templateId` 即返回 `protocol.invalid_request`；显式或默认 `extensions` 非空即返回 `queue.invalid_control`，不创建临时会话。
-2. `Gateway` 校验后在内存中创建临时 `SessionMeta`、`Context` 与队列；`systemPrompt` 的每个元素转成 `kind=agent`、`role=system`、`source="create"` 的队列条目。空 `extensions` 不生成声明。
-3. 返回临时 `SessionMeta`，尚不写盘；客户端可用返回的 id 调用 `session.read` 取得空记录、队列和空选择，也可按连接 `session.subscribe`。`session.list`/`entries.snapshot` 当前返回 `protocol.unknown_method`。
-4. 客户端通过 `queue.enqueue` 添加 agent 消息（客户端控制条目均以 `queue.invalid_control` 拒绝），再调用 `turn.start`；`Gateway` 注册 turn，并在释放会话锁后启动 `AgentLoopDriver.run`。临时会话先在内存中暂存标记，不在 `turn.start` 时写盘。
+1. 客户端调用 `session.create`，显式提供绝对、存在且可写的 `workspace`，或由目录驱动模式/手动 `defaults` 补全。可选的 `systemPrompt` 是字符串数组。出现 `templateId` 即返回 `protocol.invalid_request`。目录驱动模式下：`extensions` 省略时取配置默认值，`[]` 禁用全部默认，显式列表替换默认；非空列表在创建临时会话前整体校验并富化定义快照。无扩展的手动模式下，显式或默认 `extensions` 非空即返回 `queue.invalid_control`，不创建临时会话。
+2. `Gateway` 校验后在内存中创建临时 `SessionMeta`、`Context` 与队列；`systemPrompt` 的每个元素转成 `kind=agent`、`role=system`、`source="create"` 的队列条目。非空 `extensions` 另外生成一条带完整定义快照的未确认 `role=declaration` 条目（all-toggle）。
+3. 返回临时 `SessionMeta`，尚不写盘；客户端可用返回的 id 调用 `session.read` 取得空记录、队列和空选择，可用 `entries.snapshot` 取得当前清点与已持久化选择，也可按连接 `session.subscribe`。
+4. 客户端通过 `queue.enqueue` 添加 agent 消息，目录驱动模式下可提交 `role=declaration` 控制条目；再调用 `turn.start`；`Gateway` 先按目标分支校验未确认声明，再注册 turn，并在释放会话锁后启动 `AgentLoopDriver.run`。临时会话先在内存中暂存标记，不在 `turn.start` 时写盘。
 5. `Context.assemble` 装配已确认的队列消息；若最终没有可见 agent 消息，turn 以 `turn.ended.error` 报 `turn.empty`，不落盘。
 6. 首次持久化调用 `Sessions.create(meta, nodes)`；`SessionStore` 写入 `meta.json` 与 `events.jsonl`。提交成功后 `Gateway` 补写 `active-turn.json` 标记，**然后**才可发起供应商请求；补写失败以 `storage.io` 终止 turn，已提交节点不回滚。
 7. `Context` 出队并更新选择；已订阅连接收到 `session.updated`（事件不重放）；之后 assistant 回复、工具结果由 `AgentLoopDriver` 使用 `Sessions.append` 追加。
@@ -1835,8 +1848,8 @@ interface ClientRegistry {
 4. `queue`/`selection` 只在首屏返回；`selection` 只含已持久化记录，不含队列中的声明 delta。
 5. `records` 可能保留已取消选择的来源/技能节点；`selection` 表示当前是否启用。客户端不应以节点存在推断选中，`Context` 装配时按同一选择过滤请求内容。
 6. `session.read` 不改变活动分支；分支由后续 `turn.start.nodeId` 选择。
-7. 本阶段 `entries.snapshot` 未路由；客户端使用 `session.read.selection` 查看已持久化选择，不可通过该方法获取可用条目清单。
-8. 本阶段客户端通过 `queue.enqueue` 提交声明类控制消息会被拒绝（`queue.invalid_control`），因此选择/取消条目的客户端流程仍是目标设计；有效 agent 条目入队后可向已订阅连接推送 `queue.updated`。
+7. `entries.snapshot` 返回当前清点与已持久化 `selection`/`effective`；客户端用它渲染面板，不可从 `session.read.selection` 推断可用条目清单（两者互补）。
+8. 目录驱动模式下客户端通过 `queue.enqueue` 提交声明类控制消息即可改变选择；声明未确认前不影响 `selection`/`effective`，确认后随分支持久化。无扩展模式仍拒绝控制消息（`queue.invalid_control`）。
 9. 订阅后，`queue.updated`、`selection.updated`、`session.updated` 与 turn 事件按 `sessionId` 推送。
 
 临时会话：`records` 为空，`selection` 为空，`nodeId` 返回 `session.node_not_found`。
@@ -1917,12 +1930,12 @@ interface ClientRegistry {
 
 ### 6.7 扩展装载与条目刷新
 
-1. daemon 启动时发现扩展清单，不执行扩展代码。
-2. 读取配置，合并默认选择；条目名称统一为 `package#name`。
-3. 用户打开面板时调用 `entries.snapshot`；工具、包装器、技能、上下文来源进入结果。
-4. 用户选择条目时入队声明类控制消息；`Context` 在装配时更新选择。
-5. 工具/包装器/上下文代码在需要时由加载器导入；技能内容在装配时读取。
-6. 扩展安装或更新后，新会话使用新清点；既有会话记录不改写。
+1. daemon 启动时发现扩展清单，不执行扩展代码；目录驱动模式在首次建会话/加载会话时冻结一份绑定。
+2. 读取配置，合并默认选择；条目名称统一为 `package#name`；`entryConfig` 只接受包装器条目并深合并到 sidecar defaults。
+3. 用户打开面板时调用 `entries.snapshot`；工具、包装器、技能、上下文来源以 `EntrySnapshot` 投影进入结果，并返回 `selection`/`effective`。
+4. 用户选择条目时入队声明类控制消息（all-toggle 定义快照）；`Context` 在装配时更新选择。
+5. 工具/包装器在首次实际调用时由加载器导入；上下文来源在首次选中装配时 `resolve`；技能正文在发现时读取、首次装配时写入会话。
+6. 扩展安装或更新后，新会话使用新清点；既有会话记录不改写，只把定义/配置哈希不匹配的条目显示为 `stale`，重新选择才写入当前定义。
 7. 同一 `package#name` 重复出现时该条目不可用；不同包同名不冲突。
 
 ## 7 CLI 与数据迁移
