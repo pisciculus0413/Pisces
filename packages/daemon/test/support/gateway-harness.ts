@@ -3,11 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  type ContextEntries,
   createProviderManagement,
   createSessions,
   type EngineEvent,
   type EntryName,
   type EventBus,
+  type Exec,
   type ExecuteProvider,
   type JsonValue,
   type LlmAdapter,
@@ -22,8 +24,10 @@ import {
   type SessionMeta,
   type SessionNode,
   type SessionNodeDraft,
+  type Tools,
   type TurnEndedEvent,
   type TurnId,
+  type WorkspaceAccess,
 } from "@pisces/core";
 import { type ActiveTurnStore, createActiveTurnStore } from "../../src/gateway/active-turn.js";
 import { bootstrapGateway } from "../../src/gateway/bootstrap.js";
@@ -46,6 +50,10 @@ export interface GatewayHarnessOptions {
   dataDir?: string;
   newSessionId?: () => SessionId;
   providers?: ProviderManagement;
+  createTools?: () => Tools;
+  entries?: ContextEntries;
+  exec?: Exec;
+  createWorkspaceAccess?: (workspace: string) => WorkspaceAccess;
 }
 
 export interface GatewayHarness {
@@ -201,6 +209,12 @@ export async function createGatewayHarness(
     ...(options.defaults ? { defaults: options.defaults } : {}),
     ...(options.validateWorkspace ? { validateWorkspace: options.validateWorkspace } : {}),
     ...(options.newSessionId ? { newSessionId: options.newSessionId } : {}),
+    ...(options.createTools ? { createTools: options.createTools } : {}),
+    ...(options.entries ? { entries: options.entries } : {}),
+    ...(options.exec ? { exec: options.exec } : {}),
+    ...(options.createWorkspaceAccess
+      ? { createWorkspaceAccess: options.createWorkspaceAccess }
+      : {}),
   };
   const { gateway } = await bootstrapGateway(deps);
 

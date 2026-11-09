@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
   type DefinitionSnapshot,
   type EngineEvent,
   type EntryName,
+  type Exec,
   type JsonValue,
   type LlmAdapter,
   type NodeId,
@@ -76,6 +77,7 @@ interface OpenOptions {
   extensions?: Extensions;
   newSessionId?: () => SessionId;
   adapter?: LlmAdapter;
+  exec?: Exec;
 }
 
 function sequentialIds(): () => SessionId {
@@ -122,6 +124,7 @@ async function openHarness(options: OpenOptions = {}): Promise<ExtHarness> {
     markers: createActiveTurnStore({ dataDir }),
     ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
     ...(options.newSessionId === undefined ? {} : { newSessionId: options.newSessionId }),
+    ...(options.exec === undefined ? {} : { exec: options.exec }),
   };
   const { gateway } = await bootstrapGateway(deps);
   const harness: ExtHarness = {
@@ -839,6 +842,90 @@ describe("session lifecycle in configuration mode", () => {
       }),
     ]);
     expect(await exists(sentinel)).toBe(true);
+  });
+
+  test("injects exec and canonical workspace access into a bound tool context", async () => {
+    const ws = await workspaceDir("turn-context");
+    const sentinel = join(root, "turn-context.json");
+    await makePackage(join(ws, ".pisces", "extensions", "demo"), {
+      name: "demo",
+      files: {
+        "tools/run.ts": [
+          'import { writeFileSync } from "node:fs";',
+          "export default async function run(_args, context) {",
+          '  const result = await context.exec.run("probe", []);',
+          '  await context.files.writeFile("files-probe.txt", "files-rooted");',
+          `  writeFileSync(${JSON.stringify(sentinel)}, JSON.stringify({`,
+          "    workspace: context.workspace,",
+          '    files: context.files.resolve("."),',
+          "    exec: result.stdout,",
+          "  }));",
+          '  return { content: [{ type: "text", text: "ran" }] };',
+          "}",
+          "",
+        ].join("\n"),
+        "tools/run.ts.meta.json": JSON.stringify({ description: "probes context" }),
+      },
+    });
+    await writeWorkspaceConfig(ws, {
+      extensions: [RUN],
+      defaultProvider: "p",
+      defaultModel: "m",
+    });
+    let step = 0;
+    const toolCalling: LlmAdapter = {
+      dialect: "test",
+      buildRequest(request) {
+        return { path: "/v1/chat/completions", body: JSON.stringify(request) };
+      },
+      parseChunk() {
+        step += 1;
+        if (step === 1)
+          return [
+            { type: "toolCall", call: { id: "call_1", name: RUN, arguments: {} } },
+            { type: "stop", reason: "toolCall" },
+          ];
+        return [
+          { type: "content", delta: "done" },
+          { type: "stop", reason: "stop" },
+        ];
+      },
+    };
+    const exec: Exec = {
+      run: async () => ({
+        exitCode: 0,
+        stdout: "injected-exec",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      }),
+    };
+    const h = await openHarness({
+      extensions: createExtensions(options),
+      newSessionId: sequentialIds(),
+      adapter: toolCalling,
+      exec,
+    });
+    const created = await createSession(h, { workspace: ws, systemPrompt: ["use the tool"] });
+    const meta = created.result as unknown as SessionMeta;
+    await readSession(h, meta.id);
+
+    const started = await h.gateway.handle({
+      id: "start",
+      method: "turn.start",
+      params: { sessionId: meta.id } as unknown as JsonValue,
+    });
+
+    expect(started.error).toBeUndefined();
+    await waitFor(() => h.events.some((event) => event.type === "turn.ended"), "turn completion");
+    const canonical = await realpath(ws);
+    const probe = JSON.parse(await readFile(sentinel, "utf8")) as {
+      workspace: string;
+      files: string;
+      exec: string;
+    };
+    expect(probe).toEqual({ workspace: canonical, files: canonical, exec: "injected-exec" });
+    expect(await readFile(join(canonical, "files-probe.txt"), "utf8")).toBe("files-rooted");
   });
 
   test("counts server ids and timestamps when rejecting an entry over 256 KiB", async () => {

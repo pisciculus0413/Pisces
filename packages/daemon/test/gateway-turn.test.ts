@@ -1,19 +1,27 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createSessions,
+  createTools,
+  type DefinitionSnapshot,
   type EngineEvent,
+  type EntryName,
   type EventBus,
+  type Exec,
   type ExecuteProvider,
   type JsonValue,
+  type LlmAdapter,
   type NodeId,
   PiscesError,
   type SessionId,
   type SessionMeta,
   type SessionNode,
+  type SessionNodeDraft,
+  type ToolInvocationContext,
   type TurnId,
+  type WorkspaceAccess,
 } from "@pisces/core";
 import { afterEach, expect, test, vi } from "vitest";
 import { type ActiveTurnStore, createActiveTurnStore } from "../src/gateway/active-turn.js";
@@ -843,4 +851,160 @@ test("steers a temporary session after its first commit using the stored offset"
   await turnCancel(h, turnId);
   await h.waitForTurnEnd(turnId);
   await waitForEmpty(h);
+});
+
+const PROBE_TOOL = "test#probe" as EntryName;
+
+interface Probe {
+  contexts: ToolInvocationContext[];
+}
+
+const PROBE_DEFINITION: DefinitionSnapshot = {
+  name: PROBE_TOOL,
+  kind: "tool",
+  description: "probe",
+  parameters: { type: "object" },
+  definitionHash: "probe",
+};
+
+function probeDeclaration(): SessionNodeDraft {
+  return {
+    kind: "control",
+    role: "declaration",
+    source: "test",
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({ toggle: [PROBE_TOOL], definitions: [PROBE_DEFINITION] }),
+      },
+    ],
+  };
+}
+
+function probeOptions(probe: Probe, extra: GatewayHarnessOptions = {}): GatewayHarnessOptions {
+  const tools = createTools();
+  tools.registerTool({
+    id: "test#probe",
+    source: "test",
+    name: PROBE_TOOL,
+    description: "probe",
+    parameters: { type: "object" },
+    execute: async (_args, context) => {
+      probe.contexts.push(context);
+      return { content: [{ type: "text", text: "probed" }] };
+    },
+  });
+  return {
+    createTools: () => tools,
+    entries: { kind: (name) => (name === PROBE_TOOL ? "tool" : undefined) },
+    ...extra,
+  };
+}
+
+// Every turn is two requests: a tool call, then a final answer.
+function probeAdapter(): LlmAdapter {
+  let calls = 0;
+  return {
+    dialect: "test",
+    buildRequest(request) {
+      return { path: "/v1/chat/completions", body: JSON.stringify(request) };
+    },
+    parseChunk() {
+      calls += 1;
+      return calls % 2 === 1
+        ? [
+            { type: "toolCall", call: { id: `call_${calls}`, name: PROBE_TOOL, arguments: {} } },
+            { type: "stop", reason: "toolCall" },
+          ]
+        : [
+            { type: "content", delta: "done" },
+            { type: "stop", reason: "stop" },
+          ];
+    },
+  };
+}
+
+function probeExec(stdout = "injected"): Exec {
+  return {
+    run: async () => ({
+      exitCode: 0,
+      stdout,
+      stderr: "",
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    }),
+  };
+}
+
+function probeFiles(): WorkspaceAccess {
+  return {
+    resolve: (path) => `/probe/${path}`,
+    ensureDirectory: async () => undefined,
+    writeFile: async () => undefined,
+    readFile: async () => "",
+    exists: async () => true,
+  };
+}
+
+test("injects configured exec and workspace access into the tool context", async () => {
+  const workspace = await tempDir();
+  const probe: Probe = { contexts: [] };
+  const exec = probeExec();
+  const files = probeFiles();
+  const createWorkspaceAccess = vi.fn((_root: string) => files);
+  const h = await openHarness(
+    probeOptions(probe, { adapter: probeAdapter(), exec, createWorkspaceAccess }),
+  );
+  const { meta } = await h.seed([probeDeclaration(), draftUser("hello")], {
+    workspace,
+  } as unknown as SessionMeta);
+
+  const started = await turnStart(h, meta.id);
+  const ended = await h.waitForTurnEnd(turnIdOf(started));
+  await waitForEmpty(h);
+
+  expect(ended.data.reason).toBe("completed");
+  expect(probe.contexts).toHaveLength(1);
+  expect(probe.contexts[0]?.exec).toBe(exec);
+  expect(probe.contexts[0]?.files).toBe(files);
+  expect(createWorkspaceAccess).toHaveBeenCalledWith(await realpath(workspace));
+  await rm(workspace, { recursive: true, force: true });
+});
+
+test("defaults to the daemon exec host and a real workspace access", async () => {
+  const workspace = await tempDir();
+  const probe: Probe = { contexts: [] };
+  const h = await openHarness(probeOptions(probe, { adapter: probeAdapter() }));
+  const { meta } = await h.seed([probeDeclaration(), draftUser("hello")], {
+    workspace,
+  } as unknown as SessionMeta);
+
+  const started = await turnStart(h, meta.id);
+  await h.waitForTurnEnd(turnIdOf(started));
+  await waitForEmpty(h);
+
+  expect(probe.contexts).toHaveLength(1);
+  expect(typeof probe.contexts[0]?.exec?.run).toBe("function");
+  expect(probe.contexts[0]?.files?.resolve(".")).toBe(await realpath(workspace));
+  await rm(workspace, { recursive: true, force: true });
+});
+
+test("keeps the turn running without files access when the workspace is gone", async () => {
+  const workspace = await tempDir();
+  const probe: Probe = { contexts: [] };
+  const h = await openHarness(probeOptions(probe, { adapter: probeAdapter() }));
+  const { meta } = await h.seed([probeDeclaration(), draftUser("hello")], {
+    workspace,
+  } as unknown as SessionMeta);
+  await rm(workspace, { recursive: true, force: true });
+
+  const started = await turnStart(h, meta.id);
+  expect(started.error).toBeUndefined();
+  const ended = await h.waitForTurnEnd(turnIdOf(started));
+  await waitForEmpty(h);
+
+  expect(ended.data.reason).toBe("completed");
+  expect(probe.contexts).toHaveLength(1);
+  expect(probe.contexts[0]?.files).toBeUndefined();
+  expect(typeof probe.contexts[0]?.exec?.run).toBe("function");
 });

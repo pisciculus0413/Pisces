@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, stat } from "node:fs/promises";
+import { access, realpath, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import {
   type AgentLoopDriver,
@@ -15,6 +15,7 @@ import {
   type EngineEvent,
   type EntryName,
   type EventBus,
+  type Exec,
   type JsonValue,
   type NodeId,
   PiscesError,
@@ -30,14 +31,17 @@ import {
   type Skills,
   type Tools,
   type TurnId,
+  type WorkspaceAccess,
 } from "@pisces/core";
 import type { ProtocolEvent } from "@pisces/protocol";
 import { MAX_RESPONSE_BYTES } from "@pisces/protocol";
+import { createExecHost } from "../exec/exec-host.js";
 import type { ExtensionBinding, Extensions } from "../extensions/types.js";
 import type { ProviderHost } from "../provider/provider-host.js";
 import type { Concurrency } from "../runtime/concurrency.js";
 import { createSessionEventClock } from "../runtime/event-clock.js";
 import type { SessionStore } from "../session-store/session-store.js";
+import { createWorkspaceAccess } from "../workspace/access.js";
 import type { ActiveTurnStore } from "./active-turn.js";
 import {
   enrichForBinding,
@@ -81,6 +85,10 @@ export interface GatewayDeps {
   skills?: Skills;
   sources?: ContextSourceRegistry;
   validateWorkspace?: (workspace: string) => Promise<boolean>;
+  /** Test seam: overrides the daemon-wide exec host. */
+  exec?: Exec;
+  /** Test seam: overrides the workspace access factory. */
+  createWorkspaceAccess?: (workspace: string) => WorkspaceAccess;
   newSessionId?: () => SessionId;
   newTurnId?: () => TurnId;
   newQueueEntryId?: () => QueueEntryId;
@@ -121,6 +129,8 @@ interface SessionRuntime {
   binding?: ExtensionBinding;
   /** Branch and commit offset this turn started from; used to validate steer before appending. */
   turnStart?: { nodeId?: NodeId; offset: number };
+  /** Canonical-workspace access, resolved lazily and cached per runtime. */
+  files?: WorkspaceAccess;
   /** Runtime-local only; a failing cancel handle is never rethrown or exported. */
   cancelHandleError?: unknown;
 }
@@ -128,6 +138,8 @@ interface SessionRuntime {
 const EMPTY_ENTRIES: ContextEntries = { kind: () => undefined };
 const EMPTY_SKILLS: Skills = { selected: () => [] };
 const EMPTY_SOURCES: ContextSourceRegistry = { get: () => undefined };
+// One process-wide exec host; `deps.exec` exists only as a test seam.
+const daemonExec: Exec = createExecHost();
 const ENTRY_NAME = /^[^#\s]+#[^#\s]+$/u;
 const SESSION_ID = /^[A-Za-z0-9_-]+$/;
 // Turn ids use the same permitted ASCII set as session ids.
@@ -951,6 +963,17 @@ export function createGateway(deps: GatewayDeps): Gateway {
               ...(startNodeId !== undefined ? { nodeId: startNodeId } : {}),
               offset: startOffset,
             };
+            // Capabilities are best effort: a vanished workspace must not fail the turn, so
+            // tools simply see no files access and retry on a later turn.
+            if (runtime.files === undefined) {
+              try {
+                const root = await realpath(runtime.meta.workspace);
+                runtime.files = (deps.createWorkspaceAccess ?? createWorkspaceAccess)(root);
+              } catch {
+                // Leave `files` absent; never surfaces as session.invalid_workspace or storage.io.
+              }
+            }
+            const files = runtime.files;
             const input: RunTurnInput = {
               sessionId: id,
               turnId,
@@ -966,6 +989,8 @@ export function createGateway(deps: GatewayDeps): Gateway {
               maxOutput: selection.model.maxOutput,
               ...(startNodeId !== undefined ? { nodeId: startNodeId } : {}),
               signal: controller.signal,
+              ...(files === undefined ? {} : { files }),
+              exec: deps.exec ?? daemonExec,
             };
             return { input, runtime, turnId };
           } catch (error) {
