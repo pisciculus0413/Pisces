@@ -226,7 +226,7 @@ Expected: FAIL — context lacks the fields.
 
 - [ ] **Step 3: Implement injection**
 
-Add the two optional deps. Add `files?: WorkspaceAccess` and `filesRoot?: string` to `SessionRuntime` (cache). At the start of the new-turn branch of `turn.start` (inside the session lock, before building `RunTurnInput`): if `realpath(runtime.meta.workspace)` succeeds, set the cached access via `deps.createWorkspaceAccess ?? createWorkspaceAccess` with the realpath; on failure leave it undefined. Always set `exec: deps.exec ?? execHost` (module-level singleton from `createExecHost()`). Spread `files`/`exec` into `RunTurnInput`. Do not touch queue, snapshot, marker, confirm or registerTurn ordering.
+Add the two optional deps. Add `files?: WorkspaceAccess` to `SessionRuntime` as the cache (the canonical root is implicit in the access object; do not add a separate root string). At the start of the new-turn branch of `turn.start` (inside the session lock, before building `RunTurnInput`): if `realpath(runtime.meta.workspace)` succeeds, set the cached access via `deps.createWorkspaceAccess ?? createWorkspaceAccess` with the realpath; on failure leave it undefined. Always set `exec: deps.exec ?? execHost` (module-level singleton from `createExecHost()`). Spread `files`/`exec` into `RunTurnInput`. Do not touch queue, snapshot, marker, confirm or registerTurn ordering.
 
 - [ ] **Step 4: Run and confirm pass**
 
