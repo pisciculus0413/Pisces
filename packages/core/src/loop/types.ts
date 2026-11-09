@@ -1,5 +1,6 @@
 import type { Context, LlmRequest, SessionEventClock } from "../context/types.js";
 import type { EventBus } from "../events.js";
+import type { Exec, WorkspaceAccess } from "../exec/types.js";
 import type { StopReason, ToolCall, TurnId, Usage } from "../messages.js";
 import type { NodeId, SessionId, SessionMeta, Sessions } from "../sessions/types.js";
 import type { Tools } from "../tools/types.js";
@@ -41,6 +42,8 @@ export interface RunTurnInput {
   maxOutput: number;
   nodeId?: NodeId;
   signal: AbortSignal;
+  files?: WorkspaceAccess;
+  exec?: Exec;
 }
 
 export type TurnReason = "completed" | "cancelled" | "failed";

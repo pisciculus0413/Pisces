@@ -1,3 +1,4 @@
+import type { Exec, WorkspaceAccess } from "../exec/types.js";
 import type {
   DefinitionSnapshot,
   EntryName,
@@ -40,6 +41,10 @@ export interface ToolInvocationContext {
   sessionId: SessionId;
   workspace: string;
   signal: AbortSignal;
+  /** Host-injected workspace access; absent means the tool must fail safely. */
+  files?: WorkspaceAccess;
+  /** Host-injected process execution; absent means the tool must fail safely. */
+  exec?: Exec;
 }
 
 export type ToolFunction = (args: JsonValue, context: ToolInvocationContext) => Promise<ToolResult>;

@@ -509,3 +509,52 @@ test("accepts wrapper parameters containing nested JSON arrays and null", async 
     ),
   ).toEqual({ content: [{ type: "text", text: "ok" }] });
 });
+
+test("forwards host files and exec to the tool and omits absent capabilities", async () => {
+  const seen: ToolInvocationContext[] = [];
+  const tools = createTools();
+  tools.registerTool({
+    id: "demo#t",
+    source: "demo",
+    name: "demo#t" as EntryName,
+    description: "d",
+    parameters: {},
+    execute: async (_args, context) => {
+      seen.push(context);
+      return { content: [] };
+    },
+  });
+  const files = {
+    resolve: (path: string) => `/ws/${path}`,
+    ensureDirectory: async () => {},
+    writeFile: async () => {},
+    readFile: async () => "",
+    exists: async () => true,
+  };
+  const exec = {
+    run: async () => ({
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    }),
+  };
+  const call = { id: "c1", name: "demo#t" as EntryName, arguments: {} };
+  await tools.invoke(call, ["demo#t" as EntryName], {
+    sessionId: "s" as SessionId,
+    workspace: "/ws",
+    signal: new AbortController().signal,
+    files,
+    exec,
+  });
+  await tools.invoke(call, ["demo#t" as EntryName], {
+    sessionId: "s" as SessionId,
+    workspace: "/ws",
+    signal: new AbortController().signal,
+  });
+  expect(seen[0]?.files).toBe(files);
+  expect(seen[0]?.exec).toBe(exec);
+  expect(seen[1] && "files" in seen[1]).toBe(false);
+  expect(seen[1] && "exec" in seen[1]).toBe(false);
+});

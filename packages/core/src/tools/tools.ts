@@ -187,6 +187,8 @@ export function createTools(options: ToolsOptions = {}): Tools {
         sessionId: context.sessionId,
         workspace: context.workspace,
         signal: context.signal,
+        ...(context.files === undefined ? {} : { files: context.files }),
+        ...(context.exec === undefined ? {} : { exec: context.exec }),
       };
       const selectedTool = selected(selection).find(
         (declaration) => declaration.name === call.name,

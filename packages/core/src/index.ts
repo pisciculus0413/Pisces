@@ -13,6 +13,7 @@ export {
   type TurnStartedEvent,
   type TurnStepEvent,
 } from "./events.js";
+export * from "./exec/types.js";
 export * from "./loop/driver.js";
 export * from "./loop/interrupted.js";
 export * from "./loop/types.js";

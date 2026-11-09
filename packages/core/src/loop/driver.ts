@@ -546,6 +546,8 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
                   sessionId: input.sessionId,
                   workspace: input.meta.workspace,
                   signal: controller.signal,
+                  ...(input.files === undefined ? {} : { files: input.files }),
+                  ...(input.exec === undefined ? {} : { exec: input.exec }),
                 }),
               ),
             );
