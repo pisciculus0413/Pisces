@@ -88,3 +88,29 @@ test("reports invalid JSON and keeps failure and graph boundaries", async () => 
   expect(result.cjs).toBe(result.esm);
   expect(result.esm).toEqual({ ok: 1 });
 });
+
+// An async root can enter synchronous transpilation through an ordinary CJS require.
+test.each([
+  { x: 1 },
+  false,
+  { default: 7 },
+  { __esModule: true, default: 7 },
+  { __esModule: true, x: 1 },
+])("keeps synchronous ESM JSON imports raw through a CJS bridge: %j", async (value) => {
+  await writeJson(join(packageRoot, "value.json"), value);
+  await writeText(
+    join(packageRoot, "dep.ts"),
+    'import value from "./value.json"; export const picked = value; export const raw = require("./value.json");',
+  );
+  await writeText(join(packageRoot, "bridge.cjs"), 'module.exports = require("./dep.ts");');
+  await writeText(
+    join(packageRoot, "entry.ts"),
+    'const bridge = require("./bridge.cjs"); export default () => bridge;',
+  );
+  const module = await createExtensionLoader().load(await entryFor());
+  const result = (module.default as () => { picked: unknown; raw: unknown })();
+  expect(result.picked).toBe(result.raw);
+  expect(result.raw).toEqual(value);
+  if (typeof value === "object")
+    expect(Reflect.ownKeys(result.raw as object)).toEqual(Reflect.ownKeys(value));
+});

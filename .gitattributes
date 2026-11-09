@@ -1,0 +1,2 @@
+# Generated pnpm patch files embed vendored upstream whitespace verbatim.
+patches/*.patch whitespace=-blank-at-eol

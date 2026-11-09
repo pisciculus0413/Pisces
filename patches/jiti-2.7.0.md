@@ -3,17 +3,19 @@
 Upstream: `jiti@2.7.0` (MIT, unjs/jiti), exact dependency of `@pisces/daemon`.
 Registered with pnpm 12.8.1 as `patchedDependencies: jiti@2.7.0` in
 `pnpm-workspace.yaml`; the lockfile records the patch hash. Only
-`dist/jiti.cjs` (runtime) and `lib/types.d.ts` (private types) differ. The MIT
+`dist/jiti.cjs` (runtime), `dist/babel.cjs` (bundled transformer) and
+`lib/types.d.ts` (private types) differ. The MIT
 `LICENSE` is unchanged. No other dependency is upgraded.
 
-Patch file SHA-256: `c04801585f96b3dc40fda777710054320127565261f6965380490832f71b1ed6`
+Patch file SHA-256: `128e860385ec4366a7945e5ca6b241357f652a920be95ab13af25bd1e2a794a1`
 
 ## Hashes
 
 | file | upstream SHA-256 | patched SHA-256 |
 |---|---|---|
-| `dist/jiti.cjs` | `a0b3b8d5e06a0519c66b62179e29200533057920f6f11370546e979dacd24c49` | `6965f892d1a36b5bba0a92b4a00fe2955e51bcf008f52909f5b5f58531a04146` |
+| `dist/jiti.cjs` | `a0b3b8d5e06a0519c66b62179e29200533057920f6f11370546e979dacd24c49` | `d3001a26ddd23027ed73ef02ed438544aafbfeb2fa81c707e43f61f96ea74b96` |
 | `lib/types.d.ts` | `90d87e4d7f5af338fcb1004ae9de9d54d08c04e93df1c2fd655d426ee1238429` | `40540853a7b9236d5167854852e5d18299fa6b47ed4d29437a0b4c15874dc49b` |
+| `dist/babel.cjs` | `b3bc89a8dc40860fb6a7a78512bdfe5976c6253e6ded74b7d96ece803cac8701` | `22cf9f671430e97c5bedf2ecb6e7af844a6ddff75148de10613c9e931ad3ca59` |
 | `LICENSE` | `46231df5a7733c3f52f11b71f3df61813007745b62b09031acfb45fb42d75082` | same (unmodified) |
 
 The upstream hash is the installed 2.7.0 artifact recorded before the patch
@@ -61,7 +63,7 @@ if(".json"===c){if(debug(e,"[json]",a),e.opts.transformAll===!0){
   const t=n[piscesExtensionJsonCache]||(n[piscesExtensionJsonCache]=Object.create(null));
   if(!(a in t)){const s=readFileSync(a,"utf8");try{t[a]=JSON.parse(s)}
     catch{throw piscesExtensionError("ERR_PISCES_EXTENSION_JSON","Extension module JSON is invalid")}}
-  const s=t[a];if(!i.async)return s;
+  const s=t[a];if(!i.async&&!i.piscesNamespace)return s;
   const o=Object.create(null);
   if("object"==typeof s&&null!==s)for(const e of Object.keys(s))"default"!==e&&(o[e]=s[e]);
   return o.default=s,o}
@@ -113,7 +115,7 @@ C=".cjs"===l;
 if(t.opts.transformAll===!0){
   if(!1===n.forceTranspile)throw piscesExtensionError("ERR_PISCES_EXTENSION_MODE","Conflicting forceTranspile option");
   if(!piscesExtensionScriptExtensions.has(l))throw piscesExtensionFormatError()}
-const S=n.forceTranspile??t.opts.transformAll??(!C&&!(w&&n.async)&&(E||w||t.isTransformRe.test(c)||hasESMSyntax(i))),I=Ci.performance.now();if(S){
+const S=n.forceTranspile??(t.opts.transformAll===!0?!0:(!C&&!(w&&n.async)&&(E||w||t.isTransformRe.test(c)||hasESMSyntax(i)))),I=Ci.performance.now();if(S){
 ```
 
 This covers `evalModule` entry evaluation, including an entry filename ending
@@ -152,7 +154,7 @@ Do not edit installed packages. Regenerate through pnpm:
 
 ```bash
 pnpm patch jiti@<version> --edit-dir <temporary-copy>
-# edit only dist/jiti.cjs and lib/types.d.ts
+# edit the necessary runtime/transformer and private types only
 pnpm patch-commit <temporary-copy>
 ```
 
@@ -160,3 +162,42 @@ Then re-diff upstream control flow, update the readable anchors and all hashes,
 run the engine/adapter loader matrix on Node 22.19/24/26, the install verifier
 and full gate G. A patch that needs a new module system or global loader/cache
 hooks is out of scope; stop instead of falling back to unpatched jiti.
+
+## Correction: compiler-derived synchronous namespace edge
+
+A product async entry can use ordinary require to reach a TS module transpiled
+synchronously. Static ESM imports must remain distinct from ordinary require.
+No raw JSON decoration or generic `__esModule` heuristic is used.
+
+Runtime anchors (in addition to the updated anchors above):
+
+- `transform` old `interopDefault:e.opts.interopDefault,...t});` becomes
+  `interopDefault:e.opts.interopDefault,...t,piscesExtensionMode:e.opts.transformAll===!0});`.
+- JSON raw return old `if(!i.async)return s;` becomes
+  `if(!i.async&&!i.piscesNamespace)return s;`. Both namespace edges share the
+  existing separate namespace construction; raw graph cache stays untouched.
+- Before the marker: enabled instances alone define a private non-enumerable
+  `piscesImport` function on their require object:
+  `Object.defineProperty(j,"piscesImport",{value:id=>jitiRequire(O,id,{async:!1,piscesNamespace:!0})})`.
+  Other module types retain the original return semantics.
+
+Bundled transformer `dist/babel.cjs` anchors:
+
+- Plugin options old `async:h=!1}=r,m=` becomes
+  `async:h=!1,piscesExtensionMode:piscesMode=!1}=r,m=`.
+- Static source import sync callee old `e.types.identifier("require")` becomes
+  `piscesMode?e.types.memberExpression(e.types.identifier("require"),e.types.identifier("piscesImport")):e.types.identifier("require")`.
+  Only compiler-derived static import edges change; ordinary source requires do not.
+- Transform plugin options old `noInterop:!r.interopDefault,async:r.async` gains
+  `piscesExtensionMode:r.piscesExtensionMode===!0`.
+
+Absent/false mode selects the original Babel callee and upstream evaluation
+heuristic. Enabled mode alone selects the namespace edge, including objects
+whose legitimate JSON keys are `__esModule` and/or `default`.
+
+Generated patch files carry vendored upstream whitespace verbatim (this patch
+includes an upstream `dist/babel.cjs` line that is a single space, so
+`git diff --check` reports it at default diff context). Per the controller
+whitespace ruling, the repo `.gitattributes` scopes the whitespace-error
+exception to `patches/*.patch` only; authored source and tests keep full
+whitespace checking. Do not hand-edit the patched bytes to silence it.

@@ -62,6 +62,9 @@ try {
         const value = values[index];
         assert(value.esm === value.cjs, `json default identity ${index}`);
         assert(value.again === value.cjs, `json repeat identity ${index}`);
+        assert(value.sync.esm === value.cjs, `sync ESM JSON identity ${index}`);
+        assert(value.sync.cjs === value.cjs, `sync require JSON identity ${index}`);
+        assert(value.sync.again === value.cjs, `sync repeat JSON identity ${index}`);
         assert(
           JSON.stringify(value.cjs) === JSON.stringify(expected[index]),
           `json value ${index}`,

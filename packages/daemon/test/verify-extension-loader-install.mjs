@@ -112,6 +112,21 @@ async function verifyPatchIntegrity(workspace) {
   if (runtime === null || types === null)
     throw new Error("patch notes have no installed file hashes");
 
+  const babel = /\| `dist\/babel\.cjs` \| `[a-f0-9]{64}` \| `([a-f0-9]{64})` \|/u.exec(doc);
+  if (babel === null) throw new Error("patch notes have no bundled transformer hash");
+  const installedBabel = join(
+    workspace,
+    "packages",
+    "daemon",
+    "node_modules",
+    "jiti",
+    "dist",
+    "babel.cjs",
+  );
+  if (sha256(await readFile(installedBabel)) !== babel[1]) {
+    throw new Error("installed jiti transformer hash does not match patch notes");
+  }
+
   const installedRuntime = join(
     workspace,
     "packages",

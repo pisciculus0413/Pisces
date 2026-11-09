@@ -588,3 +588,18 @@ test("rejects unsupported formats before native fallback", async () => {
     expect(scriptControl).toEqual({ x: 1 });
   }
 });
+
+test.each([false, true])(
+  "preserves omitted/false source heuristic without forceTranspile (async=%s)",
+  async (asyncMode) => {
+    const path = join(root, "plain.js");
+    await writeText(path, 'module.exports = { default: () => "disk" };');
+    for (const extra of [{}, { transformAll: false }]) {
+      const evaluated = await engine(extra).evalModule('export default () => "supplied";', {
+        filename: path,
+        async: asyncMode,
+      });
+      expect((evaluated as { default: () => string }).default()).toBe("supplied");
+    }
+  },
+);

@@ -142,7 +142,19 @@ async function prepareHosts(packageRoot: string): Promise<void> {
   );
 }
 
-const JSON_VALUES: unknown[] = [{ x: 1 }, [1, 2], "x", 0, 2, false, true, null, { default: 7 }];
+const JSON_VALUES: unknown[] = [
+  { x: 1 },
+  [1, 2],
+  "x",
+  0,
+  2,
+  false,
+  true,
+  null,
+  { default: 7 },
+  { __esModule: true, default: 7 },
+  { __esModule: true, x: 1 },
+];
 
 async function prepareJson(packageRoot: string): Promise<void> {
   await writeJson(join(packageRoot, "expected.json"), JSON_VALUES);
@@ -151,8 +163,16 @@ async function prepareJson(packageRoot: string): Promise<void> {
   for (let index = 0; index < JSON_VALUES.length; index += 1) {
     await writeJson(join(packageRoot, "values", `${index}.json`), JSON_VALUES[index]);
     imports.push(`import v${index} from "./values/${index}.json";`);
+    await writeText(
+      join(packageRoot, "values", `${index}.ts`),
+      `import value from "./${index}.json"; export const esm = value; export const cjs = require("./${index}.json"); export const again = require("./${index}.json");`,
+    );
+    await writeText(
+      join(packageRoot, "values", `${index}.cjs`),
+      `module.exports = require("./${index}.ts");`,
+    );
     inputs.push(
-      `{ esm: v${index}, cjs: require("./values/${index}.json"), again: require("./values/${index}.json") }`,
+      `{ esm: v${index}, cjs: require("./values/${index}.json"), again: require("./values/${index}.json"), sync: require("./values/${index}.cjs") }`,
     );
   }
   await writeText(
