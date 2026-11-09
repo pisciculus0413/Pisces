@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import type { EntryName, JsonValue, SessionId, SessionMeta } from "@pisces/core";
@@ -225,6 +225,20 @@ test("rejects a non-empty explicit extension list", async () => {
     { workspace, provider: "p", model: "m", extensions: ["pkg#tool" as EntryName] },
     "queue.invalid_control",
   );
+});
+
+test("does not enter configuration mode from workspace config alone", async () => {
+  const workspace = await tempWorkspace();
+  await mkdir(join(workspace, ".pisces"), { recursive: true });
+  await writeFile(
+    join(workspace, ".pisces", "config.json"),
+    JSON.stringify({ extensions: ["pkg#tool"], defaultProvider: "p", defaultModel: "m" }),
+    "utf8",
+  );
+  const h = await openHarness();
+
+  await expectRejected(h, {}, "session.workspace_required");
+  await expectRejected(h, { workspace }, "session.model_required");
 });
 
 test("rejects a non-empty default extension list", async () => {

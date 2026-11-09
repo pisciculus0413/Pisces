@@ -18,6 +18,9 @@ export interface ProtocolError {
   message: string;
 }
 
+/** Fixed provenance for host-created queue entries (prompts and initial declarations). */
+export const CREATE_ENTRY_SOURCE = "create";
+
 export interface GatewayRequest<P = JsonValue> {
   id: string;
   method: string;

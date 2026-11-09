@@ -32,12 +32,20 @@ import {
   type TurnId,
 } from "@pisces/core";
 import type { ProtocolEvent } from "@pisces/protocol";
+import type { ExtensionBinding, Extensions } from "../extensions/types.js";
 import type { ProviderHost } from "../provider/provider-host.js";
 import type { Concurrency } from "../runtime/concurrency.js";
 import { createSessionEventClock } from "../runtime/event-clock.js";
 import type { SessionStore } from "../session-store/session-store.js";
 import type { ActiveTurnStore } from "./active-turn.js";
+import {
+  enrichForBinding,
+  initialDeclarationEntries,
+  prepareBinding,
+  prepareExtensionSession,
+} from "./extension-session.js";
 import type {
+  CreateSessionParams,
   GatewayRequest,
   GatewayResponse,
   ModelInfo,
@@ -49,6 +57,7 @@ import type {
   TurnListResult,
   TurnStartResult,
 } from "./protocol.js";
+import { CREATE_ENTRY_SOURCE } from "./protocol.js";
 
 export interface GatewayDeps {
   store: SessionStore;
@@ -57,6 +66,8 @@ export interface GatewayDeps {
   concurrency: Concurrency;
   events: EventBus;
   markers: ActiveTurnStore;
+  /** Configuration-driven mode; mutually exclusive with the manual injections below. */
+  extensions?: Extensions;
   defaults?: SessionDefaults;
   createTools?: () => Tools;
   entries?: ContextEntries;
@@ -99,6 +110,8 @@ interface SessionRuntime {
   eventClock: SessionEventClock;
   pendingMarker?: PendingMarker;
   phase?: TurnPhase;
+  /** Frozen per-session view; absent only in the legacy manual-injection mode. */
+  binding?: ExtensionBinding;
   /** Runtime-local only; a failing cancel handle is never rethrown or exported. */
   cancelHandleError?: unknown;
 }
@@ -256,6 +269,17 @@ function modelInfo(model: {
 }
 
 export function createGateway(deps: GatewayDeps): Gateway {
+  // Configuration-driven and manual-injection modes never merge: mixing them is a
+  // startup failure, not an implicit precedence rule.
+  if (
+    deps.extensions !== undefined &&
+    (deps.defaults !== undefined ||
+      deps.createTools !== undefined ||
+      deps.entries !== undefined ||
+      deps.skills !== undefined ||
+      deps.sources !== undefined)
+  )
+    throw new PiscesError("daemon.start_failed", "Invalid gateway configuration");
   const now = deps.now ?? (() => new Date().toISOString());
   const newNodeId = deps.newNodeId ?? (() => randomUUID() as NodeId);
   const newQueueEntryId = deps.newQueueEntryId ?? (() => randomUUID() as QueueEntryId);
@@ -265,7 +289,11 @@ export function createGateway(deps: GatewayDeps): Gateway {
   const runtimes = new Map<SessionId, SessionRuntime>();
   const connections = new Map<string, Connection>();
 
-  function createRuntime(meta: SessionMeta, persisted: boolean): SessionRuntime {
+  function createRuntime(
+    meta: SessionMeta,
+    persisted: boolean,
+    binding?: ExtensionBinding,
+  ): SessionRuntime {
     const sessionId = meta.id;
     const eventClock = createSessionEventClock();
     let runtime: SessionRuntime | undefined;
@@ -311,9 +339,9 @@ export function createGateway(deps: GatewayDeps): Gateway {
       meta,
       persisted,
       sessions,
-      entries: deps.entries ?? EMPTY_ENTRIES,
-      skills: deps.skills ?? EMPTY_SKILLS,
-      sources: deps.sources ?? EMPTY_SOURCES,
+      entries: binding?.entries ?? deps.entries ?? EMPTY_ENTRIES,
+      skills: binding?.skills ?? deps.skills ?? EMPTY_SKILLS,
+      sources: binding?.sources ?? deps.sources ?? EMPTY_SOURCES,
       events: deps.events,
       eventClock,
       runExclusive: (task) => deps.concurrency.runExclusive(sessionId, task),
@@ -326,7 +354,15 @@ export function createGateway(deps: GatewayDeps): Gateway {
       now,
     });
 
-    runtime = { meta, persisted, context, sessions, driver, eventClock };
+    runtime = {
+      meta,
+      persisted,
+      context,
+      sessions,
+      driver,
+      eventClock,
+      ...(binding === undefined ? {} : { binding }),
+    };
     return runtime;
   }
 
@@ -334,9 +370,63 @@ export function createGateway(deps: GatewayDeps): Gateway {
     const existing = runtimes.get(sessionId);
     if (existing) return existing;
     const meta = await deps.store.getMeta(sessionId);
-    const runtime = createRuntime(meta, true);
+    // Callers hold the session lock: this is file I/O only, never plugin loading, and a
+    // failed prepare caches no half-built runtime. Persisted meta is never rewritten.
+    const binding =
+      deps.extensions === undefined
+        ? undefined
+        : await prepareBinding(deps.extensions, meta.workspace);
+    const runtime = createRuntime(meta, true, binding);
     runtimes.set(sessionId, runtime);
     return runtime;
+  }
+
+  /** Creates a session in configuration-driven mode; prepare finishes before any runtime. */
+  async function createConfiguredSession(
+    extensions: Extensions,
+    params: CreateSessionParams,
+  ): Promise<SessionMeta> {
+    const prepared = await prepareExtensionSession(
+      extensions,
+      params,
+      deps.validateWorkspace ?? defaultValidateWorkspace,
+    );
+    if (prepared.provider === undefined || prepared.model === undefined)
+      throw new PiscesError("session.model_required", "Provider and model are required");
+    if (!deps.providers.select(prepared.provider, prepared.model))
+      throw new PiscesError("session.invalid_model", "Invalid model");
+
+    const prompts = params.systemPrompt ?? [];
+    const entries: QueueEntryInput[] = prompts.map((text) => ({
+      kind: "agent",
+      role: "system",
+      source: CREATE_ENTRY_SOURCE,
+      content: [{ type: "text", text }],
+    }));
+    // Enrichment is pure and runs before the runtime exists: a failure leaves no session.
+    entries.push(...initialDeclarationEntries(prepared.binding, prepared.extensions));
+
+    const sessionId = newSessionId();
+    const meta: SessionMeta = {
+      id: sessionId,
+      model: prepared.model,
+      provider: prepared.provider,
+      workspace: prepared.workspace,
+      createdAt: now(),
+      schemaVersion: 1,
+    };
+    return deps.concurrency.runExclusive(sessionId, async () => {
+      const runtime = createRuntime(meta, false, prepared.binding);
+      runtimes.set(sessionId, runtime);
+      try {
+        // Prompts and the single declaration enter the queue in one atomic call.
+        runtime.context.enqueue(entries);
+      } catch (error) {
+        runtimes.delete(sessionId);
+        throw error;
+      }
+      return structuredClone(meta);
+    });
   }
 
   function hasCancel(nodes: SessionNode[], turnId: TurnId): boolean {
@@ -494,6 +584,17 @@ export function createGateway(deps: GatewayDeps): Gateway {
       )
         invalidRequest();
 
+      if (deps.extensions !== undefined)
+        return createConfiguredSession(deps.extensions, {
+          ...(workspace === undefined ? {} : { workspace }),
+          ...(explicitProvider === undefined ? {} : { provider: explicitProvider }),
+          ...(explicitModel === undefined ? {} : { model: explicitModel }),
+          ...(systemPrompt === undefined ? {} : { systemPrompt }),
+          ...(explicitExtensions === undefined
+            ? {}
+            : { extensions: explicitExtensions as EntryName[] }),
+        });
+
       const resolvedWorkspace = workspace ?? deps.defaults?.workspace;
       if (resolvedWorkspace === undefined)
         throw new PiscesError("session.workspace_required", "Workspace is required");
@@ -533,7 +634,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
       const entries: QueueEntryInput[] = prompts.map((text) => ({
         kind: "agent",
         role: "system",
-        source: "create",
+        source: CREATE_ENTRY_SOURCE,
         content: [{ type: "text", text }],
       }));
 
@@ -670,9 +771,20 @@ export function createGateway(deps: GatewayDeps): Gateway {
       return deps.concurrency.runExclusive(id, async () => {
         const runtime = await runtimeFor(id);
         await runtime.context.initialize();
-        if (entries.some((entry) => isRecord(entry) && entry.kind === "control"))
+        const inputs = entries as QueueEntryInput[];
+        const hasControl = inputs.some((entry) => isRecord(entry) && entry.kind === "control");
+        if (!hasControl) return { ids: runtime.context.enqueue(inputs) };
+        // Without a frozen binding the legacy rule stands: no client controls at all.
+        const binding = runtime.binding;
+        if (binding === undefined)
           throw new PiscesError("queue.invalid_control", "Invalid queue entry");
-        return { ids: runtime.context.enqueue(entries as QueueEntryInput[]) };
+        // Resolve, replay and enrich the whole batch before one enqueue; errors change nothing.
+        const view = await runtime.context.viewFor();
+        const pending = runtime.context
+          .snapshot()
+          .queue.filter((entry) => entry.confirmedAt === undefined);
+        const enriched = enrichForBinding(binding, view, pending, inputs);
+        return { ids: runtime.context.enqueue(enriched) };
       });
     },
 
@@ -757,7 +869,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
               meta: runtime.meta,
               context: runtime.context,
               sessions: runtime.sessions,
-              tools: deps.createTools?.() ?? createTools(),
+              tools: runtime.binding?.tools ?? deps.createTools?.() ?? createTools(),
               adapter,
               execute,
               events: deps.events,
