@@ -101,11 +101,20 @@ function parseApiKeyEnv(value: unknown): string {
   return value;
 }
 
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
 function parseHeaders(value: unknown): Record<string, string> {
   if (!isRecord(value)) invalid();
   const headers: Record<string, string> = {};
   for (const [key, header] of Object.entries(value)) {
-    if (key.trim() === "" || typeof header !== "string") invalid();
+    if (key.trim() === "" || hasControlCharacter(key)) invalid();
+    if (typeof header !== "string" || hasControlCharacter(header)) invalid();
     headers[key] = header;
   }
   return headers;

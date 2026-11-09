@@ -107,8 +107,8 @@ test("requires every model field", () => {
   );
 });
 
-test("rejects non-positive or non-integer model limits", () => {
-  for (const value of [0, -1, 1.5, "128000", null]) {
+test("rejects non-positive, non-integer and non-finite model limits", () => {
+  for (const value of [0, -1, 1.5, "128000", null, Number.NaN, Number.POSITIVE_INFINITY]) {
     expectInvalid(() =>
       parseConfig(raw({ providers: [provider({ models: [model({ contextWindow: value })] })] })),
     );
@@ -151,6 +151,38 @@ test("keeps optional headers and rejects malformed ones", () => {
   expect(valid.providers[0]?.headers).not.toBeUndefined();
   expectInvalid(() => parseConfig(raw({ providers: [provider({ headers: { a: 1 } })] })));
   expectInvalid(() => parseConfig(raw({ providers: [provider({ headers: "a: b" })] })));
+});
+
+test("rejects header names and values containing control characters", () => {
+  const injectionValues = ["a\r\nX-Injected: 1", "a\nb", "a\rb", "a\u0000b", "a\u007fb"];
+  for (const value of injectionValues) {
+    expectInvalid(() =>
+      parseConfig(raw({ providers: [provider({ headers: { "x-org": value } })] })),
+    );
+  }
+  const injectionNames = ["x-org\r\nX-Injected", "x\u0000org", "x\u007forg", "", "   "];
+  for (const name of injectionNames) {
+    expectInvalid(() =>
+      parseConfig(raw({ providers: [provider({ headers: { [name]: "value" } })] })),
+    );
+  }
+  expectInvalid(() =>
+    parseConfig(raw({ providers: [provider({ headers: { "x-org": "tab\there" } })] })),
+  );
+});
+
+test("accepts a simple Authorization header", () => {
+  const valid = parseConfig(
+    raw({
+      providers: [
+        provider({ headers: { Authorization: "Bearer sk-test-123", "content-type": "a/b" } }),
+      ],
+    }),
+  );
+  expect(valid.providers[0]?.headers).toEqual({
+    Authorization: "Bearer sk-test-123",
+    "content-type": "a/b",
+  });
 });
 
 test("requires an absolute dataDir", () => {
