@@ -36,6 +36,8 @@ import type { ProviderHost } from "../src/provider/provider-host.js";
 import { makePackage, toolSource, writeJson, writeText } from "./extensions-fixtures.js";
 
 const RUN = "demo#run" as EntryName;
+// The repo ships one built-in extension; these tests use the module-derived builtin dir.
+const SHELL = "@pisces/builtin-shell#shell" as EntryName;
 /** Inner bounds shorter than the default 5 s test timeout: a stuck helper reports itself. */
 const WAIT_TIMEOUT_MS = 4000;
 const CHILD_TIMEOUT_MS = 4000;
@@ -436,7 +438,7 @@ test("serves a configured extension session, runs its TS tool, then stops cleanl
     systemPrompt: ["use the tool"],
   })) as SessionMeta;
   const initial = await snapshot(client, meta.id);
-  expect(initial.entries.map((entry) => entry.name)).toEqual([RUN]);
+  expect(initial.entries.map((entry) => entry.name)).toEqual([SHELL, RUN]);
   expect(initial.selection).toEqual([]);
   // Discovery never imported the module: the sentinel is written by the tool module itself.
   expect(await exists(sentinel)).toBe(false);
@@ -471,7 +473,7 @@ test("serves a configured extension session, runs its TS tool, then stops cleanl
     systemPrompt: ["restarted"],
   })) as SessionMeta;
   const restartedSnapshot = await snapshot(restartedClient, restartedMeta.id);
-  expect(restartedSnapshot.entries.map((entry) => entry.name)).toEqual([RUN]);
+  expect(restartedSnapshot.entries.map((entry) => entry.name)).toEqual([SHELL, RUN]);
   expect(restartedSnapshot.selection).toEqual([]);
   await restarted.stop();
 });
@@ -537,7 +539,7 @@ test("resolves the default builtin directory from the module URL, not the workin
     const meta = (await ok(client, "session.create", { workspace })) as SessionMeta;
     const discovered = (await snapshot(client, meta.id)).entries.map((entry) => entry.name);
     // The decoy tree under the working directory is not the module-derived builtin directory.
-    expect(discovered).toEqual([RUN]);
+    expect(discovered).toEqual([SHELL, RUN]);
     expect(discovered).not.toContain("decoy#x");
     expect(await exists(decoySentinel)).toBe(false);
   } finally {
@@ -597,7 +599,7 @@ test("a bounded dist child serves an extension session over a real socket and ru
     code: "extensions.invalid",
     source: "broken",
   });
-  expect(probed.inventory.entries.map((entry) => entry.name)).toEqual([RUN]);
+  expect(probed.inventory.entries.map((entry) => entry.name)).toEqual([SHELL, RUN]);
 
   const child = spawnChildHost([DIST_ENTRY, dataDir, configDir, workspace, RUN]);
   const ready = await child.next();
@@ -613,7 +615,7 @@ test("a bounded dist child serves an extension session over a real socket and ru
     systemPrompt: ["use the tool"],
   })) as SessionMeta;
   const initial = await snapshot(client, meta.id);
-  expect(initial.entries.map((entry) => entry.name)).toEqual([RUN]);
+  expect(initial.entries.map((entry) => entry.name)).toEqual([SHELL, RUN]);
   expect(await exists(sentinel)).toBe(false);
 
   await ok(client, "turn.start", { sessionId: meta.id });

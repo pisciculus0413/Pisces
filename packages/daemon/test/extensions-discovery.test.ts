@@ -628,15 +628,23 @@ test("returns frozen copies callers cannot use to rewrite discovery state", asyn
   expect(await exists(sentinel)).toBe(false);
 });
 
-test("defaultBuiltinDir is module-relative and absent by default without being created", async () => {
+test("defaultBuiltinDir is module-relative and ships the built-in shell tool", async () => {
   const expected = resolve(fileURLToPath(new URL("../../../extensions/builtin/", import.meta.url)));
   expect(resolve(defaultBuiltinDir())).toBe(expected);
-  expect(await exists(expected)).toBe(false);
+  // The directory ships with the repo; discovery must find it without creating it.
+  expect((await stat(expected)).isDirectory()).toBe(true);
 
   const result = await discoverExtensions({ configDir }, workspace, {});
 
-  expect(result.inventory.entries).toEqual([]);
-  expect(await exists(expected)).toBe(false);
+  expect(result.inventory.entries.map((entry) => entry.name)).toEqual([
+    entryName("@pisces/builtin-shell#shell"),
+  ]);
+  const shell = result.inventory.entries[0] as EntryInfo;
+  expect(shell.type).toBe("tool");
+  expect(shell.source).toBe("@pisces/builtin-shell");
+  expect(shell.definition?.kind).toBe("tool");
+  expect(shell.definition?.parameters).toMatchObject({ required: ["command"] });
+  expect((await stat(expected)).isDirectory()).toBe(true);
 });
 
 interface ChildResult {

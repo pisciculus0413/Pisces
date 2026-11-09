@@ -41,6 +41,8 @@ const WRAP = "demo#wrap" as EntryName;
 const GUIDE = "demo#guide" as EntryName;
 const NOTE = "demo#note" as EntryName;
 const EMPTY = "demo#empty" as EntryName;
+// The repo ships one built-in extension; these tests use the module-derived builtin dir.
+const SHELL = "@pisces/builtin-shell#shell" as EntryName;
 const GUARD = "hostile#guard" as EntryName;
 const SLOWCTX = "slowctx#wait" as EntryName;
 
@@ -602,7 +604,7 @@ test("serves a frozen declaration, snapshot projection and first-invoke tools ov
   const initial = await snapshot(client, created.id);
   // Inventory is visible, the queued toggle is not: selection/effective are the persisted branch.
   expect(initial.entries.map((entry) => entry.name).sort()).toEqual(
-    [EMPTY, GUIDE, NOTE, RUN, WRAP].sort(),
+    [SHELL, EMPTY, GUIDE, NOTE, RUN, WRAP].sort(),
   );
   expect(initial.selection).toEqual([]);
   expect(initial.effective).toEqual([]);

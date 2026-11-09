@@ -1,0 +1,10 @@
+{
+  "name": "@pisces/builtin-shell",
+  "private": true,
+  "type": "module",
+  "pisces": {
+    "tools": [
+      "tools/shell.ts"
+    ]
+  }
+}

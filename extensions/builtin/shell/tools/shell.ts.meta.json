@@ -1,0 +1,27 @@
+{
+  "name": "shell",
+  "description": "Runs a shell command in the workspace and returns its exit code, stdout and stderr.",
+  "parameters": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 65536,
+        "description": "Command line passed to /bin/sh -c."
+      },
+      "cwd": {
+        "type": "string",
+        "description": "Working directory relative to the workspace; defaults to the workspace root."
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 600000,
+        "description": "Kill the command after this many milliseconds."
+      }
+    },
+    "required": ["command"]
+  }
+}
