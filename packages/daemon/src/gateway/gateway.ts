@@ -735,7 +735,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
         const runtime = await runtimeFor(id);
         // Reject the whole configuration before mutating meta, queue, or records.
         if (deps.concurrency.activeTurn(id) !== undefined)
-          throw new PiscesError("turn.active", "A turn is active for this session");
+          throw new PiscesError("turn.active", ACTIVE_TURN_MESSAGE);
         const hasModel = model !== undefined;
         const hasProvider = provider !== undefined;
         if (hasModel !== hasProvider)
@@ -897,6 +897,9 @@ export function createGateway(deps: GatewayDeps): Gateway {
           const runtime = await runtimeFor(id);
           if (target !== undefined && !runtime.persisted)
             throw new PiscesError("session.node_not_found", "Node not in session");
+          // Reconcile any pending commit first (as steer does), so the recorded start offset cannot
+          // be a value that a reconciled commit already advanced past.
+          await runtime.context.initialize();
           const selection = deps.providers.select(runtime.meta.provider, runtime.meta.model);
           if (!selection) throw new PiscesError("session.invalid_model", "Invalid model");
           const adapter = deps.providers.createAdapter(runtime.meta.provider);
@@ -924,7 +927,6 @@ export function createGateway(deps: GatewayDeps): Gateway {
           try {
             // Validate every unconfirmed declaration against the exact branch this turn will
             // append to, before the marker, confirmation, or turn registration exist.
-            await runtime.context.initialize();
             await runtime.context.validateQueue(startNodeId);
             if (runtime.persisted)
               await deps.markers.write(id, {

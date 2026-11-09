@@ -21,7 +21,7 @@ import {
   type SessionNodeDraft,
   type TurnId,
 } from "@pisces/core";
-import { MAX_RESPONSE_BYTES } from "@pisces/protocol";
+import { MAX_RESPONSE_BYTES, type ProtocolEvent } from "@pisces/protocol";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createExtensions } from "../src/extensions/extensions.js";
 import type { ExtensionBinding, Extensions, ExtensionsOptions } from "../src/extensions/types.js";
@@ -95,6 +95,8 @@ interface ViewHarness {
   events: EngineEvent[];
   requests: string[];
   commitOffsetReads(): number;
+  /** nodeId arguments the Core branch reads actually used, in call order. */
+  branchReadNodeIds(): (NodeId | undefined)[];
   close(): void;
 }
 
@@ -112,13 +114,19 @@ function sequentialIds(): () => SessionId {
   return () => `s-${++next}` as SessionId;
 }
 
-// Real store; the optional wrapper only counts commitOffset reads.
-function countingStore(store: SessionStore, reads: { count: number }): SessionStore {
+// Real store; the optional wrapper only records commitOffset reads and branch reads.
+function countingStore(
+  store: SessionStore,
+  reads: { count: number; branches: (NodeId | undefined)[] },
+): SessionStore {
   return {
     initialize: () => store.initialize(),
     create: (meta, nodes) => store.create(meta, nodes),
     append: (id, nodes) => store.append(id, nodes),
-    readBranch: (id, nodeId) => store.readBranch(id, nodeId),
+    readBranch(id, nodeId) {
+      reads.branches.push(nodeId);
+      return store.readBranch(id, nodeId);
+    },
     readTree: (id) => store.readTree(id),
     list: () => store.list(),
     updateMeta: (id, meta) => store.updateMeta(id, meta),
@@ -134,7 +142,7 @@ function countingStore(store: SessionStore, reads: { count: number }): SessionSt
 async function openHarness(options: OpenOptions = {}): Promise<ViewHarness> {
   const dataDir = options.dataDir ?? (await mkdtemp(join(root, "data-")));
   const realStore = createSessionStore({ dataDir });
-  const reads = { count: 0 };
+  const reads = { count: 0, branches: [] as (NodeId | undefined)[] };
   const store = options.countOffsets ? countingStore(realStore, reads) : realStore;
   const providers: ProviderManagement = createProviderManagement();
   providers.registerProvider(
@@ -185,6 +193,7 @@ async function openHarness(options: OpenOptions = {}): Promise<ViewHarness> {
     events: recorded,
     requests,
     commitOffsetReads: () => reads.count,
+    branchReadNodeIds: () => [...reads.branches],
     close() {
       gateway.dispose();
     },
@@ -790,6 +799,106 @@ describe("queue routes with a frozen binding", () => {
 
     await finishTurn(h, turnId);
   });
+
+  test("keeps configuration values, paths and nested error fields out of queue routes and events", async () => {
+    const ws = await workspaceDir("queue-secret");
+    const secret = "sk-secret-queue-config-value";
+    const wrap = await addWrap(ws, join(root, "queue-secret.log"));
+    await writeWorkspaceConfig(ws, {
+      extensions: [wrap],
+      defaultProvider: "p",
+      defaultModel: "m",
+      entryConfig: { [wrap]: { token: secret } },
+    });
+    const h = await openHarness({
+      extensions: createExtensions(options),
+      newSessionId: sequentialIds(),
+    });
+    const meta = (await createSession(h, { workspace: ws })).result as unknown as SessionMeta;
+    const wsReal = await realpath(ws);
+    // Capture what the wire would deliver, not only the engine event bus.
+    const delivered: ProtocolEvent[] = [];
+    h.gateway.attach("viewer", (event) => {
+      delivered.push(event);
+    });
+    expect(
+      (
+        await h.gateway.handle(
+          {
+            id: "subscribe",
+            method: "session.subscribe",
+            params: { sessionId: meta.id } as unknown as JsonValue,
+          },
+          "viewer",
+        )
+      ).error,
+    ).toBeUndefined();
+    const before = queueUpdates(h).length;
+    const created = (await enqueue(h, meta.id, [agent("visible text")])).result as unknown as {
+      ids: QueueEntryId[];
+    };
+    const entryId = created.ids[0] as QueueEntryId;
+
+    const edited = await queueEdit(h, meta.id, entryId, [{ type: "text", text: "edited text" }]);
+    const removed = await queueRemove(h, meta.id, entryId);
+    const snap = await h.gateway.handle({
+      id: "snapshot",
+      method: "entries.snapshot",
+      params: { sessionId: meta.id } as unknown as JsonValue,
+    });
+    expect(edited.error).toBeUndefined();
+    expect(removed.error).toBeUndefined();
+    expect(snap.error).toBeUndefined();
+    // Enqueue, edit and remove each publish exactly one complete queue.updated event.
+    const updates = queueUpdates(h).slice(before);
+    expect(updates).toHaveLength(3);
+    const wireEvents = delivered.filter((event) => event.event === "queue.updated");
+    expect(wireEvents).toHaveLength(3);
+
+    const responses = [edited, removed, snap];
+    const wires = [
+      ...responses.map((response) => JSON.stringify(response)),
+      ...updates.map((event) => JSON.stringify(event)),
+      ...delivered.map((event) => JSON.stringify(event)),
+    ];
+    for (const wire of wires) {
+      expect(wire).not.toContain(secret);
+      expect(wire).not.toContain(wsReal);
+      expect(wire).not.toContain(".pisces");
+      expect(wire).not.toContain("entryConfig");
+      expect(wire).not.toContain('"cause"');
+    }
+    // Wire errors stay flat {code, message}; no nested error payload rides along.
+    for (const response of responses) {
+      if (response.error) expect(Object.keys(response.error).sort()).toEqual(["code", "message"]);
+    }
+
+    // A leaking extension failure on a queue route becomes the fixed safe error.
+    const nestedSecret = "nested-secret-/etc/shadow";
+    const real = createExtensions(options);
+    const failing: Extensions = {
+      readGlobalConfig: () => real.readGlobalConfig(),
+      prepare() {
+        throw new PiscesError("extensions.invalid", "outer failure", {
+          data: { nested: { cause: { secret: nestedSecret } } },
+        });
+      },
+    };
+    const broken = await openHarness({ extensions: failing, newSessionId: sequentialIds() });
+    const seeded = await seed(broken, [userNode("hello")], {
+      id: "s-queue-fail" as SessionId,
+      workspace: wsReal,
+    });
+    const failed = await enqueue(broken, seeded.id, [agent("x")]);
+
+    expect(failed.error).toEqual({ code: SAFE_CODE, message: SAFE_MESSAGE });
+    const failedWire = JSON.stringify(failed);
+    expect(failedWire).not.toContain(nestedSecret);
+    expect(failedWire).not.toContain("nested");
+    expect(failedWire).not.toContain(wsReal);
+    expect(Object.keys(failed.error ?? {}).sort()).toEqual(["code", "message"]);
+    expect(broken.events.filter((event) => event.type === "queue.updated")).toEqual([]);
+  });
 });
 
 describe("turn.start declaration validation", () => {
@@ -847,6 +956,7 @@ describe("turn.start declaration validation", () => {
       extensions: real,
       newSessionId: sequentialIds(),
       execute: blockedExecute(),
+      countOffsets: true,
     });
     const seeded = await seedTree(h, {
       meta: { id: "s-before" as SessionId, workspace: await realpath(ws) },
@@ -872,9 +982,12 @@ describe("turn.start declaration validation", () => {
     expect((await enqueue(h, meta.id, [declaration({ toggle: [tool] })])).error).toBeUndefined();
     const pending = (await readSession(h, meta.id)).queue;
     const updates = queueUpdates(h).length;
+    const branchReadsBefore = h.branchReadNodeIds().length;
     const steer = await turnStart(h, meta.id);
 
     expect(steer.error?.code).toBe("queue.invalid_control");
+    // The turn never appended, so steer re-read the branch it started from, not the default head.
+    expect(h.branchReadNodeIds().slice(branchReadsBefore)).toContain(target);
     expect((await readSession(h, meta.id)).queue).toEqual(pending);
     expect(pending.every((entry) => entry.confirmedAt === undefined)).toBe(true);
     expect(queueUpdates(h)).toHaveLength(updates);
@@ -920,12 +1033,19 @@ describe("turn.start declaration validation", () => {
     );
     const readsBefore = h.commitOffsetReads();
     expect((await enqueue(h, meta.id, [agent("steer")])).error).toBeUndefined();
+    const branchReadsBefore = h.branchReadNodeIds().length;
     const steer = await turnStart(h, meta.id);
 
     expect(steer.error).toBeUndefined();
     expect(turnResult(steer).mode).toBe("steer");
     // The offset decision comes from storage, not from an append promise.
     expect(h.commitOffsetReads()).toBeGreaterThan(readsBefore);
+    // The turn already appended, so the queue must be validated against the latest committed
+    // branch (nodeId undefined) and never against the original target node.
+    const steerBranchReads = h.branchReadNodeIds().slice(branchReadsBefore);
+    expect(steerBranchReads.length).toBeGreaterThan(0);
+    expect(steerBranchReads).not.toContain(target);
+    expect(steerBranchReads.at(-1)).toBeUndefined();
     const queue = (await readSession(h, meta.id)).queue;
     expect(queue).toEqual([expect.objectContaining({ confirmedAt: expect.any(String) })]);
     expect((await h.markers.read(meta.id))?.startNodeId).toBe(target);
