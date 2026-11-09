@@ -5,6 +5,11 @@
  */
 
 export type { ProtocolEvent } from "@pisces/protocol";
+export type {
+  ExtensionBinding,
+  Extensions,
+  ExtensionsOptions,
+} from "./extensions/types.js";
 export {
   type ActiveTurnMarker,
   type ActiveTurnStore,

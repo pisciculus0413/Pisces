@@ -1,5 +1,7 @@
 import type { Socket } from "node:net";
 import { PiscesError } from "@pisces/core";
+import { createExtensions } from "../extensions/extensions.js";
+import type { ExtensionsOptions } from "../extensions/types.js";
 import { createActiveTurnStore } from "../gateway/active-turn.js";
 import { bootstrapGateway } from "../gateway/bootstrap.js";
 import type { Gateway, GatewayDeps } from "../gateway/gateway.js";
@@ -77,7 +79,14 @@ export type StartDaemonOptions = { dataDir: string } & Pick<
   | "newQueueEntryId"
   | "newNodeId"
   | "now"
->;
+> & {
+    /**
+     * Configuration-driven extension mode: only the directories to discover, never the
+     * Gateway's `Extensions` service instance. Mutually exclusive with the manual injections
+     * above; mixing them fails startup instead of merging.
+     */
+    extensions?: ExtensionsOptions;
+  };
 
 export interface DaemonHostStatus {
   state: "running" | "quiescing" | "stopped";
@@ -129,6 +138,23 @@ const normalizeStartError = (error: unknown): PiscesError => {
     if (START_CODES.has(error.code)) return error;
   }
   return startFailed();
+};
+
+/**
+ * Configuration-driven extension mode never merges with manual injections. The check runs after
+ * the single-instance lock is held but before the native probe and public bind, so a rejected
+ * composition uses the existing failed-start cleanup: release the lock, unlink no live socket.
+ */
+const assertExclusiveModes = (options: StartDaemonOptions): void => {
+  if (options.extensions === undefined) return;
+  if (
+    options.defaults !== undefined ||
+    options.createTools !== undefined ||
+    options.entries !== undefined ||
+    options.skills !== undefined ||
+    options.sources !== undefined
+  )
+    throw startFailed();
 };
 
 /**
@@ -199,6 +225,7 @@ export async function startDaemonWithSeams(
   let stopPromise: Promise<void> | undefined;
 
   try {
+    assertExclusiveModes(options);
     await probe(paths.runDir);
     await clearStaleSocket(paths.socketPath);
 
@@ -206,6 +233,10 @@ export async function startDaemonWithSeams(
     const markers = createActiveTurnStore({ dataDir: options.dataDir });
     const events = createEventBus();
     const concurrency = createConcurrency();
+    // Directory-driven extension service, built only after platform/identity checks and before
+    // the Gateway bootstrap; the Gateway installs the Task 8 mutual-exclusion contract too.
+    const extensionService =
+      options.extensions === undefined ? undefined : createExtensions(options.extensions);
     const bootstrapped = await bootstrapGateway({
       store,
       markers,
@@ -213,6 +244,7 @@ export async function startDaemonWithSeams(
       concurrency,
       providers: options.providers,
       providerHost: options.providerHost,
+      ...(extensionService !== undefined ? { extensions: extensionService } : {}),
       ...(options.defaults !== undefined ? { defaults: options.defaults } : {}),
       ...(options.createTools !== undefined ? { createTools: options.createTools } : {}),
       ...(options.entries !== undefined ? { entries: options.entries } : {}),
