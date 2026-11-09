@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import {
   type CommandDeps,
   type CommandIo,
@@ -63,10 +64,11 @@ async function version(): Promise<string> {
 
 /** Returns a parsed request, `"help"`, `"version"` or `undefined` for a usage error. */
 async function parse(argv: readonly string[]): Promise<Parsed | "help" | "version" | undefined> {
-  if (argv.includes("--help")) return "help";
-  if (argv.includes("--version")) return "version";
-
   const command = argv[0];
+  if (command === "--help") return "help";
+  if (command === "--version") return "version";
+  // Help and version are only global as the first argument; after a bad command
+  // they must not turn a usage error into a success.
   if (command === undefined || !isCommand(command)) return undefined;
 
   let configPath: string | undefined;
@@ -75,6 +77,8 @@ async function parse(argv: readonly string[]): Promise<Parsed | "help" | "versio
 
   for (let index = 1; index < argv.length; index += 1) {
     const argument = argv[index];
+    if (argument === "--help") return "help";
+    if (argument === "--version") return "version";
     if (argument === "--json") {
       if (command !== "status") return undefined;
       json = true;
@@ -82,7 +86,7 @@ async function parse(argv: readonly string[]): Promise<Parsed | "help" | "versio
     }
     if (argument !== "--config" && argument !== "--data-dir") return undefined;
     const value = argv[index + 1];
-    if (value === undefined || value.startsWith("--")) return undefined;
+    if (value === undefined || value.startsWith("-")) return undefined;
     if (argument === "--config") configPath = value;
     else dataDir = value;
     index += 1;
@@ -130,13 +134,30 @@ export async function runCli(
   }
 }
 
-/** True only when this module is the process entry, not an import from tests. */
-function isEntry(): boolean {
-  const entry = process.argv[1];
+/**
+ * True only when `entry` denotes this module, following symlinks on both sides.
+ *
+ * Package managers run bins through a symlink or shim, so comparing the raw
+ * `argv[1]` string with `import.meta.url` silently skips the CLI. An entry that
+ * is missing or cannot be resolved is never this module.
+ */
+export function isEntryPath(
+  entry: string | undefined,
+  moduleUrl: string = import.meta.url,
+): boolean {
   if (entry === undefined) return false;
-  return import.meta.url === pathToFileURL(resolve(entry)).href;
+  const real = (path: string): string | undefined => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return undefined;
+    }
+  };
+  const self = real(fileURLToPath(moduleUrl));
+  const candidate = real(resolve(entry));
+  return self !== undefined && candidate !== undefined && self === candidate;
 }
 
-if (isEntry()) {
+if (isEntryPath(process.argv[1])) {
   process.exitCode = await runCli(process.argv.slice(2), processIo);
 }

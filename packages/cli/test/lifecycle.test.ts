@@ -7,9 +7,11 @@ import { PiscesError } from "@pisces/core";
 import { PROTOCOL_VERSION } from "@pisces/protocol";
 import { afterEach, expect, test } from "vitest";
 import {
+  clearPidRecord,
   createPidRecord,
   ensureDataDir,
   isProcessAlive,
+  pidRecordExists,
   probeDaemon,
   readPidRecord,
   removePidRecord,
@@ -159,15 +161,37 @@ test("treats missing, malformed and wrongly typed pid records as absent", async 
   }
 });
 
-test("removes a malformed pid record on explicit removal", async () => {
+test("removes a pid record only when it names the given pid", async () => {
   const dir = await tempDir();
   const pidPath = join(dir, "daemon.pid");
-  await writeFile(pidPath, "garbage", { mode: 0o600 });
+  const record = { pid: 123, socketPath: join(dir, "run", "pisces.sock"), startedAt: "now" };
+  expect(await createPidRecord(dir, record)).toBe(true);
+  await removePidRecord(dir, 999);
+  expect(await readPidRecord(dir)).toEqual(record);
   await removePidRecord(dir, 123);
-  expect(await readPidRecord(dir)).toBeUndefined();
   await expect(lstat(pidPath)).rejects.toMatchObject({ code: "ENOENT" });
   // Absent records are also a no-op.
   await removePidRecord(dir, 123);
+
+  // A malformed record names no pid, so the selective remover must keep it.
+  await writeFile(pidPath, "garbage", { mode: 0o600 });
+  await removePidRecord(dir, 123);
+  expect(await readPidRecord(dir)).toBeUndefined();
+  await expect(lstat(pidPath)).resolves.toBeDefined();
+
+  await clearPidRecord(dir);
+  await expect(lstat(pidPath)).rejects.toMatchObject({ code: "ENOENT" });
+  await clearPidRecord(dir);
+});
+
+test("detects a pid file whatever it contains", async () => {
+  const dir = await tempDir();
+  const pidPath = join(dir, "daemon.pid");
+  expect(await pidRecordExists(dir)).toBe(false);
+  await writeFile(pidPath, "garbage", { mode: 0o600 });
+  expect(await pidRecordExists(dir)).toBe(true);
+  await rm(pidPath);
+  expect(await pidRecordExists(dir)).toBe(false);
 });
 
 test("maps unexpected pid write failures to storage.io", async () => {

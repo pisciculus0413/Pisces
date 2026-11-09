@@ -1,7 +1,8 @@
 import { writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PiscesError } from "@pisces/core";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   type ChildHandle,
@@ -81,6 +82,7 @@ function fakeChild(pid = CHILD_PID, exitCode: number | null = null): FakeChild {
 }
 
 function fakeDeps(overrides: Partial<CommandDeps> = {}): CommandDeps {
+  let elapsed = 0;
   return {
     spawnChild: () => {
       throw new Error("spawnChild must not be called");
@@ -88,7 +90,10 @@ function fakeDeps(overrides: Partial<CommandDeps> = {}): CommandDeps {
     probe: async () => false,
     isAlive: () => false,
     waitForExit: async () => false,
-    sleep: async () => {},
+    sleep: async (ms) => {
+      elapsed += ms;
+    },
+    clock: () => elapsed,
     now: () => STARTED_AT,
     signal: () => {},
     ...overrides,
@@ -208,13 +213,39 @@ test("start cleans up when the child exits during readiness", async () => {
   const { dataDir, configPath } = await fixture();
   const child = fakeChild();
   child.exitCode = 0;
-  const deps = fakeDeps({ spawnChild: () => child, isAlive: () => true });
+  const waits: number[] = [];
+  const deps = fakeDeps({
+    spawnChild: () => child,
+    isAlive: () => true,
+    waitForExit: async (_pid, timeoutMs) => {
+      waits.push(timeoutMs);
+      return true;
+    },
+  });
   const rec = recorder();
 
   const code = await startCommand({ configPath, io: rec.io }, deps);
 
   expect(code).toBe(1);
   expect(child.signals).toEqual(["SIGTERM"]);
+  expect(waits).toEqual([1_000]);
+  expect(child.unrefs).toBe(1);
+  expect(await readPidRecord(dataDir)).toBeUndefined();
+  expect(rec.err.join("\n")).toContain("daemon.start_failed");
+  expect(rec.err.join("\n")).toContain(join(dataDir, "daemon.log"));
+});
+
+test("start fails when the child vanishes without an exit code", async () => {
+  const { dataDir, configPath } = await fixture();
+  const child = fakeChild();
+  const deps = fakeDeps({ spawnChild: () => child, isAlive: () => false });
+  const rec = recorder();
+
+  const code = await startCommand({ configPath, io: rec.io }, deps);
+
+  expect(code).toBe(1);
+  expect(child.signals).toEqual(["SIGTERM"]);
+  expect(child.unrefs).toBe(1);
   expect(await readPidRecord(dataDir)).toBeUndefined();
   expect(rec.err.join("\n")).toContain("daemon.start_failed");
   expect(rec.err.join("\n")).toContain(join(dataDir, "daemon.log"));
@@ -260,9 +291,119 @@ test("start kills its child when another launcher wins the pid record race", asy
 
   expect(code).toBe(1);
   expect(child.signals).toEqual(["SIGTERM"]);
-  expect(child.unrefs).toBe(0);
+  expect(child.unrefs).toBe(1);
   expect((await readPidRecord(dataDir))?.pid).toBe(1111);
   expect(rec.err.join("\n")).toContain("daemon.already_running");
+});
+
+test("start bounds readiness by wall-clock time and caps each probe", async () => {
+  const { dataDir, configPath } = await fixture();
+  const child = fakeChild();
+  let elapsed = 0;
+  const probes: number[] = [];
+  const deps = fakeDeps({
+    clock: () => elapsed,
+    spawnChild: () => child,
+    isAlive: () => true,
+    probe: async (_socketPath, timeoutMs = 500) => {
+      probes.push(timeoutMs);
+      elapsed += timeoutMs;
+      return false;
+    },
+    sleep: async (ms) => {
+      elapsed += ms;
+    },
+  });
+  const rec = recorder();
+
+  const code = await startCommand({ configPath, io: rec.io }, deps);
+
+  expect(code).toBe(1);
+  expect(child.signals).toEqual(["SIGTERM"]);
+  expect(probes.length).toBeLessThanOrEqual(20);
+  expect(Math.max(...probes)).toBeLessThanOrEqual(500);
+  expect(probes.at(-1)).toBeLessThan(500);
+  expect(elapsed).toBeLessThanOrEqual(10_000);
+  expect(await readPidRecord(dataDir)).toBeUndefined();
+  expect(rec.err.join("\n")).toContain("daemon.start_failed");
+});
+
+test("start reclaims a malformed pid file when no daemon answers", async () => {
+  const { dataDir, configPath } = await fixture();
+  await mkdir(dataDir, { mode: 0o700 });
+  await writeFile(join(dataDir, "daemon.pid"), "garbage", { mode: 0o600 });
+  const child = fakeChild();
+  let probes = 0;
+  const rec = recorder();
+
+  const code = await startCommand(
+    { configPath, io: rec.io },
+    fakeDeps({
+      spawnChild: () => child,
+      isAlive: (pid) => pid === CHILD_PID,
+      probe: async () => {
+        probes += 1;
+        return probes > 1;
+      },
+    }),
+  );
+
+  expect(code).toBe(0);
+  expect((await readPidRecord(dataDir))?.pid).toBe(CHILD_PID);
+  expect(rec.out).toEqual([`running (pid ${CHILD_PID}, socket ${socketPathFor(dataDir)})`]);
+});
+
+test("start refuses when a malformed pid file sits next to an answering daemon", async () => {
+  const { dataDir, configPath } = await fixture();
+  await mkdir(dataDir, { mode: 0o700 });
+  const pidPath = join(dataDir, "daemon.pid");
+  await writeFile(pidPath, "garbage", { mode: 0o600 });
+  const deps = fakeDeps({ probe: async () => true });
+  const spawn = vi.spyOn(deps, "spawnChild");
+  const rec = recorder();
+
+  const code = await startCommand({ configPath, io: rec.io }, deps);
+
+  expect(code).toBe(1);
+  expect(rec.err.join("\n")).toContain("daemon.already_running");
+  expect(spawn).not.toHaveBeenCalled();
+  expect(await readFile(pidPath, "utf8")).toBe("garbage");
+});
+
+test("start reports a spawn failure as a start failure with the log path", async () => {
+  const { dataDir, configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await startCommand(
+    { configPath, io: rec.io },
+    fakeDeps({
+      spawnChild: () => {
+        throw new Error("EACCES");
+      },
+    }),
+  );
+
+  expect(code).toBe(1);
+  expect(rec.err.join("\n")).toContain("daemon.start_failed");
+  expect(rec.err.join("\n")).toContain(join(dataDir, "daemon.log"));
+  expect(rec.err.join("\n")).not.toContain("daemon.insecure_directory");
+});
+
+test("start keeps the insecure-directory report for an unopenable log", async () => {
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await startCommand(
+    { configPath, io: rec.io },
+    fakeDeps({
+      spawnChild: () => {
+        throw new PiscesError("daemon.insecure_directory", "Data directory is not private");
+      },
+    }),
+  );
+
+  expect(code).toBe(2);
+  expect(rec.err).toEqual(["error: daemon.insecure_directory: Data directory is not private"]);
 });
 
 test("start reports a missing api key without spawning", async () => {
@@ -407,7 +548,7 @@ test("stop refuses to signal an unmanaged socket", async () => {
   );
 
   expect(code).toBe(1);
-  expect(rec.err.join("\n")).toContain("unmanaged daemon");
+  expect(rec.err).toEqual(["error: daemon.unmanaged: unmanaged daemon"]);
   expect(signals).toEqual([]);
   expect(await readPidRecord(dataDir)).toBeUndefined();
 });

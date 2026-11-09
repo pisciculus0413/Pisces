@@ -1,10 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, expect, test, vi } from "vitest";
 import type { ChildHandle, CommandDeps, CommandIo } from "../src/commands.js";
 import { readPidRecord } from "../src/lifecycle.js";
-import { runCli } from "../src/main.js";
+import { isEntryPath, runCli } from "../src/main.js";
 
 const CHILD_PID = 4242;
 const KEY_ENV = "PISCES_TASK4_MAIN_KEY";
@@ -51,6 +52,7 @@ function fakeChild(pid = CHILD_PID): ChildHandle {
 }
 
 function fakeDeps(overrides: Partial<CommandDeps> = {}): CommandDeps {
+  let elapsed = 0;
   return {
     spawnChild: () => {
       throw new Error("spawnChild must not be called");
@@ -58,7 +60,10 @@ function fakeDeps(overrides: Partial<CommandDeps> = {}): CommandDeps {
     probe: async () => false,
     isAlive: () => false,
     waitForExit: async () => false,
-    sleep: async () => {},
+    sleep: async (ms) => {
+      elapsed += ms;
+    },
+    clock: () => elapsed,
     now: () => "2026-11-09T00:00:00.000Z",
     signal: () => {},
     ...overrides,
@@ -85,6 +90,47 @@ test("runCli rejects unknown commands, flags and missing values with usage", asy
     expect(rec.err.join("\n")).toContain("usage: pisces");
     expect(rec.out).toEqual([]);
   }
+});
+
+test("runCli does not let help win after an unknown command", async () => {
+  for (const argv of [
+    ["wat", "--help"],
+    ["wat", "--version"],
+  ]) {
+    const rec = recorder();
+    expect(await runCli(argv, rec.io, fakeDeps())).toBe(2);
+    expect(rec.err.join("\n")).toContain("usage: pisces");
+    expect(rec.out).toEqual([]);
+  }
+});
+
+test("runCli rejects option values that look like flags", async () => {
+  for (const argv of [
+    ["start", "--config", "-x"],
+    ["start", "--data-dir", "--json"],
+    ["status", "--config", "-h"],
+  ]) {
+    const rec = recorder();
+    expect(await runCli(argv, rec.io, fakeDeps())).toBe(2);
+    expect(rec.err.join("\n")).toContain("usage: pisces");
+    expect(rec.out).toEqual([]);
+  }
+});
+
+test("isEntryPath resolves the entry through a symlink", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pisces-entry-"));
+  roots.push(root);
+  const real = join(root, "main.js");
+  await writeFile(real, "");
+  const link = join(root, "pisces");
+  await symlink(real, link);
+  const moduleUrl = pathToFileURL(real).href;
+
+  expect(isEntryPath(link, moduleUrl)).toBe(true);
+  expect(isEntryPath(real, moduleUrl)).toBe(true);
+  expect(isEntryPath(undefined, moduleUrl)).toBe(false);
+  expect(isEntryPath(join(root, "missing.js"), moduleUrl)).toBe(false);
+  expect(isEntryPath(link, pathToFileURL(join(root, "other.js")).href)).toBe(false);
 });
 
 test("runCli prints help and the version", async () => {

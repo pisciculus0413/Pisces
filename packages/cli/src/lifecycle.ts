@@ -143,11 +143,30 @@ export async function createPidRecord(dataDir: string, record: PidRecord): Promi
 /** Removes the record only when it still belongs to `pid`. */
 export async function removePidRecord(dataDir: string, pid: number): Promise<void> {
   const record = await readPidRecord(dataDir);
-  if (record !== undefined && record.pid !== pid) return;
+  if (record === undefined || record.pid !== pid) return;
+  await clearPidRecord(dataDir);
+}
+
+/**
+ * Unlinks the pid file whatever it holds, including an unreadable or malformed
+ * record that names no owner. Only a launcher that has proven no daemon answers
+ * on this dataDir's socket may call it.
+ */
+export async function clearPidRecord(dataDir: string): Promise<void> {
   try {
     await unlink(pidPathFor(dataDir));
   } catch (error) {
     if (errorCode(error) !== "ENOENT") throw storageFailure(error);
+  }
+}
+
+/** True when a pid file exists, whatever its contents. */
+export async function pidRecordExists(dataDir: string): Promise<boolean> {
+  try {
+    await lstat(pidPathFor(dataDir));
+    return true;
+  } catch {
+    return false;
   }
 }
 

@@ -6,9 +6,11 @@ import { fileURLToPath } from "node:url";
 import { PiscesError } from "@pisces/core";
 import { type CliConfig, loadConfig } from "./config.js";
 import {
+  clearPidRecord,
   createPidRecord,
   ensureDataDir,
   isProcessAlive,
+  pidRecordExists,
   probeDaemon,
   readPidRecord,
   removePidRecord,
@@ -29,6 +31,10 @@ export const LOG_FILE = "daemon.log";
 export const READINESS_POLL_MS = 50;
 export const START_TIMEOUT_MS = 10_000;
 export const STOP_TIMEOUT_MS = 10_000;
+/** Upper bound for one readiness probe; the remaining start budget caps it further. */
+export const PROBE_TIMEOUT_MS = 500;
+/** How long cleanup waits for a signalled child before abandoning it. */
+export const CLEANUP_WAIT_MS = 1_000;
 
 const CHILD_ENTRY = fileURLToPath(new URL("./daemon-child.js", import.meta.url));
 
@@ -40,6 +46,7 @@ const MESSAGES: Readonly<Record<string, string>> = {
   "daemon.start_failed": "Daemon could not start; see the log",
   "daemon.stop_timeout": "Daemon did not stop in time",
   "daemon.insecure_directory": "Data directory is not private",
+  "daemon.unmanaged": "unmanaged daemon",
   "storage.io": "Daemon pid file could not be written",
 };
 
@@ -58,6 +65,7 @@ export interface CommandDeps {
   isAlive(pid: number): boolean;
   waitForExit(pid: number, timeoutMs: number): Promise<boolean>;
   sleep(ms: number): Promise<void>;
+  clock(): number;
   now(): string;
   signal(pid: number, signal: NodeJS.Signals): void;
 }
@@ -98,6 +106,10 @@ function hasEveryKey(config: CliConfig, env: NodeJS.ProcessEnv): boolean {
   });
 }
 
+/**
+ * Removes the record only when it still names `pid`, so a launcher can never
+ * delete a winner's record that appeared while it was cleaning up.
+ */
 async function discardRecord(dataDir: string, pid: number): Promise<void> {
   try {
     await removePidRecord(dataDir, pid);
@@ -111,6 +123,24 @@ function stopChild(child: ChildHandle): void {
     child.kill("SIGTERM");
   } catch {
     // The child may already be gone.
+  }
+}
+
+/**
+ * Abandons a child that cannot become the daemon: SIGTERM, wait a bounded time
+ * for it to exit, then always unref so the parent never hangs on the handle.
+ */
+async function abortChild(child: ChildHandle, deps: CommandDeps): Promise<void> {
+  stopChild(child);
+  try {
+    await deps.waitForExit(child.pid, CLEANUP_WAIT_MS);
+  } catch {
+    // An unwaitable child is still released below.
+  }
+  try {
+    child.unref();
+  } catch {
+    // Already released.
   }
 }
 
@@ -135,22 +165,30 @@ async function resolve(options: CommandOptions, io: CommandIo): Promise<Resolved
  * Polls until the child answers, exits, or loses the pid record.
  *
  * A ready daemon is only reported when the child is still alive, the record
- * still names the child, and this dataDir's socket completes a handshake.
+ * still names the child, and this dataDir's socket completes a handshake. The
+ * budget is wall-clock bounded, and each probe is capped by what is left, so a
+ * slow probe can never stretch the total start time.
  */
 async function waitForReady(
   child: ChildHandle,
   socketPath: string,
   dataDir: string,
+  deadline: number,
   deps: CommandDeps,
 ): Promise<boolean> {
-  for (let waited = 0; waited < START_TIMEOUT_MS; waited += READINESS_POLL_MS) {
+  for (;;) {
     if (child.exitCode !== null || !deps.isAlive(child.pid)) return false;
     const record = await readPidRecord(dataDir);
     if (record === undefined || record.pid !== child.pid) return false;
-    if (await deps.probe(socketPath)) return true;
-    await deps.sleep(READINESS_POLL_MS);
+
+    const remaining = deadline - deps.clock();
+    if (remaining <= 0) return false;
+    if (await deps.probe(socketPath, Math.min(PROBE_TIMEOUT_MS, remaining))) return true;
+
+    const left = deadline - deps.clock();
+    if (left <= 0) return false;
+    await deps.sleep(Math.min(READINESS_POLL_MS, left));
   }
-  return false;
 }
 
 export async function startCommand(
@@ -176,6 +214,8 @@ export async function startCommand(
 
   const socketPath = socketPathFor(dataDir);
   const logPath = join(dataDir, LOG_FILE);
+  // The whole start, including the preflight probe, shares one 10 s budget.
+  const deadline = deps.clock() + START_TIMEOUT_MS;
 
   if (await deps.probe(socketPath)) {
     fail(io, "daemon.already_running");
@@ -189,14 +229,31 @@ export async function startCommand(
       return 1;
     }
     await discardRecord(dataDir, existing.pid);
+  } else if (await pidRecordExists(dataDir)) {
+    // The socket did not answer and the record names no owner, so no process can
+    // be reclaimed through it. Dropping it is the only way out of the wedge: the
+    // exclusive create below would otherwise fail on EEXIST forever.
+    try {
+      await clearPidRecord(dataDir);
+    } catch {
+      fail(io, "storage.io");
+      return 2;
+    }
   }
 
   let child: ChildHandle;
   try {
     child = deps.spawnChild(CHILD_ENTRY, [options.configPath, dataDir], logPath);
-  } catch {
-    fail(io, "daemon.insecure_directory");
-    return 2;
+  } catch (error) {
+    // Only an unopenable log is a directory problem; everything else is a
+    // failed spawn (EACCES, ENOMEM, EAGAIN) and points at the log.
+    if (error instanceof PiscesError && error.code === "daemon.insecure_directory") {
+      fail(io, "daemon.insecure_directory");
+      return 2;
+    }
+    fail(io, "daemon.start_failed");
+    io.err(`log: ${logPath}`);
+    return 1;
   }
 
   let created: boolean;
@@ -207,19 +264,19 @@ export async function startCommand(
       startedAt: deps.now(),
     });
   } catch {
-    stopChild(child);
+    await abortChild(child, deps);
     fail(io, "storage.io");
     return 2;
   }
 
   if (!created) {
-    stopChild(child);
+    await abortChild(child, deps);
     fail(io, "daemon.already_running");
     return 1;
   }
 
-  if (!(await waitForReady(child, socketPath, dataDir, deps))) {
-    stopChild(child);
+  if (!(await waitForReady(child, socketPath, dataDir, deadline, deps))) {
+    await abortChild(child, deps);
     await discardRecord(dataDir, child.pid);
     fail(io, "daemon.start_failed");
     io.err(`log: ${logPath}`);
@@ -291,7 +348,7 @@ export async function stopCommand(
 
   if (record === undefined) {
     if (await deps.probe(socketPathFor(dataDir))) {
-      io.err("unmanaged daemon");
+      fail(io, "daemon.unmanaged");
       return 1;
     }
     io.out("not running");
@@ -367,6 +424,7 @@ export const productionDeps: CommandDeps = {
   isAlive: isProcessAlive,
   waitForExit: (pid, timeoutMs) => waitForExit(pid, timeoutMs),
   sleep: (ms) => delay(ms),
+  clock: () => Date.now(),
   now: () => new Date().toISOString(),
   signal: (pid, signal) => {
     process.kill(pid, signal);
