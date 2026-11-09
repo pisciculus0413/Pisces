@@ -5,7 +5,8 @@
     "paths": {
       "@pisces/protocol": ["./packages/protocol/src/index.ts"],
       "@pisces/core": ["./packages/core/src/index.ts"],
-      "@pisces/daemon": ["./packages/daemon/src/index.ts"]
+      "@pisces/daemon": ["./packages/daemon/src/index.ts"],
+      "@pisces/cli": ["./packages/cli/src/index.ts"]
     }
   },
   "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts"],

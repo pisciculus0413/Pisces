@@ -3,6 +3,7 @@
   "references": [
     { "path": "packages/protocol/tsconfig.build.json" },
     { "path": "packages/core/tsconfig.build.json" },
-    { "path": "packages/daemon/tsconfig.build.json" }
+    { "path": "packages/daemon/tsconfig.build.json" },
+    { "path": "packages/cli/tsconfig.build.json" }
   ]
 }
