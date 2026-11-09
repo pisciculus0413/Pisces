@@ -1,6 +1,6 @@
 # 扩展系统与透明选择闭环：阶段设计
 
-**状态：设计与 Plan A 已获用户批准并已完成：A（Tasks 1–6）代码验收 SHA `e57f793`，A 范围整体审查完成，交接 READY。Plan B 未授权，不得自动开始。** 用户已批准 [jiti 局部补丁修订设计](2026-11-09-extension-loader-jiti-patch-design.md)。恢复入口见 [当前交接](../handoffs/2026-11-09-extensions-selection-a-to-b.md)。原有设计约束未放宽。
+**状态：设计与 Plan A/B 均已获用户授权并完成：A 代码验收 `e57f793`，B 代码验收 `ce1281d`；两个阶段的独立任务审查与阶段整体审查均通过，完成交接见 [当前交接](../handoffs/2026-11-09-extensions-selection-a-to-b.md)。远端 CI 未运行，未交付 providers/clients 扩展装配、CLI 与沙箱等能力；不得据本文声称这些已可用。原有设计约束未放宽。**
 
 ## 1. 目标、权威与范围
 

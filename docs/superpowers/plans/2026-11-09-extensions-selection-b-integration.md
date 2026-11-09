@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 本计划待用户审阅，尚未开始实施；在 `dev-pi` 顺序工作，不建 worktree、不向 main 提交、不 push/merge，保留旧 SDD 资料。
+- 本计划已获用户授权并完成（Tasks 7–11，代码验收 `ce1281d`，交接已更新）。在 `dev-pi` 顺序工作，不建 worktree、不向 main 提交、不 push/merge，保留旧 SDD 资料；新阶段需单独授权。
 - 必须读入口索引 `2026-11-09-extensions-selection.md` 的门禁 G；每次提交执行原生构建、完整 Vitest、两项 tsc、Biome、边界扫描，仅显式暂存本任务文件。
 - Core 无文件/环境 I/O，不依赖 daemon/protocol；发现不执行扩展代码，工具/包装器 invoke 时才装载，来源按需固化。
 - `package#name`；`foo.ts.meta.json`；技能相邻 `foo.meta.json` + `SKILL.md`；只有 wrapper 接受条目配置。

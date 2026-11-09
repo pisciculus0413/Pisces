@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 本计划已获用户实施授权，Tasks 1–6 已完成：代码验收 SHA `e57f793`，A 范围整体审查完成（无 Critical；2 项 Important 已关闭），交接 READY。先读 [当前交接](../handoffs/2026-11-09-extensions-selection-a-to-b.md)；下方任务正文/checkbox 保留规划模板，不得据此重复已完成任务。Plan B 未授权。在 `dev-pi` 顺序工作，不建 worktree、不向 main 提交、不 push/merge，保留旧 SDD 资料。
+- 本计划已获用户实施授权，Tasks 1–6 已完成：代码验收 SHA `e57f793`，A 范围整体审查完成（无 Critical；2 项 Important 已关闭），交接 READY；Plan B 亦已完成（代码验收 `ce1281d`）。先读 [当前交接](../handoffs/2026-11-09-extensions-selection-a-to-b.md)；下方任务正文/checkbox 保留规划模板，不得据此重复已完成任务。Plan B 未授权。在 `dev-pi` 顺序工作，不建 worktree、不向 main 提交、不 push/merge，保留旧 SDD 资料。
 - 必须读入口索引 `2026-11-09-extensions-selection.md` 的门禁 G；每次提交执行原生构建、完整 Vitest、两项 tsc、Biome、边界扫描，仅显式暂存本任务文件。
 - Core 无文件/环境 I/O，不依赖 daemon/protocol；发现不执行扩展代码，工具/包装器 invoke 时才装载，来源按需固化。
 - `package#name`；`foo.ts.meta.json`；技能相邻 `foo.meta.json` + `SKILL.md`；只有 wrapper 接受条目配置。

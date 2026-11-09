@@ -1,6 +1,6 @@
 # Extensions Selection：分阶段计划入口
 
-**本文件已替代原单体计划，仅是导航与共同门禁，不是第三份实施计划。** 用户已批准 Plan A 并授权基线修复；A（Tasks 1–6）已完成代码验收（`e57f793`）与 A 范围整体审查，交接 READY。Plan B 未获实施授权；不提供授权前不开始 Task 7。当前恢复入口见下方交接记录。
+**本文件已替代原单体计划，仅是导航与共同门禁，不是第三份实施计划。** 用户已批准并完成 Plan A（Tasks 1–6，代码验收 `e57f793`）与 Plan B（Tasks 7–11，代码验收 `ce1281d`）；两个阶段的独立任务审查与整体审查均通过，交接已完成。当前无后续授权工作；新阶段需单独授权。恢复入口见下方交接记录。
 
 ## 执行顺序
 
@@ -11,11 +11,11 @@
 
 设计：[`2026-11-09-extensions-selection-design.md`](../specs/2026-11-09-extensions-selection-design.md)。
 Task3 专项修订：[jiti 补丁计划](2026-11-09-extension-loader-jiti-patch.md)（已批准补充设计；实现与独立审查完成 `6527e0f`/`e033032`，残余 Minor 留 A 整体审查；替代 A 内旧 Task3 正文，不新增阶段、不重复 Tasks1–2）。
-交接：[`2026-11-09-extensions-selection-a-to-b.md`](../handoffs/2026-11-09-extensions-selection-a-to-b.md)，**当前 READY**；已填入 A 代码验收 SHA `e57f793`、实际接口偏差、依赖能力、验证与残余风险。B 仍需用户单独授权。
+交接：[`2026-11-09-extensions-selection-a-to-b.md`](../handoffs/2026-11-09-extensions-selection-a-to-b.md)，**A + B 完成**；保留 A 验收 SHA `e57f793`，记录 B 验收 SHA `ce1281d`、门禁证据、残余风险与未交付能力。新阶段仍需单独授权。
 
 ## 上下文与交接规则
 
-- 当前 A 已完成且交接 READY，下一阶段是 Plan B（任务 7–11），但尚未获授权；授权前不修改 Gateway/路由。不重做选型或 Tasks1–6。
+- 当前 A 与 B 均已完成，没有默认下一阶段；任何新范围（如 providers/clients 装配、CLI）都必须先获用户单独授权。不重做已完成任务，不 push/merge。
 - 给单任务智能体只发送该任务、共同约束/门禁、直接接口、对应设计段落和短报告；不传全部计划或继承整个父会话。继续逐任务 TDD 与独立审查，不并行修改共享 checkout。
 - 每任务保存实际提交、RED/GREEN、审查/修复和下一步。暂停时写清当前任务/步骤、未提交文件归属、下一命令、失败日志路径，不能只说“继续”。本地详细日志可留 `.superpowers/sdd/2026-11-09-extensions-selection/`；A→B 必要结论必须进入受版本控制的交接记录。
 - A 的交付边界为 `Extensions.prepare → ExtensionBinding` 和 Core 视图/资格接口。B 携带最小契约；A 任何接口调整都需同步 B 和交接记录，不让后继猜测。

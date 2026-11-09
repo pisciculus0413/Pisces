@@ -441,7 +441,7 @@ interface CreateSessionParams {
   - 空数组：不启用任何条目；
   - 显式列表：替换默认选择，不与默认值合并。
 - `extensions` 生成一条 `kind=control`、`role=declaration` 的队列条目，`toggle` 为所选名称；所选为空时不生成。
-- 目录驱动模式（`startDaemon({ extensions })`）下，daemon 在入队时用冻结清点为每个 toggle 名称附加完整定义快照（all-toggle snapshots：打开与关闭都携带），客户端只提交 `toggle`。非空列表在创建临时会话与运行时之前整体校验：未知名称、内联 definitions 或类型变化冲突以 `queue.invalid_control` 拒绝，重复名称以 `queue.duplicate_name` 拒绝；失败不创建会话、不写队列。无扩展模式（手动注入）仍拒绝任何有效的 `extensions`（`queue.invalid_control`），空列表不生成声明条目。`templateId` 尚未接入模板解析，出现即返回 `protocol.invalid_request`。
+- 目录驱动模式（`startDaemon({ extensions })`）下，daemon 在入队时用冻结清点为每个 toggle 名称附加完整定义快照（all-toggle snapshots：打开与关闭都携带；仅有内容证据且关闭名称的例外不附加新类型快照），客户端只提交 `toggle`。非空列表在创建临时会话与运行时之前整体校验：未知名称、内联 definitions 或类型变化冲突以 `queue.invalid_control` 拒绝，重复名称以 `queue.duplicate_name` 拒绝；失败不创建会话、不写队列。无扩展模式（手动注入）仍拒绝任何有效的 `extensions`（`queue.invalid_control`），空列表不生成声明条目。`templateId` 尚未接入模板解析，出现即返回 `protocol.invalid_request`。
 - `workspace` 显式提供时直接使用；省略时读取全局配置中的 `defaultWorkspace`。两者都没有返回 `session.workspace_required`；路径不存在、不是目录或不可写返回 `session.invalid_workspace`。默认工作区必须是绝对路径，不自动创建；不读取 daemon 工作目录。工作区配置 `.pisces/config.json` 不参与默认工作区解析。
 - `provider`/`model` 只能成对出现：两者均省略时取配置中的 `defaultProvider`/`defaultModel`；只提供一个，或默认值不完整，返回 `session.model_required`；显式组合或默认组合不在 `provider.list` 中，返回 `session.invalid_model`。
 - `templateId` 设计上只用于解析模板级初始配置；不创建目录、不写文件、不执行脚本。工作区初始化只能经 `template.preview`/`template.apply`。当前实现尚未接入模板解析，按上一条拒绝。
@@ -549,7 +549,7 @@ interface QueueEditParams {
 - 大小限制沿用核心错误码：条目超过 `MAX_ENTRY_BYTES` 返回 `queue.entry_too_large`，完整队列超过 `MAX_QUEUE_BYTES` 返回 `queue.too_large`。
 - `queue.enqueue` 只接受 agent/system/user/assistant/tool 与 `role=declaration`；`compaction`、`cancel` 由运行框架写入，客户端提交返回 `queue.invalid_control`。
 - `declaration` 必须由 daemon 附加 definition；客户端内联 definition 被拒绝。`Context.enqueue` 是内部可信边界，接受已附完整 definitions 并校验结构，不从实时 Tools 重新获取定义。
-- 当前目录驱动模式下，客户端提交的 `kind=control`/`role=declaration` 在同一会话锁内被同步富化（为每个 toggle 名称附加完整定义快照）后一次入队；未知名称、内联定义或类型冲突返回 `queue.invalid_control`，重复名称返回 `queue.duplicate_name`，失败时整批不改变队列。无扩展的手动注入模式仍一律以 `queue.invalid_control` 拒绝客户端控制条目。
+- 当前目录驱动模式下，客户端提交的 `kind=control`/`role=declaration` 在同一会话锁内被同步富化（为每个 toggle 名称附加完整定义快照；仅有内容证据且关闭名称时不附加新类型快照）后一次入队；未知名称、内联定义或类型冲突返回 `queue.invalid_control`，重复名称返回 `queue.duplicate_name`，失败时整批不改变队列。无扩展的手动注入模式仍一律以 `queue.invalid_control` 拒绝客户端控制条目。
 - 队列按入队顺序排列；不提供重排方法。
 - `queue.edit` 已路由：Core 内部编辑未确认的 `kind=agent` 条目，已确认时抛 `queue.entry_locked` 并在内部 `PiscesError.data` 带 `reason="confirmed"`；本阶段线上响应不透传 `data`；对 `declaration` 条目返回 `queue.invalid_control`。
 - `queue.remove` 可删除任意尚未装配的条目，包括已确认未装配条目。
