@@ -77,8 +77,14 @@ async function importEntry(entry: DiscoveredEntry): Promise<ExtensionModule> {
     throw new ExtensionLoadError("Extension entry changed after discovery");
   }
 
-  const hosts = await hostModules();
-  const tsconfig = await findTsconfig(entry.entryPath, entry.packageRoot);
+  let hosts: Record<string, unknown>;
+  let tsconfig: string | undefined;
+  try {
+    hosts = await hostModules();
+    tsconfig = await findTsconfig(entry.entryPath, entry.packageRoot);
+  } catch {
+    throw new ExtensionLoadError("Extension module failed to load");
+  }
   const options: JitiOptions = {
     fsCache: false,
     moduleCache: false,
