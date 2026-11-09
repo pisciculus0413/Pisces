@@ -236,4 +236,4 @@ tool/wrapper 的当前 definitionHash/configHash 与最近一次持久化（或�
 
 独立 builder check 已完成一次，提出四个问题（声明删除、跨分支确认、配置注入 ABI、历史类型判定）；本修订分别以 §8.1、§6.2/§7、§8.4 明确处理。规则经作者对照现有 replayDeclarations、queue.remove、projectTools 核对；未声称审阅者已复审或批准本次修订。
 
-已进入 writing-plans；实施计划需另行交付用户审阅。不建立 worktree，不向 main 提交，不 push/merge，保留此前阶段资料。
+已进入 writing-plans；实施计划需另行交付用户审阅。为控制智能体上下文，实施拆为 [Plan A：Tasks 1–6](../plans/2026-11-09-extensions-selection-a-foundations.md) 与 [Plan B：Tasks 7–11](../plans/2026-11-09-extensions-selection-b-integration.md)，统一入口及门禁见 [计划索引](../plans/2026-11-09-extensions-selection.md)。A 以可独立测试的 binding/Core 接口交付，B 在受版本控制的交接记录 READY 后接入协议，不改变本文设计范围。不建立 worktree，不向 main 提交，不 push/merge，保留此前阶段资料。
