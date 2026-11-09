@@ -47,8 +47,10 @@ export function replaySelection(branch: readonly SessionNodeDraft[]): SelectionV
 }
 
 /**
- * Overlays pending declarations on a frozen view. Kind changes for names with
- * known evidence are rejected before any old definition is overwritten.
+ * Overlays pending declarations on a frozen view. A conflicting kind is only
+ * rejected when the declaration leaves the name selected (a reopen under a new
+ * type); a closing toggle discards the new-kind definition and keeps old
+ * evidence. No historical definition is overwritten before this check.
  */
 export function applyDeclarations(
   view: SelectionView,
@@ -58,22 +60,29 @@ export function applyDeclarations(
   const known = new Map<EntryName, "tool" | "wrapper" | "content">();
   for (const name of view.contentNames) known.set(name, "content");
   for (const definition of view.definitions) known.set(definition.name, definition.kind);
-  for (const payload of payloads) {
-    for (const definition of payload.definitions ?? []) {
-      const evidence = known.get(definition.name);
-      if (evidence !== undefined && evidence !== definition.kind)
-        throw new PiscesError("queue.invalid_control", "Declaration changes a known entry kind", {
-          data: { name: definition.name },
-        });
-      known.set(definition.name, definition.kind);
-    }
-  }
   const state = createReplayState();
   for (const name of view.selection) state.selection.add(name);
   for (const definition of view.definitions)
     state.definitions.set(definition.name, structuredClone(definition));
   for (const name of view.contentNames) state.contentNames.add(name);
-  for (const payload of payloads) applyDeclarationPayload(state, payload);
+  for (const payload of payloads) {
+    applyDeclarationPayload(state, { toggle: payload.toggle });
+    const accepted: DefinitionSnapshot[] = [];
+    for (const definition of payload.definitions ?? []) {
+      const evidence = known.get(definition.name);
+      if (evidence !== undefined && evidence !== definition.kind) {
+        if (state.selection.has(definition.name))
+          throw new PiscesError("queue.invalid_control", "Declaration changes a known entry kind", {
+            data: { name: definition.name },
+          });
+        // Closing is allowed: discard the new-kind definition, keep old evidence.
+        continue;
+      }
+      known.set(definition.name, definition.kind);
+      accepted.push(definition);
+    }
+    applyDeclarationPayload(state, { toggle: [], definitions: accepted });
+  }
   return freeze(state);
 }
 

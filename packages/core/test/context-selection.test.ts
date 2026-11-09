@@ -145,29 +145,86 @@ test("applies pending declarations without mutating the view or the pending list
   expect(view).toEqual(frozenView);
 });
 
-test("rejects pending kind changes for known names before overwriting old definitions", () => {
+test("allows closing a known name under a conflicting kind and keeps old evidence", () => {
   const view = replaySelection([
     declaration({ toggle: [name("tool")], definitions: [snapshot("tool", "old")] }),
     system(name("doc"), "body"),
   ]);
+  const closed = applyDeclarations(view, [
+    declaration({
+      toggle: [name("tool")],
+      definitions: [snapshot("tool", "new", "wrapper")],
+    }),
+  ]);
+  expect(closed.selection).toEqual([]);
+  expect(closed.definitions).toEqual([snapshot("tool", "old")]);
+  expect(closed.contentNames).toEqual([name("doc")]);
+  expect(view.definitions).toEqual([snapshot("tool", "old")]);
+
+  const selected = replaySelection([
+    declaration({ toggle: [name("doc")] }),
+    system(name("doc"), "body"),
+  ]);
+  const closedContent = applyDeclarations(selected, [
+    declaration({ toggle: [name("doc")], definitions: [snapshot("doc", "new")] }),
+  ]);
+  expect(closedContent.selection).toEqual([]);
+  expect(closedContent.definitions).toEqual([]);
+  expect(closedContent.contentNames).toEqual([name("doc")]);
+});
+
+test("rejects reopening a known name under a conflicting kind", () => {
+  const closedTool = replaySelection([
+    declaration({ toggle: [name("tool")], definitions: [snapshot("tool", "old")] }),
+    declaration({ toggle: [name("tool")] }),
+  ]);
+  expect(closedTool.selection).toEqual([]);
   expect(() =>
-    applyDeclarations(view, [
+    applyDeclarations(closedTool, [
       declaration({
         toggle: [name("tool")],
         definitions: [snapshot("tool", "new", "wrapper")],
       }),
     ]),
   ).toThrowError(expect.objectContaining({ code: "queue.invalid_control" }));
+
+  const closedContent = replaySelection([system(name("doc"), "body")]);
   expect(() =>
-    applyDeclarations(view, [
+    applyDeclarations(closedContent, [
       declaration({ toggle: [name("doc")], definitions: [snapshot("doc", "new")] }),
     ]),
   ).toThrowError(expect.objectContaining({ code: "queue.invalid_control" }));
+
+  const view = replaySelection([
+    declaration({ toggle: [name("tool")], definitions: [snapshot("tool", "old")] }),
+  ]);
   expect(() =>
     applyDeclarations(view, [{ ...declaration({ toggle: [] }), content: text("{") }]),
   ).toThrowError(expect.objectContaining({ code: "queue.invalid_control" }));
   expect(view.definitions).toEqual([snapshot("tool", "old")]);
+});
 
+test("rejects a pending declaration that retypes a name introduced by an earlier pending one", () => {
+  const view = replaySelection([]);
+  const pending: SessionNodeDraft[] = [
+    declaration({ toggle: [], definitions: [snapshot("new", "first", "wrapper")] }),
+    declaration({ toggle: [name("new")], definitions: [snapshot("new", "second")] }),
+  ];
+  expect(() => applyDeclarations(view, pending)).toThrowError(
+    expect.objectContaining({ code: "queue.invalid_control" }),
+  );
+  const closed = applyDeclarations(view, [
+    declaration({ toggle: [], definitions: [snapshot("new", "first", "wrapper")] }),
+    declaration({ toggle: [], definitions: [snapshot("new", "second")] }),
+  ]);
+  expect(closed.selection).toEqual([]);
+  expect(closed.definitions).toEqual([snapshot("new", "first", "wrapper")]);
+});
+
+test("accepts fresh pending names with definitions", () => {
+  const view = replaySelection([
+    declaration({ toggle: [name("tool")], definitions: [snapshot("tool", "old")] }),
+  ]);
   const fresh = applyDeclarations(view, [
     declaration({
       toggle: [name("new")],
@@ -313,6 +370,19 @@ test("reports a fully unknown selection as unresolved rather than a tool or a si
   expect(evaluation.contentSelection).toEqual([]);
   expect(evaluation.effective).toEqual([{ name: name("gone"), stale: true }]);
 });
+
+test.each(["tool", "wrapper"] as const)(
+  "keeps a current %s with a missing necessary definition corrupt in strict mode",
+  (kind) => {
+    const view = replaySelection([declaration({ toggle: [name(kind)] })]);
+    expect(() =>
+      evaluateSelection(
+        view,
+        entries({ [name(kind)]: kind }, () => true),
+      ),
+    ).toThrowError(expect.objectContaining({ code: "storage.corrupt" }));
+  },
+);
 
 test("keeps a current tool with a missing necessary definition corrupt", () => {
   const view = replaySelection([declaration({ toggle: [name("tool")] })]);
