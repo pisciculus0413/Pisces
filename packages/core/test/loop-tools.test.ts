@@ -1,5 +1,7 @@
 import { expect, test } from "vitest";
 import type {
+  Context,
+  DefinitionSnapshot,
   EntryName,
   ExecuteProvider,
   LlmAdapter,
@@ -13,9 +15,23 @@ import type {
   Tools,
   TurnId,
 } from "../src/index.js";
+import { createTools } from "../src/index.js";
+import { declaration } from "./support/context-harness.js";
 import { createLoopHarness, LOOP_META, user } from "./support/loop-harness.js";
 
 const name = (value: string) => `pkg#${value}` as EntryName;
+const definition = (
+  entry: EntryName,
+  value: string,
+  kind: "tool" | "wrapper" = "tool",
+): DefinitionSnapshot => ({
+  name: entry,
+  kind,
+  description: value,
+  parameters: {},
+  definitionHash: `hash-${value}`,
+  ...(kind === "wrapper" ? { configHash: `config-${value}` } : {}),
+});
 
 function gate() {
   let resolve!: () => void;
@@ -71,12 +87,13 @@ function run(
   h: ReturnType<typeof createLoopHarness>,
   adapter: LlmAdapter,
   execute: ExecuteProvider,
+  context: Context = h.context,
 ) {
   return h.driver.run({
     sessionId: LOOP_META.id,
     turnId: "t1" as TurnId,
     meta: LOOP_META,
-    context: h.context,
+    context,
     sessions: h.sessions,
     tools: h.tools,
     adapter,
@@ -251,4 +268,130 @@ test("persists tool-only assistant content and continues after a tool error", as
     },
   ]);
   expect(nodes[3]?.content).toEqual([{ type: "text", text: "recovered" }]);
+});
+
+function strictTools() {
+  const toolName = name("tool");
+  const wrapperName = name("wrapper");
+  const base = createTools();
+  let toolCalls = 0;
+  let wrapperCalls = 0;
+  base.registerTool({
+    id: "t1",
+    source: "ext",
+    name: toolName,
+    description: "tool",
+    parameters: {},
+    execute: async () => {
+      toolCalls++;
+      return { content: [{ type: "text", text: "ran" }] };
+    },
+  });
+  base.registerWrapper(wrapperName, () => {
+    wrapperCalls++;
+    return (wrapped) => wrapped;
+  });
+  const selections: SelectionState[] = [];
+  const tools: Tools = {
+    forInventory: () => tools,
+    registerTool: base.registerTool,
+    registerWrapper: base.registerWrapper,
+    selected: base.selected,
+    invoke(call, selection, context) {
+      selections.push([...selection]);
+      return base.invoke(call, selection, context);
+    },
+  };
+  return {
+    toolName,
+    wrapperName,
+    tools,
+    selections,
+    toolCalls: () => toolCalls,
+    wrapperCalls: () => wrapperCalls,
+  };
+}
+
+const forgedCalls: LlmEvent[][] = [
+  [
+    {
+      type: "toolCall",
+      call: { id: "call-tool", name: name("tool"), arguments: {} },
+    },
+    { type: "stop", reason: "toolCall" },
+  ],
+  [
+    { type: "content", delta: "done" },
+    { type: "stop", reason: "stop" },
+  ],
+];
+
+test("invokes only the execution subset and fails forged calls for stale tools", async () => {
+  const strict = strictTools();
+  const h = createLoopHarness({ tools: strict.tools });
+  h.deps.entries = {
+    kind: (entry) =>
+      entry === strict.toolName ? "tool" : entry === strict.wrapperName ? "wrapper" : undefined,
+    matchesDefinition: () => false,
+  };
+  await h.enqueueAndConfirm([
+    declaration({
+      toggle: [strict.toolName, strict.wrapperName],
+      definitions: [
+        definition(strict.toolName, "frozen"),
+        definition(strict.wrapperName, "frozen", "wrapper"),
+      ],
+    }),
+    user("hello"),
+  ]);
+  const { adapter, execute, requests } = adapterFor(forgedCalls);
+
+  expect((await run(h, adapter, execute)).reason).toBe("completed");
+  expect(requests[0]?.tools ?? []).toEqual([]);
+  expect(strict.selections).toEqual([[]]);
+  expect(strict.toolCalls()).toBe(0);
+  expect(strict.wrapperCalls()).toBe(0);
+  const nodes = await tree(h);
+  expect(nodes.find((node) => node.role === "tool")?.content).toEqual([
+    {
+      type: "toolResult",
+      toolCallId: "call-tool",
+      content: [{ type: "text", text: "Tool is not selected: pkg#tool" }],
+      isError: true,
+      code: "tool.failed",
+    },
+  ]);
+});
+
+test("falls back to the full selection for contexts without executionSelection", async () => {
+  const strict = strictTools();
+  const h = createLoopHarness({ tools: strict.tools });
+  h.deps.entries = {
+    kind: (entry) =>
+      entry === strict.toolName ? "tool" : entry === strict.wrapperName ? "wrapper" : undefined,
+    matchesDefinition: () => false,
+  };
+  await h.enqueueAndConfirm([
+    declaration({
+      toggle: [strict.toolName, strict.wrapperName],
+      definitions: [
+        definition(strict.toolName, "frozen"),
+        definition(strict.wrapperName, "frozen", "wrapper"),
+      ],
+    }),
+    user("hello"),
+  ]);
+  const legacy: Context = {
+    ...h.context,
+    async assemble(options) {
+      const { executionSelection: _ignored, ...rest } = await h.context.assemble(options);
+      return rest;
+    },
+  };
+  const { adapter, execute } = adapterFor(forgedCalls);
+
+  expect((await run(h, adapter, execute, legacy)).reason).toBe("completed");
+  expect(strict.selections[0]).toEqual([strict.toolName, strict.wrapperName]);
+  expect(strict.toolCalls()).toBe(1);
+  expect(strict.wrapperCalls()).toBe(1);
 });

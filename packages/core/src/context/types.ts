@@ -7,6 +7,7 @@ import type {
 } from "../messages.js";
 import type { NodeId, SessionId, SessionMeta, SessionNode, Sessions } from "../sessions/types.js";
 import type { Brand, JsonObject, JsonValue } from "../types.js";
+import type { SelectionView } from "./selection.js";
 
 export type { SelectionState };
 
@@ -128,6 +129,8 @@ export interface AssembleOptions {
 export interface AssembledContext {
   request: LlmRequest;
   selection: SelectionState;
+  /** Eligible for invocation after locked revalidation; absent only in embedded fakes. */
+  executionSelection?: SelectionState;
   /** Only nodes persisted by this batch. */
   nodes: SessionNode[];
   headId: NodeId;
@@ -135,12 +138,16 @@ export interface AssembledContext {
   first: boolean;
 }
 
-/** Call initialize, selectionFor, and every synchronous method under the session lock. */
+/** Call initialize, selectionFor, viewFor, validateQueue, and every synchronous method under the session lock. */
 export interface Context {
   /** Re-read the default branch on every call without discarding the in-memory queue. */
   initialize(): Promise<void>;
   snapshot(): ContextSnapshot;
   selectionFor(nodeId?: NodeId): Promise<SelectionState>;
+  /** Pure branch replay for the host; never mutates the selection cache or seq. */
+  viewFor(nodeId?: NodeId): Promise<SelectionView>;
+  /** Validate every unconfirmed declaration against the target branch without confirming or publishing. */
+  validateQueue(nodeId?: NodeId): Promise<void>;
   enqueue(entries: QueueEntryInput[]): QueueEntryId[];
   edit(id: QueueEntryId, content: ContentBlock[]): void;
   remove(id: QueueEntryId): void;

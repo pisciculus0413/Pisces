@@ -542,7 +542,7 @@ export function createAgentLoopDriver(options: AgentLoopDriverOptions): AgentLoo
               return await finalizeCancellationOnce(input, events, progress);
             const results = await Promise.all(
               calls.map((call) =>
-                input.tools.invoke(call, assembled.selection, {
+                input.tools.invoke(call, assembled.executionSelection ?? assembled.selection, {
                   sessionId: input.sessionId,
                   workspace: input.meta.workspace,
                   signal: controller.signal,

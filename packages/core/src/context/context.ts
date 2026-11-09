@@ -1,3 +1,4 @@
+import type { DefinitionSnapshot, EntryName } from "../messages.js";
 import type { NodeId, SessionNode, SessionNodeDraft } from "../sessions/types.js";
 import { PiscesError } from "../types.js";
 import { budgetContext } from "./budget.js";
@@ -6,14 +7,28 @@ import { replayDeclarations } from "./declarations.js";
 import { createContextEvents } from "./events.js";
 import { materialize, projectTools } from "./materialize.js";
 import { createQueue } from "./queue.js";
+import {
+  applyDeclarations,
+  evaluateSelection,
+  replaySelection,
+  type SelectionEvaluation,
+} from "./selection.js";
 import type {
   AssembledContext,
   Context,
   ContextDeps,
   ContextEvent,
+  QueueEntry,
   QueueEntryId,
   SelectionState,
 } from "./types.js";
+
+interface ProjectedSelection {
+  selection: SelectionState;
+  definitions: Map<EntryName, DefinitionSnapshot>;
+  /** Strict inventory mode only; absent for legacy manual injection. */
+  evaluation?: SelectionEvaluation;
+}
 
 export function createContext(deps: ContextDeps): Context {
   const state = { meta: structuredClone(deps.meta), persisted: deps.persisted };
@@ -48,6 +63,30 @@ export function createContext(deps: ContextDeps): Context {
 
   async function readSelection(nodeId?: NodeId): Promise<SelectionState> {
     return replayDeclarations(await readBranch(nodeId)).selection;
+  }
+
+  /**
+   * Same pure replay/eligibility rule for phases A and C. Strict mode applies only
+   * surviving declarations over the target branch so historical kind evidence is
+   * checked first; legacy manual injection keeps its original projection.
+   */
+  function project(
+    branch: readonly SessionNode[],
+    entries: readonly QueueEntry[],
+  ): ProjectedSelection {
+    if (!deps.entries.matchesDefinition) return replayDeclarations([...branch, ...entries]);
+    const view = applyDeclarations(replaySelection(branch), entries);
+    const evaluation = evaluateSelection(view, deps.entries);
+    const unresolved = evaluation.unresolvedSources[0];
+    if (unresolved !== undefined)
+      throw new PiscesError("context.source_failed", "Could not materialize selected entry", {
+        data: { name: unresolved },
+      });
+    return {
+      selection: view.selection,
+      definitions: new Map(view.definitions.map((definition) => [definition.name, definition])),
+      evaluation,
+    };
   }
 
   function completeCommit(commit: Omit<PendingContextCommit, "error">, nodes: SessionNode[]) {
@@ -109,6 +148,13 @@ export function createContext(deps: ContextDeps): Context {
       seq: deps.eventClock.current(),
     }),
     selectionFor: readSelection,
+    viewFor: async (nodeId) => replaySelection(await readBranch(nodeId)),
+    validateQueue: async (nodeId) => {
+      if (!deps.entries.matchesDefinition) return;
+      const branch = await readBranch(nodeId);
+      const pending = queue.snapshot().filter((entry) => entry.confirmedAt === undefined);
+      applyDeclarations(replaySelection(branch), pending);
+    },
     enqueue: (...args) => {
       assertWritable();
       return queue.enqueue(...args);
@@ -152,14 +198,20 @@ export function createContext(deps: ContextDeps): Context {
           return {
             branch,
             headId: branch.at(-1)?.id,
-            ...replayDeclarations([...branch, ...entries]),
+            projected: project(branch, entries),
           };
         });
 
         // No budget decision here: entries may disappear while resolve is awaiting.
         const resolved = await materialize({
-          ...snapshot,
+          branch: snapshot.branch,
           queue: [],
+          selection:
+            snapshot.projected.evaluation?.executionSelection ?? snapshot.projected.selection,
+          ...(snapshot.projected.evaluation
+            ? { contentSelection: snapshot.projected.evaluation.contentSelection }
+            : {}),
+          definitions: snapshot.projected.definitions,
           entries: deps.entries,
           sources: deps.sources,
           skills: deps.skills,
@@ -177,11 +229,11 @@ export function createContext(deps: ContextDeps): Context {
           const branch = await readBranch(nodeId);
           signal?.throwIfAborted();
           const entries = queue.survivors(window as ReadonlyMap<QueueEntryId, number>);
-          const final = replayDeclarations([...branch, ...entries]);
+          const final = project(branch, entries);
           const headId = branch.at(-1)?.id;
           if (
             (nodeId === undefined && headId !== snapshot.headId) ||
-            JSON.stringify(final.selection) !== JSON.stringify(snapshot.selection)
+            JSON.stringify(final.selection) !== JSON.stringify(snapshot.projected.selection)
           ) {
             if (attempt === 1)
               throw new PiscesError("context.changed", "Context changed while resolving", {
@@ -190,22 +242,27 @@ export function createContext(deps: ContextDeps): Context {
             return undefined;
           }
 
+          const contentSelection = final.evaluation?.contentSelection ?? final.selection;
+          const executionSelection = final.evaluation?.executionSelection ?? final.selection;
+          const visible = new Set<EntryName>(contentSelection);
           const existing = new Set(
             branch.filter((node) => node.kind === "agent").map((node) => node.source),
           );
           const drafts: SessionNodeDraft[] = [
             ...resolved.drafts.filter(
-              (draft) =>
-                final.selection.includes(draft.source as SelectionState[number]) &&
-                !existing.has(draft.source),
+              (draft) => visible.has(draft.source as EntryName) && !existing.has(draft.source),
             ),
             ...entries.map(({ kind, role, source, content }) => ({ kind, role, source, content })),
           ];
-          const tools = projectTools({ ...final, entries: deps.entries });
+          const tools = projectTools({
+            selection: executionSelection,
+            definitions: final.definitions,
+            entries: deps.entries,
+          });
           const { messages, compactions } = budgetContext({
             branch,
             drafts,
-            selection: final.selection,
+            selection: contentSelection,
             tools,
             contextWindow,
             maxOutput,
@@ -266,6 +323,7 @@ export function createContext(deps: ContextDeps): Context {
           const assembled: AssembledContext = {
             request: { model: state.meta.model, messages, ...(tools.length ? { tools } : {}) },
             selection: [...final.selection],
+            executionSelection: [...executionSelection],
             nodes: structuredClone(nodes),
             headId: nextHead,
             first,

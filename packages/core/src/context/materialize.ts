@@ -17,6 +17,8 @@ interface MaterializeInput {
   branch: readonly SessionNodeDraft[];
   queue: readonly QueueEntry[];
   selection: SelectionState;
+  /** Source bodies to resolve; defaults to the full selection for legacy callers. */
+  contentSelection?: SelectionState;
   definitions: ReadonlyMap<EntryName, DefinitionSnapshot>;
   entries: ContextEntries;
   sources: ContextSourceRegistry;
@@ -55,6 +57,7 @@ export async function materialize({
   branch,
   queue,
   selection,
+  contentSelection,
   definitions,
   entries,
   sources,
@@ -69,7 +72,7 @@ export async function materialize({
   const existing = new Set(
     branch.filter((node) => node.kind === "agent").map((node) => node.source),
   );
-  for (const name of [...new Set(selection)].sort()) {
+  for (const name of [...new Set(contentSelection ?? selection)].sort()) {
     const kind = entries.kind(name);
     if (kind === "context") {
       if (!existing.has(name)) contexts.push(name);
