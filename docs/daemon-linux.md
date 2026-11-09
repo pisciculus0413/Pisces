@@ -6,10 +6,11 @@
 ## 支持范围
 
 - 仅 Linux x64；Node.js `>=22.19.0`，ESM。
-- 本阶段**没有** CLI、`run` 命令或通用配置文件加载器。宿主由嵌入程序调用
-  `startDaemon(...)` 启动。provider 与默认值由调用方传入；扩展模式下 provider 仍由调用方注入，
-  扩展选择与包装器配置来自 `<configDir>/config.json` 与 `<workspace>/.pisces/config.json`
-  （见 `docs/extensions.md`）。
+- 本阶段已有 CLI `start`/`status`/`stop`（本地生命周期）及只读取 `dataDir`/`providers`/`defaults` 的
+  `config.json` 加载器，见 `docs/cli.md`；没有 `run` 命令，daemon 侧也不读取配置文件。宿主也可由
+  嵌入程序调用 `startDaemon(...)` 启动：provider 与默认值由调用方传入；扩展模式下 provider 仍由
+  调用方注入，扩展选择与包装器配置来自 `<configDir>/config.json` 与
+  `<workspace>/.pisces/config.json`（见 `docs/extensions.md`）。
 - macOS 与 Windows 在导入原生绑定、绑定 socket 之前以 `daemon.unsupported_platform`
   失败；两者均不是当前实现，Windows 命名管道为目标设计。
 - 本地只在 Node 26.13.0 x64 上验证。CI 配置了 Node 22.19.0 / 24 / 26 x64，但本阶段

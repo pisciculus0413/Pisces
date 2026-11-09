@@ -1949,9 +1949,13 @@ interface ClientRegistry {
 
 ### 7.1 CLI 与协议边界
 
+实现状态：本阶段只实现 `start`、`status`、`stop`，它们是本地 daemon 生命周期命令，经 pid 记录、
+进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.hello` 探测完成，使用协议做就绪/归属探测，
+不调用任何管理方法。表中其余命令为目标设计，**未实现**；`--help`、`--version` 已实现。
+
 | 命令 | 路径 |
 |---|---|
-| `start` / `stop` / `status` | 本地 daemon 生命周期 |
+| `start` / `stop` / `status` | 本地 daemon 生命周期（已实现） |
 | `run` | 经协议创建/读取会话、入队、`turn.start` |
 | `sessions list` | 经协议 `session.list` |
 | `sessions export` | 经协议读取分支并输出 JSONL |
@@ -1967,8 +1971,13 @@ interface ClientRegistry {
 - 管理命令不经 daemon 协议；daemon 在使用时读取配置。
 - `config` 只影响此后创建的会话，不改写既有会话。
 - CLI 不直接访问 `events.jsonl`；会话读取与导出经协议/服务层。
+- 已实现的配置加载器只接受 `dataDir`、`providers`、`defaults`；未知键一律 `config.invalid`，
+  provider 方言固定为 `openai-chat`。
 
 ### 7.2 `run`
+
+本阶段 `run` **未实现**（同样未实现 `sessions`、`client`、`models`、`providers check`、`config`、
+`auth`、`extensions`、`templates`）；以下为目标设计，不是当前行为。
 
 - `--new`：创建新会话。
 - `--continue`：继续最近会话。
@@ -2014,6 +2023,31 @@ interface ClientRegistry {
 - 恢复时 `meta.json` 损坏或有 meta 但 commit 缺失/非法：保留会话原始文件，收集 `RecoveryIssue`；该会话不可加载，不影响直接读取其他健康会话，`list` 整体拒绝。
 - 恢复时节点损坏：不加载该会话，不返回部分记录。
 - 临时会话、队列、活跃 turn 标记在 daemon 退出时按各自规则清理或保留。
+
+CLI 生命周期约定（已实现）：
+
+- 退出码：`0` 成功，`1` 运行时失败（已在运行、未知属主、启动失败、停止超时、socket 无属主），`2`
+  用法或配置错误（用法错误、`config.invalid`、`config.missing_api_key`、`daemon.insecure_directory`、
+  pid 文件写入失败）。
+- 用户可见输出只有固定码与固定消息：`config.invalid`、`config.missing_api_key`、
+  `daemon.already_running`、`daemon.unknown_owner`、`daemon.start_failed`、`daemon.stop_timeout`、
+  `daemon.insecure_directory`、`daemon.unmanaged`、`storage.io`；`start` 失败额外打印
+  `log: <dataDir>/daemon.log`。不打印密钥、环境变量名、配置值或原始错误。
+- 文件位置与权限：`<dataDir>/daemon.pid`（`0600`，单条 JSON `{pid, socketPath, startedAt}`，以
+  `open(..., "wx", 0o600)` 独占创建）、`<dataDir>/daemon.log`（`0600`，子进程 stdout/stderr）、
+  `<dataDir>/run/pisces.sock` 与 `<dataDir>/run/pisces.lock`（`0600`，由 daemon 维护）。
+  `dataDir` 必须是当前 uid 拥有、无 group/world 写位的绝对路径，CLI 以 `0700` 创建。
+- `start`：一个 10 s 墙钟预算覆盖预检探测与就绪轮询；轮询 50 ms，要求子进程存活、pid 记录仍指向
+  该子进程、且本 dataDir 的 socket 握手成功。失败时 SIGTERM 自己的子进程、仅在记录仍指向它时删除
+  记录。并发启动靠独占 pid 记录选出唯一赢家，输家不改写、不清理赢家的记录。
+- 陈旧/损坏 pid 文件：记录中的进程已退出时 `status` 报 `stopped (stale pid file)`（`1`）并删除，
+  `stop` 报 `not running`（`0`）并删除，`start` 回收后启动；文件内容不可解析时视为无属主记录，
+  `status`/`stop` 按未运行处理，`start` 在确认本 dataDir 的 socket 不应答后清除它。
+- `daemon.unknown_owner` 恢复：记录中的 pid 存活但 socket 不应答时，`start`/`stop` 都退出 `1`，
+  **不发送任何信号**并保留记录（防止 PID 复用误杀）。必须先 `ps -p <pid>` 确认该进程身份；是本
+  dataDir 的 daemon 才可人工 SIGTERM，否则只删除 `daemon.pid`。详见 `docs/cli.md` §7。
+- `stop` 先握手再发信号，握手失败不调用 `kill`；`stop` 超时保留记录并以 `daemon.stop_timeout` 退出
+  `1`；无记录但 socket 应答时报 `daemon.unmanaged`（`1`），同样不发送信号。
 
 ## 8 非功能设计、错误与可测试性
 
@@ -2095,8 +2129,14 @@ class PiscesError extends Error {
 
 ### 8.6 构建与分发
 
-- pnpm 工作区；`tsc -b` 构建 `protocol`、`core`、`daemon`。
+- pnpm 工作区；`tsc -b` 构建 `protocol`、`core`、`daemon`、`cli`。
 - Node 版本遵循根 `package.json`；ESM。
+- CLI 入口为 `packages/cli/package.json` 的 `bin.pisces` → `dist/main.js`；后台子进程入口为
+  `dist/daemon-child.js`，二者都经 `realpath` 比较 `process.argv[1]` 决定是否作为入口执行，symlink
+  调用同样有效。仓库内 `dist/main.js` 不带可执行位，本地用 `node packages/cli/dist/main.js` 调用。
+- CLI 依赖已构建的原生插件 `packages/daemon/native/peercred.node`；切换 Node 版本后必须重建，否则
+  `start` 以 `daemon.start_failed` 失败（日志为 `daemon.native_unavailable`）。
+- 仅 Linux x64 已实现并验证；macOS/Windows 是目标设计。
 - 内置扩展随产品放在 `extensions/builtin`；外部扩展为普通 npm 包或目录。
 - TypeScript 加载器随宿主分发，负责 `.ts`/`.tsx` 转译与 `@pisces/*` 映射。
 - 客户端作为扩展包的一部分分发，经协议连接 daemon。

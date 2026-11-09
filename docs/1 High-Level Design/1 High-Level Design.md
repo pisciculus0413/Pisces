@@ -1162,6 +1162,15 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
 - 扩展的安装、更新与移除由 npm、git 完成，不在本软件生命周期内。
 - `run` 交互中按 Ctrl-C 等同 `sessions cancel <id>`。
 
+实现状态（本阶段）：CLI 已实现 `--help`、`--version` 与 `start`/`status`/`stop`。`start` 以 detached
+子进程启动 daemon，写入 pid 记录与日志，只有子进程存活、pid 记录仍指向它、且本 dataDir 的 socket
+完成 `protocol.hello` 握手后才报告成功（总预算 10 s，轮询 50 ms）；`status` 结合进程存活、socket
+探测与 pid 记录给出 `running`/`stopped`/`stale`/`unresponsive`/`unmanaged`，`--json` 输出同名
+`state`；`stop` 仅在记录中的 pid 存活且同一 socket 应答后发送 `SIGTERM`，最多等待 10 s，陈旧记录与
+PID 复用防护见 §8.1。其余命令（`run`、`sessions`、`client`、`models`、`providers check`、
+`config`、`auth`、`extensions`、`templates`）仍为目标设计，**未实现**。CLI 仅支持 Linux x64，
+只暴露 `openai-chat` 方言；配置、凭据与恢复步骤见 `docs/cli.md`。
+
 ### 6.9 模板接口
 
 ```ts
@@ -1229,7 +1238,12 @@ interface ProjectRef {
 
 - 本阶段 daemon 仅支持 Linux x64 与 Node.js >= 22.19.0；macOS 与 Windows（命名管道）仍为目标设计，未实现，非 Linux 平台在绑定前以 `daemon.unsupported_platform` 失败。
 - daemon 以用户级单实例运行：启动时对 `<dataDir>/run/pisces.lock` 取 `flock` 并绑定 `<dataDir>/run/pisces.sock`（权限 `0600`）；锁已被占用时以 `daemon.lock_busy` 退出，且不删除存活实例的 socket。
-- 本阶段没有 CLI `start`/`stop`/`status` 与配置文件加载器：嵌入程序调用 `startDaemon({ dataDir, providers, providerHost, ... })`，返回的 `DaemonHost` 提供 `socketPath`、`initializationIssues`、`recoveryIssues`、`status()` 与 `stop()`。daemon 只监听本地 Unix socket，不监听网络地址。
+- 本阶段已提供 CLI `start`/`status`/`stop`（见 `docs/cli.md`）与只接受 `dataDir`/`providers`/
+  `defaults` 的 `config.json` 加载器；daemon 本身仍不读取配置，嵌入程序调用
+  `startDaemon({ dataDir, providers, providerHost, ... })` 启动，返回的 `DaemonHost` 提供
+  `socketPath`、`initializationIssues`、`recoveryIssues`、`status()` 与 `stop()`。CLI 的 pid 记录、
+  日志、socket/lock 文件与退出码约定见 DDS §7.5；`run`、`sessions` 等命令未实现。daemon 只监听本地
+  Unix socket，不监听网络地址。
 - 连接在读取任何协议字节前用原生 `SO_PEERCRED` 校验 peer UID 必须等于 daemon 有效 UID；不一致只销毁该连接。原生插件为仓内 plain C Node-API，使用固定 `node-gyp` 编译为被忽略的 `packages/daemon/native/peercred.node`，需在测试前按当前 Node ABI 显式构建；缺失或构建失败以 `daemon.native_unavailable` 拒绝启动，无降级认证。
 - `stop()` 先阻断新帧并停止 accept，等待已受理请求与尽力取消活跃 turn，再关闭连接、按 inode 清理 socket、释放锁并 dispose `Gateway`；无法完成时以 `daemon.stop_incomplete` 失败并保留锁、标记与 `quiescing` 状态，不自动强杀进程，也不声称已优雅停止。
 - CI 配置 Linux x64 的 Node 22.19.0/24/26 矩阵，先构建原生插件再执行完整测试、两个 `tsc`、Biome 与边界扫描；未 push 前不得将远端矩阵结果视为已验证。

@@ -1,8 +1,5 @@
 #!/usr/bin/env node
-import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   type CommandDeps,
   type CommandIo,
@@ -14,6 +11,9 @@ import {
   stopCommand,
 } from "./commands.js";
 import { defaultConfigPath } from "./config.js";
+import { isEntryPath } from "./entry.js";
+
+export { isEntryPath };
 
 /**
  * `pisces` entry point: argument parsing plus dispatch to the lifecycle commands.
@@ -134,30 +134,6 @@ export async function runCli(
   }
 }
 
-/**
- * True only when `entry` denotes this module, following symlinks on both sides.
- *
- * Package managers run bins through a symlink or shim, so comparing the raw
- * `argv[1]` string with `import.meta.url` silently skips the CLI. An entry that
- * is missing or cannot be resolved is never this module.
- */
-export function isEntryPath(
-  entry: string | undefined,
-  moduleUrl: string = import.meta.url,
-): boolean {
-  if (entry === undefined) return false;
-  const real = (path: string): string | undefined => {
-    try {
-      return realpathSync(path);
-    } catch {
-      return undefined;
-    }
-  };
-  const self = real(fileURLToPath(moduleUrl));
-  const candidate = real(resolve(entry));
-  return self !== undefined && candidate !== undefined && self === candidate;
-}
-
-if (isEntryPath(process.argv[1])) {
+if (isEntryPath(process.argv[1], import.meta.url)) {
   process.exitCode = await runCli(process.argv.slice(2), processIo);
 }

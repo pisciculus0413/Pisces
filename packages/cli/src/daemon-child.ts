@@ -2,6 +2,7 @@ import { PiscesError } from "@pisces/core";
 import { type DaemonHost, startDaemon } from "@pisces/daemon";
 import { buildDaemonOptions } from "./assembly.js";
 import { loadConfig } from "./config.js";
+import { isEntryPath } from "./entry.js";
 
 /** Usage error: wrong argument count, nothing to start. */
 const USAGE = "usage: daemon-child <config-path> <data-dir>";
@@ -45,4 +46,9 @@ export async function daemonChildMain(argv: string[]): Promise<void> {
     process.stderr.write(`error: ${failureCode(error)}\n`);
     process.exitCode = 1;
   }
+}
+
+// Only the spawned entry runs; importing this module from tests has no side effects.
+if (isEntryPath(process.argv[1], import.meta.url)) {
+  await daemonChildMain(process.argv.slice(2));
 }
