@@ -1,9 +1,12 @@
-import { lstat, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { connect, type Socket } from "node:net";
+import { type ChildProcess, spawn } from "node:child_process";
+import { chmod, lstat, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PiscesError } from "@pisces/core";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import type { PeerUidReader } from "../src/transport/unix-transport.js";
 
 type TransportModule = typeof import("../src/transport/unix-transport.js");
 
@@ -75,6 +78,164 @@ const waitFor = async (condition: () => boolean, timeoutMs = 3000): Promise<void
 const probeFiles = async (): Promise<string[]> =>
   (await readdir(dir)).filter((name) => name.startsWith("pisces-probe-"));
 
+const CROSS_UID_FIXTURE = fileURLToPath(
+  new URL("./fixtures/cross-uid-client.mjs", import.meta.url),
+);
+const CROSS_UID_SETUP_TIMEOUT_MS = 5000;
+const CROSS_UID_CHILD_TIMEOUT_MS = 8000;
+
+/** Fail a test instead of hanging when a required signal never arrives. */
+const within = async <T>(promise: Promise<T>, label: string, timeoutMs: number): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(label)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+};
+
+interface CrossUidClient {
+  child: ChildProcess;
+  events: Array<Record<string, unknown>>;
+  done: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+  diagnostics(): string;
+  reap(): Promise<void>;
+}
+
+/**
+ * Copy the builtin-only fixture into the disposable foreign-readable directory:
+ * the mapped UID cannot traverse a private home directory or the repo.
+ */
+const installCrossUidFixture = async (runDir: string): Promise<string> => {
+  const target = join(runDir, "cross-uid-client.mjs");
+  await writeFile(target, await readFile(CROSS_UID_FIXTURE, "utf8"));
+  await chmod(target, 0o644);
+  return target;
+};
+
+/**
+ * Run the fixture with a subordinate-mapped UID. `--map-auto` consumes the
+ * caller's entries in `/etc/subuid` and `/etc/subgid`, so the child's
+ * host-visible UID differs from the daemon effective UID. A missing utility,
+ * mapping or binary surfaces as an explicit setup failure, never a skip.
+ */
+const spawnCrossUidClient = (
+  fixturePath: string,
+  socketPath: string,
+  payload: string,
+): CrossUidClient => {
+  const child = spawn(
+    "unshare",
+    [
+      "--map-auto",
+      "--user",
+      "--setuid",
+      "1",
+      "--setgid",
+      "1",
+      "--",
+      process.execPath,
+      fixturePath,
+      socketPath,
+      payload,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const events: Array<Record<string, unknown>> = [];
+  let buffer = "";
+  let stderr = "";
+  let spawnError = "";
+  let exited = false;
+
+  child.stdout?.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString("utf8");
+    let index = buffer.indexOf("\n");
+    while (index !== -1) {
+      const line = buffer.slice(0, index).trim();
+      buffer = buffer.slice(index + 1);
+      index = buffer.indexOf("\n");
+      if (line.length === 0) continue;
+      try {
+        events.push(JSON.parse(line) as Record<string, unknown>);
+      } catch {
+        stderr += `unparsable fixture output: ${line}\n`;
+      }
+    }
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+  });
+
+  const done = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.once("error", (error) => {
+      spawnError = error.message;
+      exited = true;
+      resolve({ code: null, signal: null });
+    });
+    child.once("close", (code, signal) => {
+      exited = true;
+      resolve({ code, signal });
+    });
+  });
+
+  return {
+    child,
+    events,
+    done,
+    diagnostics: () =>
+      [spawnError, stderr.trim()].filter((text) => text.length > 0).join("; ") ||
+      "no child diagnostics",
+    async reap() {
+      if (!exited) child.kill("SIGKILL");
+      await within(done, "cross-UID client was not reaped", 2000);
+    },
+  };
+};
+
+/**
+ * Independent preflight: observe the mapped child's real kernel credential on
+ * a disposable listener with the production native reader. The child's own
+ * reported namespace UID is never used as evidence of the parent-side uid.
+ */
+const preflightForeignPeerUid = async (
+  fixturePath: string,
+  runDir: string,
+  reader: PeerUidReader,
+): Promise<number> => {
+  const probePath = join(runDir, "cross-uid-preflight.sock");
+  const server = createServer();
+  const accepted = new Promise<Socket>((resolve) => server.once("connection", resolve));
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(probePath, () => resolve());
+  });
+  let client: CrossUidClient | undefined;
+  try {
+    await chmod(probePath, 0o666);
+    client = spawnCrossUidClient(fixturePath, probePath, "preflight\n");
+    const socket = await within(
+      accepted,
+      "cross-UID preflight connection was not observed; subordinate-ID mapping may be unavailable",
+      CROSS_UID_SETUP_TIMEOUT_MS,
+    ).catch((error: unknown) => {
+      throw new Error(
+        `cross-UID fixture setup failed: ${(error as Error).message}; ${client?.diagnostics()}`,
+      );
+    });
+    try {
+      return reader(socket);
+    } finally {
+      socket.destroy();
+    }
+  } finally {
+    if (client !== undefined) await client.reap().catch(() => {});
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+};
+
 test("delivers a real same-UID client to the authenticated handler", async () => {
   const { createUnixTransport } = await loadTransport();
   const socketPath = join(dir, "same-uid.sock");
@@ -93,6 +254,66 @@ test("delivers a real same-UID client to the authenticated handler", async () =>
   client.write("hello\n");
   await waitFor(() => chunks.join("") === "hello\n");
 });
+
+test("rejects a real cross-UID client before any handler or protocol bytes", async () => {
+  const { createUnixTransport } = await loadTransport();
+  const { peerUidFor } = await import("../src/transport/peer-credentials.js");
+  // Only this disposable fixture path becomes reachable by the foreign UID;
+  // production keeps its 0700 directory and 0600 socket checks.
+  await chmod(dir, 0o755);
+  const fixturePath = await installCrossUidFixture(dir);
+  const daemonUid = effectiveUid();
+  const foreignUid = await preflightForeignPeerUid(fixturePath, dir, peerUidFor);
+  if (foreignUid === daemonUid) {
+    throw new Error(
+      `cross-UID fixture setup failed: host observed peer uid ${foreignUid} equal to daemon euid ${daemonUid}`,
+    );
+  }
+
+  const socketPath = join(dir, "cross-uid.sock");
+  let handlerCalls = 0;
+  const chunks: string[] = [];
+  const transport = track(
+    createUnixTransport({
+      socketPath,
+      onAuthenticatedSocket: (socket) => {
+        handlerCalls += 1;
+        socket.on("data", (chunk) => chunks.push(chunk.toString()));
+      },
+    }),
+  );
+
+  await transport.start();
+  // Relax DAC only after the production 0600 bind validation, so the kernel
+  // credential check, not file permissions, must reject the foreign peer.
+  await chmod(socketPath, 0o666);
+
+  const client = spawnCrossUidClient(fixturePath, socketPath, "frame-that-must-not-run\n");
+  try {
+    const { code, signal } = await within(
+      client.done,
+      `cross-UID client did not exit; ${client.diagnostics()}`,
+      CROSS_UID_CHILD_TIMEOUT_MS,
+    );
+    // Check the server-side outcome first so a disabled credential gate is
+    // reported as handler/data exposure rather than only a slower close.
+    expect(handlerCalls).toBe(0);
+    expect(chunks).toHaveLength(0);
+    expect(signal).toBeNull();
+    expect(code).toBe(0);
+    expect(client.events[0]).toMatchObject({ event: "connected" });
+    const ended = client.events.find((event) => event.event === "ended") ?? {};
+    expect(ended).toMatchObject({ received: 0 });
+  } finally {
+    await client.reap();
+  }
+
+  // Positive control: the daemon's own UID still reaches the handler.
+  const accepted = await connectClient(socketPath);
+  accepted.write("after-auth\n");
+  await waitFor(() => chunks.join("") === "after-auth\n");
+  expect(handlerCalls).toBe(1);
+}, 20_000);
 
 test("binds an owned 0600 Unix socket and reports its identity", async () => {
   const { createUnixTransport } = await loadTransport();

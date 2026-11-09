@@ -131,4 +131,25 @@ cause 不进入响应或事件。
 扫描把 ripgrep 的退出码 1（无匹配）视为通过，退出码 2 视为失败，而不是用 `if rg` 把两者
 都当作通过。
 
-测试中的 peer 凭据用例覆盖真实自连接、注入的 UID 不一致、缺失/invalid fd 与原生错误；外部属主 socket 用例仅在 root 下运行，普通用户下跳过。跨 UID 子进程（`unshare -Ur`）用例不在本阶段测试中，不得作为已验证的安全证据。
+测试中的 peer 凭据用例覆盖真实自连接、注入的 UID 不一致、缺失/invalid fd 与原生错误；外部属主 socket 用例仅在 root 下运行，普通用户下跳过。真实跨 UID 回归另见下节；它不是跳过项。
+
+### 真实跨 UID 回归与前置条件
+
+`packages/daemon/test/unix-transport.test.ts` 用真实的不同宿主 UID 客户端验证拒绝路径，
+`packages/daemon/test/fixtures/cross-uid-client.mjs` 是只依赖 Node 内建模块的子进程 fixture：
+
+- 测试以 `unshare --map-auto --user --setuid 1 --setgid 1` 启动该 fixture；`--map-auto` 使用
+  `/etc/subuid`、`/etc/subgid` 的从属 ID 区间，因此子进程在父命名空间中有一个与 daemon
+  不同的宿主可见 UID。
+- 先做独立预检：一次性测试目录内另起 socket，用生产原生 `SO_PEERCRED` 读取器观察该子进程的
+  真实 peer UID，必须不等于 `process.geteuid()`（本机为 euid 1000、peer 100001；数值随环境
+  变化，断言只比较是否相等）。子进程自己打印的命名空间 UID 不作为证据。
+- 预检通过后才启动使用**生产默认**原生读取器（不注入 `peerUidFor`）的监听器；仅在
+  `start()` 完成绑定与 `0600` 校验**之后**，才把一次性测试目录改为可穿过、socket 改为可连接，
+  使内核凭据校验而非 DAC 成为拒绝原因。子进程连接时立即写入数据，断言连接被关闭、认证处理
+  函数未被调用、子进程未收到任何协议字节；随后同 UID 客户端仍须正常到达处理函数。
+- 前置条件：util-linux `unshare`（支持 `--map-auto`，通常 >= 2.38）、用户可用的从属 ID 区间，
+  以及 setuid 的 `newuidmap`/`newgidmap`。任一缺失，或宿主观察到的 peer UID 与 daemon UID
+  相同，测试都以显式配置错误**失败**而不是跳过，因此 Linux CI 必须提供该映射。
+- 单独的 `unshare -Ur` 不产生宿主可见的 UID 差异（内核把子进程映射回父 UID），不能作为跨 UID
+  证据；本回归测试不使用它，也只在本机验证过，远端 Node 矩阵仍未运行。
