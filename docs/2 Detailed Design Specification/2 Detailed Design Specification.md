@@ -823,7 +823,7 @@ type ProtocolEvent =
 
 - 请求级错误通过 `Response.error` 返回。
 - 本阶段 `turn.cancel` 对未知或已注销 turn 返回 `{ cancelled: false }`，不产生 `turn.not_found`。
-- 内部错误码 `daemon.peer_credentials_unavailable`/`daemon.peer_credentials_failed`/`daemon.peer_credentials_invalid` 只在 daemon 内部使用，启动时归一化为 `daemon.native_unavailable`、`daemon.peercred_probe_failed` 或 `daemon.start_failed`，不发给客户端。`workspace.path_outside` 同样只在 daemon 内部使用：它由 `WorkspaceAccess.resolve`/`exists` 抛出，当前只有内置 shell 工具把它映射为 `tool.denied`（固定文案 `Working directory is outside the workspace`），不进 `Response.error`，也从不发送到线上。
+- 内部错误码 `daemon.peer_credentials_unavailable`/`daemon.peer_credentials_failed`/`daemon.peer_credentials_invalid` 只在 daemon 内部使用，启动时归一化为 `daemon.native_unavailable`、`daemon.peercred_probe_failed` 或 `daemon.start_failed`，不发给客户端。`workspace.path_outside` 同样只在 daemon 内部使用：`WorkspaceAccess` 的五个方法（`resolve`、`exists`、`readFile`、`writeFile`、`ensureDirectory`）都会先解析路径，因此都会抛它，当前只有内置 shell 工具把它映射为 `tool.denied`（固定文案 `Working directory is outside the workspace`），不进 `Response.error`，也从不发送到线上。
 - turn 进行中的供应商或工具错误通过 `turn.ended.error` 或工具结果回填，不伪造成请求错误。
 - `event.publish_failed` 表示同步事件 handler 失败；Context 与 driver 的事件发布适配器都保留原异常为 `cause`，不重试、不回滚已提交状态。driver 中通过 `turn.ended.reason="failed"` 与 `TurnResult.error` 结束 turn。
 - 错误消息不得包含凭据。Core 内部 `PiscesError.data` 可保存结构化原因或重试提示；本阶段 `Gateway` 的 `Response.error` 仅映射 `code` 与 `message`，不转发 `data`/`cause`。结构化线上错误详情仅为未来目标，不应依赖。

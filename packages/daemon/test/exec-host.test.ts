@@ -106,6 +106,18 @@ test("resolves when a grandchild keeps the pipes open", async () => {
   expect(result.stdout).toBe("done");
 });
 
+test("does not report a timeout once the child has exited", async () => {
+  const host = createExecHost();
+  const started = Date.now();
+  // The shell exits immediately; the background grandchild holds the pipes open
+  // until the close fallback fires, which is past the timeout window.
+  const result = await host.run(SHELL, ["-c", "sleep 30 & printf done"], { timeoutMs: 100 });
+  expect(Date.now() - started).toBeLessThan(3_000);
+  expect(result.timedOut).toBeFalsy();
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toBe("done");
+});
+
 test("truncates ASCII output at the byte cap", async () => {
   const host = createExecHost();
   const result = await host.run(NODE, ["-e", writeScript("a", 200_000)]);

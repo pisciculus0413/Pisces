@@ -152,6 +152,8 @@ export function createExecHost(options: ExecHostOptions = {}): Exec {
         child.stderr.on("error", ignoreStreamError);
 
         timeoutTimer = setTimeout(() => {
+          // The child is already gone; a pending timer must not fake a timeout.
+          if (exitCode !== undefined) return;
           timedOut = true;
           kill();
         }, timeoutMs);
@@ -167,6 +169,10 @@ export function createExecHost(options: ExecHostOptions = {}): Exec {
 
         child.on("exit", (code) => {
           exitCode = code ?? SIGNAL_EXIT_CODE;
+          if (timeoutTimer !== undefined) {
+            clearTimeout(timeoutTimer);
+            timeoutTimer = undefined;
+          }
           if (settled || closeTimer !== undefined) return;
           // A grandchild may hold the pipes open; bound the wait on `close`.
           closeTimer = setTimeout(() => {
