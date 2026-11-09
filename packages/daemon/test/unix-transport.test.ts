@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { chmod, lstat, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { connect, createServer, type Socket } from "node:net";
+import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -196,6 +196,21 @@ const spawnCrossUidClient = (
 };
 
 /**
+ * Close the preflight listener without letting a pending connection or an
+ * already-failed listener stall or reject cleanup.
+ */
+const closePreflightServer = async (server: Server): Promise<void> => {
+  const closed = new Promise<void>((resolve) => {
+    try {
+      server.close(() => resolve());
+    } catch {
+      resolve();
+    }
+  });
+  await within(closed, "cross-UID preflight listener did not close", 2000).catch(() => {});
+};
+
+/**
  * Independent preflight: observe the mapped child's real kernel credential on
  * a disposable listener with the production native reader. The child's own
  * reported namespace UID is never used as evidence of the parent-side uid.
@@ -207,17 +222,42 @@ const preflightForeignPeerUid = async (
 ): Promise<number> => {
   const probePath = join(runDir, "cross-uid-preflight.sock");
   const server = createServer();
-  const accepted = new Promise<Socket>((resolve) => server.once("connection", resolve));
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(probePath, () => resolve());
+  const acceptedSockets: Socket[] = [];
+  let resolveAccepted!: (socket: Socket) => void;
+  const accepted = new Promise<Socket>((resolve) => {
+    resolveAccepted = resolve;
   });
+  // Never let a reset from the child become an unhandled socket error, and keep
+  // every accepted socket until cleanup can destroy it explicitly.
+  server.on("connection", (socket) => {
+    acceptedSockets.push(socket);
+    socket.on("error", () => socket.destroy());
+    resolveAccepted(socket);
+  });
+  // Keep listener errors handled outside the bounded startup wait.
+  server.on("error", () => {});
   let client: CrossUidClient | undefined;
   try {
+    await new Promise<void>((resolve, reject) => {
+      const onListenError = (error: Error): void => reject(error);
+      server.once("error", onListenError);
+      server.listen(probePath, () => {
+        server.removeListener("error", onListenError);
+        resolve();
+      });
+    }).catch((error: unknown) => {
+      throw new Error(
+        `cross-UID fixture setup failed: preflight listener could not start: ${(error as Error).message}`,
+      );
+    });
     await chmod(probePath, 0o666);
+
     client = spawnCrossUidClient(fixturePath, probePath, "preflight\n");
-    const socket = await within(
-      accepted,
+    const outcome = await within(
+      Promise.race([
+        accepted.then((socket) => ({ socket })),
+        client.done.then(({ code, signal }) => ({ code, signal })),
+      ]),
       "cross-UID preflight connection was not observed; subordinate-ID mapping may be unavailable",
       CROSS_UID_SETUP_TIMEOUT_MS,
     ).catch((error: unknown) => {
@@ -225,14 +265,19 @@ const preflightForeignPeerUid = async (
         `cross-UID fixture setup failed: ${(error as Error).message}; ${client?.diagnostics()}`,
       );
     });
-    try {
-      return reader(socket);
-    } finally {
-      socket.destroy();
+
+    if (!("socket" in outcome)) {
+      throw new Error(
+        `cross-UID fixture setup failed: client exited before the preflight connection (code ${outcome.code}, signal ${outcome.signal}); ${client.diagnostics()}`,
+      );
     }
+    return reader(outcome.socket);
   } finally {
+    for (const socket of acceptedSockets.splice(0)) socket.destroy();
     if (client !== undefined) await client.reap().catch(() => {});
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await closePreflightServer(server);
+    // A late accepted connection can only arrive before close completes.
+    for (const socket of acceptedSockets.splice(0)) socket.destroy();
   }
 };
 
