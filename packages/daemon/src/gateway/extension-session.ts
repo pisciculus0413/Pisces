@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import {
   type EntryName,
   PiscesError,
@@ -55,6 +56,35 @@ export async function prepareBinding(
   }
 }
 
+async function workspaceResolves(workspace: string): Promise<boolean> {
+  try {
+    await realpath(workspace);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Prepare for an already-persisted session, whose workspace may have disappeared since it was
+ * created. The binding reports an unresolvable workspace with its generic configuration error,
+ * so that one case is split out into the existing safe workspace code; every other failure keeps
+ * the fixed configuration error. History for such a session stays unavailable until the
+ * workspace returns (not degraded here).
+ */
+export async function preparePersistedBinding(
+  extensions: Extensions,
+  workspace: string,
+): Promise<ExtensionBinding> {
+  try {
+    return await extensions.prepare(workspace);
+  } catch {
+    if (!(await workspaceResolves(workspace)))
+      throw new PiscesError("session.invalid_workspace", "Invalid workspace");
+    serviceFailure();
+  }
+}
+
 function resolveNames(names: readonly EntryName[]): EntryName[] {
   const seen = new Set<string>();
   for (const name of names) {
@@ -104,6 +134,17 @@ export async function prepareExtensionSession(
     model,
     extensions: resolveNames(params.extensions ?? binding.config.extensions ?? []),
   };
+}
+
+/**
+ * Narrows the published `string | undefined` pair: `prepareExtensionSession` throws
+ * `session.model_required` instead of resolving a lone provider or model.
+ */
+export function resolvedModelPair(prepared: PreparedExtensionSession): {
+  provider: string;
+  model: string;
+} {
+  return { provider: prepared.provider as string, model: prepared.model as string };
 }
 
 /** Validates and enriches one batch against a frozen binding, atomically and in memory. */

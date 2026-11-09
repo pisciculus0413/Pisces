@@ -1,5 +1,3 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { EngineEvent, JsonValue, QueueEntryInput, SessionId } from "@pisces/core";
 import { afterEach, expect, test } from "vitest";
 import type { QueueEnqueueResult } from "../src/gateway/protocol.js";
@@ -126,12 +124,6 @@ test("rejects client control entries", async () => {
 test("keeps rejecting client declarations without an extensions service", async () => {
   const h = await openHarness();
   const { meta } = await h.seed([draftUser("seed")]);
-  await mkdir(join(h.dataDir, ".pisces"), { recursive: true });
-  await writeFile(
-    join(h.dataDir, ".pisces", "config.json"),
-    JSON.stringify({ extensions: ["pkg#tool"], defaultProvider: "p", defaultModel: "m" }),
-    "utf8",
-  );
   const entry = {
     kind: "control",
     role: "declaration",

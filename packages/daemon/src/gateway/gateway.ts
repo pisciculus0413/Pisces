@@ -41,8 +41,9 @@ import type { ActiveTurnStore } from "./active-turn.js";
 import {
   enrichForBinding,
   initialDeclarationEntries,
-  prepareBinding,
   prepareExtensionSession,
+  preparePersistedBinding,
+  resolvedModelPair,
 } from "./extension-session.js";
 import type {
   CreateSessionParams,
@@ -375,7 +376,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
     const binding =
       deps.extensions === undefined
         ? undefined
-        : await prepareBinding(deps.extensions, meta.workspace);
+        : await preparePersistedBinding(deps.extensions, meta.workspace);
     const runtime = createRuntime(meta, true, binding);
     runtimes.set(sessionId, runtime);
     return runtime;
@@ -391,9 +392,8 @@ export function createGateway(deps: GatewayDeps): Gateway {
       params,
       deps.validateWorkspace ?? defaultValidateWorkspace,
     );
-    if (prepared.provider === undefined || prepared.model === undefined)
-      throw new PiscesError("session.model_required", "Provider and model are required");
-    if (!deps.providers.select(prepared.provider, prepared.model))
+    const { provider, model } = resolvedModelPair(prepared);
+    if (!deps.providers.select(provider, model))
       throw new PiscesError("session.invalid_model", "Invalid model");
 
     const prompts = params.systemPrompt ?? [];
@@ -409,8 +409,8 @@ export function createGateway(deps: GatewayDeps): Gateway {
     const sessionId = newSessionId();
     const meta: SessionMeta = {
       id: sessionId,
-      model: prepared.model,
-      provider: prepared.provider,
+      model,
+      provider,
       workspace: prepared.workspace,
       createdAt: now(),
       schemaVersion: 1,

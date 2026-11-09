@@ -13,6 +13,7 @@ import {
   type JsonValue,
   type LlmAdapter,
   type NodeId,
+  PiscesError,
   type ProviderManagement,
   type QueueEntry,
   type QueueEntryInput,
@@ -250,6 +251,20 @@ function agent(value: string): QueueEntryInput {
     source: "user",
     content: [{ type: "text", text: value }],
   };
+}
+
+const ENCODER = new TextEncoder();
+
+// The queue payload without the id/createdAt that Core adds server-side.
+function stripServerFields(entry: QueueEntry): Partial<QueueEntry> {
+  const copy: Partial<QueueEntry> = structuredClone(entry);
+  delete copy.id;
+  delete copy.createdAt;
+  return copy;
+}
+
+function wireBytes(value: unknown): number {
+  return ENCODER.encode(JSON.stringify(value)).length;
 }
 
 function queueUpdates(harness: ExtHarness): EngineEvent[] {
@@ -537,6 +552,36 @@ describe("session.create in configuration mode", () => {
     expect(follow.error?.code).toBe("session.not_found");
   });
 
+  test("fails atomically when the initial declaration exceeds the queue budget", async () => {
+    const ws = await workspaceDir("create-too-large");
+    const sentinel = join(root, "create-too-large.log");
+    const tool = await addTool(ws, sentinel, "x".repeat(300_000));
+    await writeWorkspaceConfig(ws, {
+      extensions: [tool],
+      defaultProvider: "p",
+      defaultModel: "m",
+    });
+    const h = await openHarness({
+      extensions: createExtensions(options),
+      newSessionId: sequentialIds(),
+    });
+
+    const response = await createSession(h, { workspace: ws });
+
+    // The enriched declaration only fails inside Context.enqueue, after the runtime exists.
+    expect(response.error?.code).toBe("queue.entry_too_large");
+    expect(h.events).toEqual([]);
+    expect(await h.store.list()).toEqual([]);
+    const follow = await h.gateway.handle({
+      id: "read",
+      method: "session.read",
+      params: { sessionId: "s-1" } as unknown as JsonValue,
+    });
+    // A cached runtime would answer this read instead of consulting the empty store.
+    expect(follow.error?.code).toBe("session.not_found");
+    expect(await exists(sentinel)).toBe(false);
+  });
+
   test("two concurrent creates of one workspace keep independent frozen bindings", async () => {
     const ws = await workspaceDir("concurrent");
     const sentinel = join(root, "concurrent.log");
@@ -654,6 +699,48 @@ describe("session lifecycle in configuration mode", () => {
     await waitFor(() => h.events.some((event) => event.type === "turn.ended"), "turn completion");
   });
 
+  test("keeps a persisted session readable only while its workspace resolves", async () => {
+    const ws = await workspaceDir("gone-workspace");
+    await addTool(ws, join(root, "gone-workspace.log"));
+    await writeWorkspaceConfig(ws, { extensions: [RUN], defaultProvider: "p", defaultModel: "m" });
+    const canonical = await realpath(ws);
+    const h = await openHarness({
+      extensions: createExtensions(options),
+      newSessionId: sequentialIds(),
+    });
+    const meta = await seed(
+      h,
+      [
+        {
+          kind: "agent",
+          role: "user",
+          source: "user",
+          content: [{ type: "text", text: "hello" }],
+        },
+      ],
+      { id: "s-gone" as SessionId, workspace: canonical },
+    );
+    await rm(ws, { recursive: true, force: true });
+
+    const response = await h.gateway.handle({
+      id: "read",
+      method: "session.read",
+      params: { sessionId: meta.id } as unknown as JsonValue,
+    });
+
+    // The binding cannot resolve the workspace, so the gateway reports the existing safe
+    // workspace code rather than the generic configuration error or a degrading read.
+    expect(response.error).toEqual({
+      code: "session.invalid_workspace",
+      message: "Invalid workspace",
+    });
+    const wire = JSON.stringify(response);
+    expect(wire).not.toContain(canonical);
+    expect(wire).not.toContain("ENOENT");
+    expect(wire).not.toContain("Invalid extension configuration");
+    expect(h.events).toEqual([]);
+  });
+
   test("prepares a persisted session exactly once, under the lock and without imports", async () => {
     const ws = await workspaceDir("lock-prepare");
     const sentinel = join(root, "lock-prepare.log");
@@ -754,32 +841,48 @@ describe("session lifecycle in configuration mode", () => {
     expect(await exists(sentinel)).toBe(true);
   });
 
-  test("rejects an enriched declaration over 256 KiB atomically", async () => {
+  test("counts server ids and timestamps when rejecting an entry over 256 KiB", async () => {
     const ws = await workspaceDir("budget-entry");
     const sentinel = join(root, "budget-entry.log");
-    const tool = await addTool(ws, sentinel, "x".repeat(300_000));
+    const metaPath = join(ws, ".pisces", "extensions", "demo", "tools", "run.ts.meta.json");
+    const tool = await addTool(ws, sentinel, "x".repeat(200_000));
     await writeWorkspaceConfig(ws, { extensions: [], defaultProvider: "p", defaultModel: "m" });
     const h = await openHarness({
       extensions: createExtensions(options),
       newSessionId: sequentialIds(),
     });
-    const created = await createSession(h, { workspace: ws, extensions: [] });
-    const meta = created.result as unknown as SessionMeta;
-    await readSession(h, meta.id);
+
+    // Probe the exact entry Core stores, including the id and createdAt it assigns.
+    const probe = (await createSession(h, { workspace: ws, extensions: [] }))
+      .result as unknown as SessionMeta;
+    await readSession(h, probe.id);
+    expect((await enqueue(h, probe.id, [declaration({ toggle: [tool] })])).error).toBeUndefined();
+    const probed = (await readSession(h, probe.id)).queue[0] as QueueEntry;
+    const payload = wireBytes(stripServerFields(probed));
+    const overhead = wireBytes(probed) - payload;
+    expect(overhead).toBeGreaterThan(8);
+
+    // Grow the description until the payload alone sits just under 256 KiB; the server
+    // metadata above then pushes the stored entry over the limit.
+    const target = 262144 - 4;
+    await writeJson(metaPath, { description: "x".repeat(200_000 + target - payload) });
+    const created = (await createSession(h, { workspace: ws, extensions: [] }))
+      .result as unknown as SessionMeta;
+    await readSession(h, created.id);
     const before = queueUpdates(h).length;
 
-    const tooLarge = await enqueue(h, meta.id, [declaration({ toggle: [tool] })]);
+    const tooLarge = await enqueue(h, created.id, [declaration({ toggle: [tool] })]);
 
     expect(tooLarge.error?.code).toBe("queue.entry_too_large");
     expect(queueUpdates(h)).toHaveLength(before);
-    expect((await readSession(h, meta.id)).queue).toEqual([]);
+    expect((await readSession(h, created.id)).queue).toEqual([]);
 
-    const small = await enqueue(h, meta.id, [agent("still works")]);
+    const small = await enqueue(h, created.id, [agent("still works")]);
     expect(small.error).toBeUndefined();
     expect(await exists(sentinel)).toBe(false);
   });
 
-  test("rejects a whole batch over 1 MiB atomically", async () => {
+  test("counts server ids and timestamps when rejecting a batch over 1 MiB", async () => {
     const ws = await workspaceDir("budget-queue");
     await addTool(ws, join(root, "budget-queue.log"));
     await writeWorkspaceConfig(ws, { extensions: [], defaultProvider: "p", defaultModel: "m" });
@@ -787,20 +890,36 @@ describe("session lifecycle in configuration mode", () => {
       extensions: createExtensions(options),
       newSessionId: sequentialIds(),
     });
-    const created = await createSession(h, { workspace: ws, extensions: [] });
-    const meta = created.result as unknown as SessionMeta;
-    await readSession(h, meta.id);
-    const before = queueUpdates(h).length;
-    const big = "b".repeat(250_000);
-
-    const batch = await enqueue(h, meta.id, [
+    const big = "b".repeat(200_000);
+    const batch = (last: string): QueueEntryInput[] => [
       declaration({ toggle: [RUN] }),
-      ...[big, big, big, big, big].map((text) => agent(text)),
-    ]);
+      ...[big, big, big, big, last].map((text) => agent(text)),
+    ];
 
-    expect(batch.error?.code).toBe("queue.too_large");
+    // Probe a batch that fits, then measure its payload without server metadata.
+    const probe = (await createSession(h, { workspace: ws, extensions: [] }))
+      .result as unknown as SessionMeta;
+    await readSession(h, probe.id);
+    expect((await enqueue(h, probe.id, batch(big))).error).toBeUndefined();
+    const probed = (await readSession(h, probe.id)).queue;
+    expect(probed).toHaveLength(6);
+    const payload = wireBytes(probed.map(stripServerFields));
+    expect(wireBytes(probed) - payload).toBeGreaterThan(8);
+
+    const target = 1048576 - 4;
+    const grownLength = 200_000 + target - payload;
+    // The batch limit must fire, not a single-entry limit.
+    expect(grownLength).toBeLessThan(262144);
+    const created = (await createSession(h, { workspace: ws, extensions: [] }))
+      .result as unknown as SessionMeta;
+    await readSession(h, created.id);
+    const before = queueUpdates(h).length;
+
+    const batchResult = await enqueue(h, created.id, batch("b".repeat(grownLength)));
+
+    expect(batchResult.error?.code).toBe("queue.too_large");
     expect(queueUpdates(h)).toHaveLength(before);
-    expect((await readSession(h, meta.id)).queue).toEqual([]);
+    expect((await readSession(h, created.id)).queue).toEqual([]);
   });
 
   test("enriches declarations in one batch and keeps other controls rejected", async () => {
@@ -934,10 +1053,27 @@ describe("daemon safety boundaries", () => {
       prepare: (workspace) => real.prepare(workspace),
     };
 
-    for (const broken of [leakingPrepare, leakingGlobal]) {
+    const leakingPisces: Extensions = {
+      readGlobalConfig: () => real.readGlobalConfig(),
+      prepare() {
+        throw new PiscesError("extensions.invalid", "loader leaked /etc/passwd", {
+          data: { path: "/etc/passwd" },
+        });
+      },
+    };
+    const leakingSafeCode: Extensions = {
+      readGlobalConfig: () => real.readGlobalConfig(),
+      prepare() {
+        throw new PiscesError("config.invalid", "conflict at /etc/passwd");
+      },
+    };
+
+    for (const broken of [leakingPrepare, leakingGlobal, leakingPisces, leakingSafeCode]) {
       const h = await openHarness({ extensions: broken, newSessionId: sequentialIds() });
       const response = await createSession(h, { workspace: ws });
+      // Only the fixed code/message reaches the wire, even for loader-built PiscesErrors.
       expect(response.error).toEqual({ code: SAFE_CODE, message: SAFE_MESSAGE });
+      expect(JSON.stringify(response)).not.toContain("/etc/passwd");
       expect(queueUpdates(h)).toEqual([]);
       expect(await h.store.list()).toEqual([]);
     }
