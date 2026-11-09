@@ -49,6 +49,9 @@ const socketPathTooLong = (): PiscesError =>
 const isNotFound = (error: unknown): boolean =>
   typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT";
 
+const isAlreadyExists = (error: unknown): boolean =>
+  typeof error === "object" && error !== null && (error as { code?: unknown }).code === "EEXIST";
+
 const effectiveUid = (): number | undefined => process.geteuid?.();
 
 const directoryStat = async (path: string): Promise<Stats | undefined> => {
@@ -86,8 +89,11 @@ const ensureRunDirectory = async (path: string, uid: number): Promise<void> => {
   if (stat === undefined) {
     try {
       await mkdir(path, { mode: 0o700 });
-    } catch {
-      throw insecureDirectory();
+    } catch (error) {
+      // EEXIST only means a concurrent preparer reached the path after our
+      // absence observation; safety is decided by the fresh stat below. Any
+      // other mkdir failure remains closed.
+      if (!isAlreadyExists(error)) throw insecureDirectory();
     }
     stat = await directoryStat(path);
   }

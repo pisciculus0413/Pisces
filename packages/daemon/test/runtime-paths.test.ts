@@ -76,6 +76,59 @@ const assertMissing = async (path: string): Promise<void> => {
   await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
 };
 
+const OBSERVATION_TIMEOUT_MS = 5000;
+
+/** Bound a synchronization wait so a missed arrival fails instead of hanging. */
+const boundedWait = async (wait: Promise<void>, label: string): Promise<void> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} did not settle within ${OBSERVATION_TIMEOUT_MS}ms`)),
+      OBSERVATION_TIMEOUT_MS,
+    );
+  });
+  try {
+    await Promise.race([wait, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
+ * Runs the real preparation flow and inserts an entry at the run path after
+ * the first real `lstat` observed it missing, before the actual `mkdir`.
+ */
+const prepareWithRunInsertion = async (
+  dataDir: string,
+  runDir: string,
+  insert: () => Promise<void>,
+): Promise<unknown> => {
+  const realLstat = runtimePathsFs.lstat;
+  let inserted = false;
+  runtimePathsFs.lstat = async (path) => {
+    try {
+      return await realLstat(path);
+    } catch (error) {
+      const missing =
+        path === runDir &&
+        typeof error === "object" &&
+        error !== null &&
+        (error as { code?: unknown }).code === "ENOENT";
+      if (missing && !inserted) {
+        inserted = true;
+        await insert();
+      }
+      throw error;
+    }
+  };
+  return prepareRuntimePaths(dataDir).then(
+    () => {
+      throw new Error("preparation accepted the inserted run path");
+    },
+    (error: unknown) => error,
+  );
+};
+
 test("creates private data and run directories below a world-writable ancestor", async () => {
   const dataDir = join(base, "data");
   const paths = await prepareRuntimePaths(dataDir);
@@ -140,6 +193,90 @@ test("rejects a run directory whose mode is not exactly 0700 without changing it
     await expect(prepareRuntimePaths(dataDir)).rejects.toMatchObject({ code: INSECURE });
     expect((await lstat(runDir)).mode & 0o7777).toBe(mode);
   }
+});
+
+test("accepts a run directory created concurrently by another preparer", async () => {
+  const dataDir = join(base, "data");
+  const runDir = join(dataDir, "run");
+  const realLstat = runtimePathsFs.lstat;
+  let absentObservations = 0;
+  let openGate: (() => void) | undefined;
+  const bothObservedAbsent = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+
+  runtimePathsFs.lstat = async (path) => {
+    try {
+      return await realLstat(path);
+    } catch (error) {
+      const missing =
+        path === runDir &&
+        typeof error === "object" &&
+        error !== null &&
+        (error as { code?: unknown }).code === "ENOENT";
+      if (!missing) throw error;
+      absentObservations += 1;
+      if (absentObservations === 2) openGate?.();
+      await boundedWait(bothObservedAbsent, "concurrent absent observation");
+      throw error;
+    }
+  };
+
+  const settled = await Promise.allSettled([
+    prepareRuntimePaths(dataDir),
+    prepareRuntimePaths(dataDir),
+  ]);
+  expect(absentObservations).toBe(2);
+  expect(settled.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"]);
+  const prepared = settled.map(
+    (result) => (result as PromiseFulfilledResult<{ runDir: string }>).value,
+  );
+  expect(prepared[0]?.runDir).toBe(runDir);
+  expect(prepared[1]).toEqual(prepared[0]);
+
+  const final = await lstat(runDir);
+  expect(final.isSymbolicLink()).toBe(false);
+  expect(final.isDirectory()).toBe(true);
+  expect(final.uid).toBe(process.geteuid?.());
+  expect(final.mode & 0o7777).toBe(0o700);
+});
+
+test("rejects a symlink inserted after the run directory was observed missing", async () => {
+  const dataDir = join(base, "data");
+  const runDir = join(dataDir, "run");
+  const elsewhere = join(base, "elsewhere");
+  await mkdir(elsewhere, { mode: 0o700 });
+
+  const error = await prepareWithRunInsertion(dataDir, runDir, () => symlink(elsewhere, runDir));
+  expect(error).toMatchObject({ code: INSECURE });
+  expect((await lstat(runDir)).isSymbolicLink()).toBe(true);
+  expect((await lstat(elsewhere)).isDirectory()).toBe(true);
+  expect(await readdir(elsewhere)).toEqual([]);
+});
+
+test("rejects a file inserted after the run directory was observed missing", async () => {
+  const dataDir = join(base, "data");
+  const runDir = join(dataDir, "run");
+
+  const error = await prepareWithRunInsertion(dataDir, runDir, () => writeFile(runDir, "keep me"));
+  expect(error).toMatchObject({ code: INSECURE });
+  const inserted = await lstat(runDir);
+  expect(inserted.isFile()).toBe(true);
+  expect(inserted.size).toBe(7);
+});
+
+test("rejects a non-0700 directory inserted after the run directory was observed missing", async () => {
+  const dataDir = join(base, "data");
+  const runDir = join(dataDir, "run");
+
+  const error = await prepareWithRunInsertion(dataDir, runDir, async () => {
+    await mkdir(runDir, { mode: 0o700 });
+    await chmod(runDir, 0o750);
+  });
+  expect(error).toMatchObject({ code: INSECURE });
+  const inserted = await lstat(runDir);
+  expect(inserted.isDirectory()).toBe(true);
+  expect(inserted.mode & 0o7777).toBe(0o750);
 });
 
 test("accepts a socket path of 107 bytes and refuses 108 bytes before creating it", async () => {
