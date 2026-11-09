@@ -335,6 +335,41 @@ test("rejects a known cross-kind reopen before producing any snapshot", async ()
   expect(evaluation.contentSelection).toEqual([RUN]);
 });
 
+test("a persisted closing declaration cannot legalise a later reopen under a new kind", async () => {
+  const binding = await addDemoPackage(join(root, "content-close"), ["tool"]);
+  expect(binding.entries.kind(RUN)).toBe("tool");
+  const view = replaySelection([
+    systemNode(RUN, "historical body"),
+    declarationNode({ toggle: [RUN] }),
+  ]);
+  expect(view.selection).toEqual([RUN]);
+  expect(view.contentNames).toEqual([RUN]);
+  expect(view.definitions).toEqual([]);
+
+  const closed = enrichQueueEntries(binding, view, [], [declaration({ toggle: [RUN] })]);
+  const out = parsed(closed[0] as QueueEntryInput);
+  expect(out.toggle).toEqual([RUN]);
+  expect(out.definitions ?? []).toEqual([]);
+
+  // Context.assemble persists the enriched declaration verbatim: replaying that
+  // branch must not turn the discarded new-kind snapshot into future evidence.
+  const persisted = replaySelection([
+    systemNode(RUN, "historical body"),
+    declarationNode({ toggle: [RUN] }),
+    declarationNode(out),
+  ]);
+  expect(persisted.contentNames).toEqual([RUN]);
+  expect(persisted.definitions).toEqual([]);
+  expect(() =>
+    enrichQueueEntries(binding, persisted, [], [declaration({ toggle: [RUN] })]),
+  ).toThrowError(
+    expect.objectContaining({
+      code: "queue.invalid_control",
+      message: "Declaration changes a known entry kind",
+    }),
+  );
+});
+
 test("rejects every forged or malformed declaration as one atomic batch", async () => {
   const binding = await addDemoPackage(join(root, "rejects"), ["tool", "wrapper", "context"]);
   const view = replaySelection([]);

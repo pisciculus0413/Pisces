@@ -119,6 +119,8 @@ function reviewedSnapshot(
   if (current === "tool" || current === "wrapper") {
     // A changed kind keeps the reviewed old snapshot; it never adopts the new type.
     if (historical !== undefined && historical.kind !== current) return structuredClone(historical);
+    // Content-only evidence on a closing toggle keeps old evidence: attach no new-type snapshot.
+    if (historical === undefined && evidence === "content" && !selected.has(name)) return undefined;
     const frozen = binding.inventory.entries.find((entry) => entry.name === name)?.definition;
     if (frozen === undefined || frozen.name !== name || frozen.kind !== current)
       fail("queue.invalid_control", MISSING_DEFINITION);
@@ -130,7 +132,8 @@ function reviewedSnapshot(
 /**
  * Atomically validates one batch of agent inputs and client toggle declarations.
  * Synchronous and side-effect free: no ids, timestamps, disk, or extension modules.
- * Every available tool/wrapper toggle carries its full snapshot, open or closed.
+ * Every available tool/wrapper toggle carries its full snapshot, open or closed,
+ * except a closing toggle whose only evidence is content: no new-kind snapshot.
  */
 export function enrichQueueEntries(
   binding: ExtensionBinding,

@@ -141,14 +141,16 @@ demo/
 - `toggle` 是异或：每个名称出现一次翻转一次状态；名称不得重复（`queue.duplicate_name`）。
 - 客户端只提交 `toggle`。带 `definitions` 或其它任何键的客户端声明以 `queue.invalid_control`
   拒绝；内联定义永远不会被采信。
-- daemon 在入队时做纯同步富化，为**每个** toggle 名称附加完整定义快照：
-  - 打开或关闭都携带快照（all-toggle snapshots）；
+- daemon 在入队时做纯同步富化，为 toggle 中的 tool/wrapper 名称附加完整的冻结定义快照：
+  - 打开或关闭都携带快照（all-toggle snapshots）；例外是仅有内容证据（历史正文、无历史定义）
+    且该声明关闭名称：保留旧证据，不附加任何新类型快照；
   - `tool`/`wrapper` 的快照字段为 `name`、`kind`、`description`、`parameters`、
     `definitionHash`，包装器另含 `configHash`；
   - `skill`/`context` 没有定义快照。
 - 类型变化边界：若历史分支已记录某名称的类型证据，而当前清点类型不同：
   - 该声明仍让名称保持选中（重新打开）→ 整批 `queue.invalid_control`，不覆盖旧定义；
-  - 该声明关闭名称 → 允许，保留历史证据、丢弃新类型快照。
+  - 该声明关闭名称 → 允许，保留历史证据、丢弃新类型快照（不写入声明内容）；已持久化的
+    关闭声明不会成为后续证据，之后以新类型重新打开仍按 `queue.invalid_control` 拒绝。
 - 未知名称（当前清点没有、历史也没有）→ `queue.invalid_control`。
 - 未确认的声明不改变 `entries.snapshot.selection/effective`，也不进入装配请求；`turn.start`
   在写标记、确认与注册 turn 之前，按本次将执行的精确分支重新校验整批声明。

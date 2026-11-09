@@ -1696,7 +1696,7 @@ interface Inventory {
 - `entries.snapshot` 同时返回本会话 `effective` 列表：已固化名称、`definitionHash`、`configHash`、`stale`；内容条目的 effective 只有 name 与 stale。
 - 工具与包装器的声明只序列化 `wireName`、`description`、`parameters`；实现代码留在本地。
 - 技能内容作为系统消息进入装配；上下文来源片段按 `Context` 规则追加。
-- 声明采用 all-toggle 快照：每个 toggle（无论打开或关闭）都为 tool/wrapper 名称附带完整定义；类型变化在覆盖旧定义前检查，重新打开冲突类型按 `queue.invalid_control` 拒绝，关闭保留历史证据。
+- 声明采用 all-toggle 快照：每个 toggle（无论打开或关闭）上的 tool/wrapper 名称都附带完整定义；类型变化在覆盖旧定义前检查，重新打开冲突类型按 `queue.invalid_control` 拒绝，关闭保留历史证据且不附加新类型快照；已持久化的关闭声明不得让后续重新打开合法。
 - 历史分支已记录的内容条目（技能/上下文）在扩展被删除或改类型后仍可复用正文；工具/包装器的定义或配置哈希与当前清点不一致时标记 `stale`，不进 `LlmRequest.tools`、不参与包装，只能通过重新选择恢复。
 - `providers`、`clients` 不参与选择。
 - 扩展的安装、更新与移除由 npm、git 完成，不在本软件生命周期内。
