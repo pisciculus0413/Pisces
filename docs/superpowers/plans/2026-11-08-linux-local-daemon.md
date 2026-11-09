@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript ESM, Node >=22.19.0, plain C Node-API + pinned `node-gyp`, Linux `net`/`fs`, Vitest, Biome.
 
-**Spec:** `docs/superpowers/specs/2026-11-08-linux-local-daemon-design.md` (approved); contracts in `docs/2 Detailed Design Specification/2 Detailed Design Specification.md` §§2.6, 3.1–3.3, 3.4.5, 3.8–3.9, 5.1–5.3, 5.9 and `docs/2 Detailed Design Specification/P0 Decision Table.md` P0-08/09. Plan B ends at `58fec57`, approved design is `9b90781` on `dev-pi`; record the **actual plan-commit HEAD immediately before Task 1** as this stage's implementation diff baseline (never assume `9b90781`). This plan awaits user review; do not dispatch Task 1 before review confirmation.
+**Spec:** `docs/superpowers/specs/2026-11-08-linux-local-daemon-design.md` (approved); contracts in `docs/2 Detailed Design Specification/2 Detailed Design Specification.md` §§2.6, 3.1–3.3, 3.4.5, 3.8–3.9, 5.1–5.3, 5.9 and `docs/2 Detailed Design Specification/P0 Decision Table.md` P0-08/09. Plan B ends at `58fec57`, approved design is `9b90781` on `dev-pi`; record the **actual plan-commit HEAD immediately before Task 1** as this stage's implementation diff baseline (never assume `9b90781`). The user approved this plan before Task 1. Task 10 below is a user-approved correction to its missing real cross-UID OS test; see `docs/superpowers/specs/2026-11-08-cross-uid-regression-design.md`.
 
 ## Global Constraints
 
@@ -22,7 +22,7 @@
 
 1. An 8 MiB frame split across chunks (including split multibyte UTF-8) must never bypass the **byte** cap or allocate unbounded memory — Task 1 tests exact budget and malformed prefixes.
 2. A symlink/non-socket or live socket at startup, or a socket path replaced before shutdown, must never be unlinked by this process — Task 3 tests each path including dev/ino mismatch.
-3. A client sends bytes immediately on connect while credential extraction fails or UID differs: no parser/Gateway method may run or respond — Task 4 tests reject-before-read and real same-UID acceptance.
+3. A client sends bytes immediately on connect while credential extraction fails or UID differs: no parser/Gateway method may run or respond — Task 4 tests injected rejection and same-UID acceptance; Task 10 proves real, host-observed cross-UID rejection.
 4. A slow or broken subscriber while another session publishes near-budget events must not throw into EventBus, lose a committed write, or corrupt another client's frame stream — Tasks 5–6 test isolation, byte budget and overflow disconnect.
 5. `stop()` races a `turn.start` already admitted but queued behind the session lock: it must drain the request before snapshotting `cancelAll`, and retain lock if the turn survives cancellation — Task 8 gates the lock and asserts no false success.
 
@@ -130,3 +130,15 @@
 - [ ] Write failing doc/CI presence checks (targeted `rg` for new host API, `SO_PEERCRED`, stop-incomplete and Node matrix against relevant files; no prose-only runtime unit tests); confirm missing contracts before edits.
 - [ ] Add CI/docs using actual Task 1–8 interfaces; validate YAML parse if tool available, build native and run complete verification block. Document any unavailable CI matrix result without claiming it passed.
 - [ ] Explicitly stage only four task files, commit `docs: describe Linux daemon transport and build matrix`; prepare whole-stage diff from the actual pre-Task-1 plan-commit HEAD for independent final review.
+
+### Task 10: Real cross-UID credential regression (post-review correction)
+
+**Spec:** `docs/superpowers/specs/2026-11-08-cross-uid-regression-design.md` and amended original spec above.
+
+**Files:** Modify `packages/daemon/test/unix-transport.test.ts`, `docs/daemon-linux.md`; create `packages/daemon/test/fixtures/cross-uid-client.mjs` if a small Node-builtin-only child fixture simplifies bounded subprocess control. No production/auth/permission changes.
+
+**Interfaces:** The production `createUnixTransport({socketPath,onAuthenticatedSocket})` uses default native `peerUidFor` (`packages/daemon/src/transport/peer-credentials.ts`), not an injected reader. Run a child via `unshare --map-auto --user --setuid 1 --setgid 1` and `process.execPath`, using a disposable test-only traversable directory and connectable socket *after* the real listener's `0600` bind check. An independent host-side real `SO_PEERCRED` observation must see a UID unequal to `process.geteuid()`; if mapping/utility is absent or same-UID, fail the Linux test with an explicit setup error (never skip). The child writes immediate bytes; assert its connection is closed without authenticated handler invocation or returned protocol bytes. Afterwards prove same-UID client still reaches the handler. Bound spawned child and socket waits and reap on every path.
+
+- [ ] Write the real-socket test and optional builtin-only child fixture; build native and compiled TS before spawned test. Verify test sensitivity: because production auth already rejects, temporarily disable only the relevant UID gate **without committing**, run focused test and observe failure on handler-invocation/data assertion, restore source, verify focused test passes. Record this honestly as mutation RED, not an original unmet-feature RED; do not leave any production source diff.
+- [ ] Execute `node packages/daemon/native/build.mjs`, focused `node_modules/.bin/vitest run packages/daemon/test/unix-transport.test.ts`, then the complete global verification block (Vitest, both tsc, Biome, Core and protocol boundary scans). Update `docs/daemon-linux.md` to describe real cross-UID coverage and required `unshare --map-auto`/subordinate mapping; remote Node matrix still unverified.
+- [ ] Inspect `git status --short`/`git diff --check`, explicitly stage only Task 10's test/fixture/operator-note files, commit `fix(daemon): test real cross-UID Unix rejection`; hand the BASE..HEAD diff to an independent Task 10 reviewer before the final whole-stage review.
