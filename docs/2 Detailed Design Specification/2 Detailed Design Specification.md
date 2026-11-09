@@ -811,6 +811,7 @@ type ProtocolEvent =
 | 工具 | `tool.denied` | 工具拒绝执行 |
 | 工具 | `tool.wrapper_invalid` | 包装器修改了不可修改的声明字段 |
 | 工具 | `tools.wire_name_conflict` | 两个 EntryName 编码为同一 wireName |
+| 工作区 | `workspace.path_outside` | 路径越出规范化工作区根（含符号链接指向根外）；仅内部使用，从不发送到线上 |
 | 模板 | `template.not_found` | 模板不存在 |
 | 模板 | `template.invalid` | 模板解析失败 |
 | 模板 | `template.init_failed` | 初始化脚本失败 |
@@ -822,7 +823,7 @@ type ProtocolEvent =
 
 - 请求级错误通过 `Response.error` 返回。
 - 本阶段 `turn.cancel` 对未知或已注销 turn 返回 `{ cancelled: false }`，不产生 `turn.not_found`。
-- 内部错误码 `daemon.peer_credentials_unavailable`/`daemon.peer_credentials_failed`/`daemon.peer_credentials_invalid` 只在 daemon 内部使用，启动时归一化为 `daemon.native_unavailable`、`daemon.peercred_probe_failed` 或 `daemon.start_failed`，不发给客户端。
+- 内部错误码 `daemon.peer_credentials_unavailable`/`daemon.peer_credentials_failed`/`daemon.peer_credentials_invalid` 只在 daemon 内部使用，启动时归一化为 `daemon.native_unavailable`、`daemon.peercred_probe_failed` 或 `daemon.start_failed`，不发给客户端。`workspace.path_outside` 同样只在 daemon 内部使用：它由 `WorkspaceAccess` 抛出，经工具映射为 `tool.denied`/`tool.failed`（固定文案），或由装配映射为 `storage.io`/安全 turn 失败，不进 `Response.error`。
 - turn 进行中的供应商或工具错误通过 `turn.ended.error` 或工具结果回填，不伪造成请求错误。
 - `event.publish_failed` 表示同步事件 handler 失败；Context 与 driver 的事件发布适配器都保留原异常为 `cause`，不重试、不回滚已提交状态。driver 中通过 `turn.ended.reason="failed"` 与 `TurnResult.error` 结束 turn。
 - 错误消息不得包含凭据。Core 内部 `PiscesError.data` 可保存结构化原因或重试提示；本阶段 `Gateway` 的 `Response.error` 仅映射 `code` 与 `message`，不转发 `data`/`cause`。结构化线上错误详情仅为未来目标，不应依赖。
@@ -1737,11 +1738,13 @@ interface ProviderHostOptions {
 
 ### 5.7 `WorkspaceAccess` 与 `ExecHost`
 
+本节两个接口在核心层（`packages/core/src/exec/types.ts`）定义，服务层提供实现；均为**已实现**。二者由 `Gateway` 在 `turn.start` 时注入 `RunTurnInput`，再经 `Tools` 传给 `ToolInvocationContext.files`/`exec`。缺任一项时工具必须返回安全失败，不得改变读取与队列行为。
+
 #### 5.7.1 `WorkspaceAccess`
 
 ```ts
 interface WorkspaceAccess {
-  resolve(workspace: string, path: string): string;
+  resolve(path: string): string;
   ensureDirectory(path: string): Promise<void>;
   writeFile(path: string, content: string): Promise<void>;
   readFile(path: string): Promise<string>;
@@ -1749,37 +1752,41 @@ interface WorkspaceAccess {
 }
 ```
 
-- `resolve` 将相对路径限制在工作区内；拒绝绝对路径、`..` 越界与非法路径字符。
-- 不跟随工作区外的符号链接；不提供沙箱。
-- 模板初始化与文件创建都经该接口，核心层不接触文件系统。
-- 写入失败返回 `storage.io`；已写文件由调用方处置。
+- 实现在 `packages/daemon/src/workspace/access.ts`：`createWorkspaceAccess(root)`，`root` 是已规范化的绝对路径（Gateway 用 `realpath(workspace)` 求得）。`resolve` 只接收相对路径，不再接收 workspace 参数。
+- 规范化根：输入先按 `/` 折叠空段、`.` 与 `..`；绝对路径、空字符串、含 NUL、以及折叠时越过根的 `..` 一律抛 `PiscesError("workspace.path_outside", "Path is outside the workspace")`。
+- 包含性判定：目标存在时 `realpath` 后要求落在根内；目标不存在时取**最深的已存在祖先** `realpath`，追回折叠后的剩余段，再对根做 `relative` 判定。因此符号链接目标指向根外、或符号链接祖先指向根外都被拒绝；尚不存在的子目录（写入/建目录场景）仍被允许。不缓存任何结果。
+- `exists` 先解析再探测：根外探测同样抛 `workspace.path_outside`；`ENOENT` 映射为 `false`，其它 I/O 失败映射 `storage.io`。
+- `writeFile` 先 `ensureDirectory(dirname(resolve(path)))` 再写入；`ensureDirectory` 递归创建。所有 I/O 失败统一抛 `PiscesError("storage.io", "Workspace access failed")`，固定文案不含路径与原始 cause，不透传到线上。
+- 不提供删除、枚举、读取工作区外路径的能力；不提供沙箱：扩展代码可直接使用 `node:fs` 绕过该接口。
 
-#### 5.7.2 `ExecHost`
+#### 5.7.2 `ExecHost`（`Exec` 接口）
 
 ```ts
 interface ExecResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  timedOut?: boolean;
+  aborted?: boolean;
 }
 
-interface ExecHost {
-  run(
-    command: string,
-    args: string[],
-    options?: ExecOptions
-  ): Promise<ExecResult>;
+interface Exec {
+  run(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
 }
 ```
 
-`ExecOptions` 见 HLD §6.5。
+`ExecOptions` 见 HLD §6.5（`cwd`/`env`/`signal`/`timeoutMs`）。实现在 `packages/daemon/src/exec/exec-host.ts`：`createExecHost(options?)`，`options` 可覆盖默认超时与基础 `PATH`；`Gateway` 使用模块级单例注入每个新 turn。
 
-- 使用 `spawn` 直接执行 command/args，不经过 shell。
-- `cwd`、`env`、`timeoutMs`、`signal` 由调用方提供。
-- 超时或 abort 时终止子进程；已产生的 stdout/stderr 保留在结果中。
-- 结果包含退出码、stdout、stderr；非零退出不抛异常，由调用方判断。
-- 不继承 daemon 的敏感环境变量；只传递显式 `env` 与基础 PATH。
-- 不强制终止工具；工具通过 `ToolInvocationContext.signal` 协作中止。
+- 使用 `spawn` 直接执行 command/args，不经过 shell；`stdio` 为 `["ignore", "pipe", "pipe"]`，子进程 stdin 关闭。
+- 环境变量是白名单而非继承：子进程只看到显式 `env` 加基础 `PATH`（默认 `/usr/local/bin:/usr/bin:/bin`），不继承 `process.env`，因此不含凭据引用、socket 路径或 `HOME`。
+- 超时 `timeoutMs` 截断到 `1..600_000`（缺省或非有限值取 `120_000`）；超时或 abort 只发一次 `SIGKILL` 并置 `timedOut`/`aborted`，已收集的输出保留在结果中。结果在 `close` 时解析；若 `exit` 先到而孙进程仍持有管道，**1 秒**后销毁两个流并以已收集输出解析，退出码取 `exit` 的值（缺失时用 `1`）。
+- 每个流最多收集 `65_536` 字节，超出的部分丢弃并置对应的 `*Truncated`；截断后回退到 UTF-8 边界再解码，因此不会产生替换字符，且完整工具结果节点仍在 256 KiB 预算内。
+- 非零退出不抛异常，由调用方判断；启动失败（含命令不存在）拒绝为 `storage.io`，固定文案 `Command could not be started`。
+- 只 kill 直接子进程，不建进程组：孙进程可能在超时、turn 取消、甚至 daemon 被 `SIGKILL` 后继续运行，daemon 不监督孤儿进程。
+- 不强制终止工具：abort 来自 `ToolInvocationContext.signal`（turn 取消）或工具自行传入的 signal。
+- 不是沙箱：命令以 daemon 用户权限运行，可访问工作区外文件与网络。
 
 ### 5.8 `TemplateStore` 与 `ClientRegistry`
 

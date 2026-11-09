@@ -908,6 +908,8 @@ interface ToolInvocationContext {
   sessionId: string;
   workspace: string;
   signal: AbortSignal;      // 协作式中止；daemon 不强制终止工具
+  files?: WorkspaceAccess;  // 宿主注入；缺省表示工具必须安全失败
+  exec?: Exec;              // 宿主注入；缺省表示工具必须安全失败
 }
 
 type ToolFunction = (args: JsonValue, context: ToolInvocationContext) => Promise<ToolResult>;
@@ -930,6 +932,9 @@ class ToolDeniedError extends Error {
   }
 }
 ```
+
+- `files` 与 `exec` 由宿主（服务层 `Gateway` 在 `turn.start` 时）注入，扩展不得自行构造；契约与实现见 DDS §5.7。`files` 把相对路径限制在规范化工作区内并提供读写，`exec` 在超时、输出上限与环境变量白名单约束下执行子进程。任一能力缺失时，工具必须返回安全失败结果而不是抛错。
+- 两者都**不是沙箱**：`exec` 以 daemon 用户权限运行，扩展代码可直接访问文件系统与网络，绕过 `files` 的路径限制。
 
 - 扩展以 `ToolWrapper` 提供 hook 逻辑：包装器接收 `ToolDeclaration` 并返回新的 `ToolDeclaration`；包装后的 `execute` 可调用 `wrapped.execute`，before 与 after 的位置与配对由包装器自身决定。
 - 多个包装器之间的执行顺序不构成契约，包装器必须设计为执行顺序无关；若某个包装器对 hook 的先后顺序有要求，应在包装器内部自行处理，不能依赖其他包装器的存在或流水线的包装顺序。

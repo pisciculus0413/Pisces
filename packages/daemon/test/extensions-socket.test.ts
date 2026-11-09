@@ -1488,3 +1488,142 @@ test("stops cleanly and shows a stale definition until the entry is reselected",
   const reclaimed = await acquireDaemonLock(runtimePaths.lockPath);
   await reclaimed.release();
 });
+
+interface ShellCallArgs {
+  command: string;
+  cwd?: string;
+}
+
+/**
+ * Calls the built-in shell whenever the request declares it and the latest message is not a
+ * tool result, taking the arguments from the queue; otherwise finishes with text.
+ */
+function shellCallingAdapter(calls: ShellCallArgs[], final = "done"): LlmAdapter {
+  let pending: ShellCallArgs | undefined;
+  return {
+    dialect: "test",
+    buildRequest(request) {
+      const declaresShell = (request.tools ?? []).some((tool) => tool.name === SHELL);
+      const awaitingResult = request.messages.at(-1)?.role === "tool";
+      pending = declaresShell && !awaitingResult ? calls.shift() : undefined;
+      return { path: "/v1/chat/completions", body: JSON.stringify(request) };
+    },
+    parseChunk() {
+      const next = pending;
+      pending = undefined;
+      if (next !== undefined) {
+        return [
+          {
+            type: "toolCall" as const,
+            call: { id: "call_shell_1", name: SHELL, arguments: { ...next } },
+          },
+          { type: "stop" as const, reason: "toolCall" as const },
+        ];
+      }
+      return [
+        { type: "content" as const, delta: final },
+        { type: "stop" as const, reason: "stop" as const },
+      ];
+    },
+  };
+}
+
+const toolResultText = (block: ToolResultBlock): string =>
+  block.content.map((inner) => (inner.type === "text" ? inner.text : "")).join("");
+
+test("runs the built-in shell over a real socket with selection, output and cwd denial (k)", {
+  timeout: 20000,
+}, async () => {
+  const root = await tempRoot();
+  const workspace = await workspaceDir(root, "ws");
+  await writeWorkspaceConfig(workspace, {
+    defaultProvider: "p",
+    defaultModel: "m",
+    extensions: [],
+  });
+  const configDir = join(root, "config");
+  const record: CapturedRequest[] = [];
+  const calls: ShellCallArgs[] = [
+    { command: "printf socket-shell" },
+    { command: "printf escaped", cwd: "../outside" },
+  ];
+  const { client } = await openDaemon({
+    dataDir: join(root, "data"),
+    configDir,
+    adapter: shellCallingAdapter(calls),
+    record,
+  });
+
+  // The built-in shell comes from the module-derived builtin dir, not from workspace config.
+  const unselected = await createSession(client, { workspace, systemPrompt: ["plain"] });
+  const unselectedSnapshot = await snapshot(client, unselected.id);
+  expect(unselectedSnapshot.entries.map((entry) => entry.name)).toContain(SHELL);
+  expect(unselectedSnapshot.selection).toEqual([]);
+  await startTurn(client, unselected.id);
+  await turnIdle(client);
+  // No selection yet: the shell is in the inventory but never declared to the provider.
+  expect(record).toHaveLength(1);
+  expect(record[0]?.tools).toBeUndefined();
+  const unselectedRead = await readSession(client, unselected.id);
+  // The turn really ran to completion; it simply had no tool to declare or call.
+  expect(nodeTexts(unselectedRead)).toContain("done");
+  expect(toolResultBlocks(unselectedRead)).toEqual([]);
+
+  const created = await createSession(client, {
+    workspace,
+    extensions: [SHELL],
+    systemPrompt: ["run the shell"],
+  });
+  const before = await snapshot(client, created.id);
+  const shellEntry = before.entries.find((entry) => entry.name === SHELL);
+  expect(shellEntry).toMatchObject({ kind: "tool", description: expect.any(String) });
+  expect(shellEntry?.parameters).toEqual(expect.any(Object));
+  // The create-time declaration is queued, not a persisted selection.
+  expect(before.selection).toEqual([]);
+  expect(before.effective).toEqual([]);
+
+  // turn.start confirms the pending declaration; the selected shell is declared and invoked.
+  await startTurn(client, created.id);
+  await turnIdle(client);
+  const declared = [
+    { name: SHELL, description: shellEntry?.description, parameters: shellEntry?.parameters },
+  ];
+  expect(record[1]?.tools).toEqual(declared);
+  expect(
+    record.slice(1).every((request) => (request.tools ?? []).some((tool) => tool.name === SHELL)),
+  ).toBe(true);
+  const after = await snapshot(client, created.id);
+  expect(after.selection).toEqual([SHELL]);
+  expect(after.effective).toEqual([
+    { name: SHELL, definitionHash: shellEntry?.definitionHash, stale: false },
+  ]);
+
+  const executed = await readSession(client, created.id);
+  const results = toolResultBlocks(executed);
+  expect(results).toHaveLength(1);
+  expect(results[0]?.isError).toBeUndefined();
+  expect(results[0]?.code).toBeUndefined();
+  expect(toolResultText(results[0] as ToolResultBlock)).toContain("exit code: 0");
+  expect(toolResultText(results[0] as ToolResultBlock)).toContain("socket-shell");
+  expect(nodeTexts(executed)).toContain("done");
+
+  // A cwd escaping the workspace fails the tool safely: no throw, no path in the message.
+  const escaping = await client.request("turn.start", { sessionId: created.id });
+  expect(escaping.error).toBeUndefined();
+  await turnIdle(client);
+  const deniedRead = await readSession(client, created.id);
+  const denied = toolResultBlocks(deniedRead).at(-1);
+  expect(denied).toMatchObject({ isError: true, code: "tool.denied" });
+  expect(denied?.content).toEqual([
+    { type: "text", text: "Working directory is outside the workspace" },
+  ]);
+  // The fixed message echoes neither the argument nor a filesystem path.
+  expect(toolResultText(denied as ToolResultBlock)).not.toContain(workspace);
+  expect(toolResultText(denied as ToolResultBlock)).not.toContain("cwd");
+  // The failed tool does not end the turn and the session still serves requests.
+  expect(nodeTexts(deniedRead)).toContain("done");
+  expect((await readSession(client, created.id)).records.length).toBeGreaterThan(
+    executed.records.length,
+  );
+  expect((await snapshot(client, created.id)).selection).toEqual([SHELL]);
+});

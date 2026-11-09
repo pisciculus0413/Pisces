@@ -1,8 +1,9 @@
 # 扩展：发现、选择与执行契约
 
 本文件描述当前已实现并已被真实 Unix socket 端到端验收的扩展契约。它只覆盖本阶段交付的部分：
-目录发现、清点、声明式选择、冻结定义、按需装载、`entries.snapshot` 与队列路由。**未交付**的能力在
-文末“本阶段未交付”一节明确列出。权威设计见
+目录发现、清点、声明式选择、冻结定义、按需装载、`entries.snapshot`、队列路由，以及仓库自带的
+内置 shell 工具与宿主注入的 `files`/`exec` 能力。**未交付**的能力在文末“本阶段未交付”一节明确
+列出。权威设计见
 `docs/2 Detailed Design Specification/2 Detailed Design Specification.md` §5.5 与
 `docs/1 High-Level Design/1 High-Level Design.md` §5.4、§6.6。
 
@@ -217,6 +218,51 @@ demo/
   上下文来源失败让本次装配失败（线上为安全 turn 失败），不写半截批次。
 - 一个包、条目或模块的失败只影响自身，不阻断 daemon 启动或其它健康条目。
 
+### 6.1 内置 shell（`@pisces/builtin-shell#shell`）
+
+仓库自带一个工具扩展 `extensions/builtin/shell`（包名 `@pisces/builtin-shell`），条目名恰好是
+`@pisces/builtin-shell#shell`。**默认不启用**：它只在清点（`entries.snapshot.entries`）里可见，
+除非在工作区配置或 `session.create` 中显式选择，否则不会进入 `LlmRequest.tools`，也不会被装载。
+
+选择方式与普通工具完全相同（工作区 `.pisces/config.json`）：
+
+```json
+{ "extensions": ["@pisces/builtin-shell#shell"] }
+```
+
+或在 `session.create` 中传入 `"extensions": ["@pisces/builtin-shell#shell"]`。选择在声明被确认前
+不生效；确认后该条目以其冻结定义出现在每次请求的 `tools` 中。
+
+参数（draft-07，`required: ["command"]`）：
+
+| 参数 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| `command` | string | 1..65536 字符 | 直接传给 `/bin/sh -c` 的命令行 |
+| `cwd` | string | 省略即工作区根 | 相对工作区的起始目录，经 `WorkspaceAccess.resolve` 解析 |
+| `timeoutMs` | integer | 1..600000 | 超时后 kill 命令；省略用宿主默认值（120000） |
+
+行为与输出：
+
+- 以 `/bin/sh -c <command>` 执行，`cwd` 默认是工作区根；`cwd` 越出工作区返回
+  `isError: true`、`code: "tool.denied"` 与固定文案 `Working directory is outside the workspace`，
+  turn 继续执行。
+- 结果内容依次是 `exit code: N`、stdout、stderr 三个文本块；某个流被截断时该块追加
+  `[truncated]`，超时追加 `[timed out]`，turn 取消追加 `[aborted]`。退出码非 0 或超时/取消时
+  `isError: true`，但不终止 turn。
+- 每个流最多返回 64 KiB，按 UTF-8 边界截断（不会出现替换字符）；完整结果节点仍在 256 KiB 预算内。
+- 子进程不继承 daemon 环境变量：只看到显式 `env` 与基础 `PATH`（`/usr/local/bin:/usr/bin:/bin`），
+  stdin 关闭；daemon 只 kill 直接子进程，不建进程组。
+- 安全失败：参数非法 → `tool.failed` + `Invalid shell arguments`；上下文缺少 `files`/`exec` →
+  `tool.failed` + `Execution host is unavailable`；无法启动命令 → `tool.failed` + `Shell command could not be run`。
+  这些文案固定，不回显参数或路径。
+
+**没有沙箱**：命令以 daemon 用户身份运行，可以读写工作区之外的文件、访问网络、spawn 任意进程；
+`cwd` 限制只约束起始目录，不约束命令内容。需要隔离时应在容器/独立用户中运行 daemon。
+
+残留风险：daemon 只 kill 直接子进程。命令启动的孙进程可能在超时、turn 取消、甚至 daemon 被
+`SIGKILL` 后继续运行；daemon 不监督孤儿进程。`exit` 之后仍持有管道的孙进程最多让该次调用多等
+1 秒，随后两个流被丢弃。
+
 ## 7. stale 与重启
 
 - 每个会话在创建（或重启后首次加载）时冻结自己的绑定；已有会话的绑定不重建，新建会话会重新扫描。
@@ -251,6 +297,7 @@ demo/
 | `turn.active` | 会话已有活跃/未清理 turn |
 | `turn.empty` | 装配后没有可见消息（例如只有零片段来源与声明） |
 | `tool.wrapper_invalid` | 包装器改动声明字段、加载失败或模块 `config` 与 sidecar 不一致 |
+| `tool.failed` / `tool.denied` | 工具执行失败 / 工具拒绝执行（含内置 shell 的 `cwd` 越出工作区）；固定文案，不终止 turn |
 
 问题码（不是协议错误，只出现在 `ExtensionBinding.issues`，当前没有协议方法导出它们）：
 `extensions.invalid`、`extensions.duplicate`、`extensions.unsupported_contribution`。
@@ -398,7 +445,14 @@ await host.stop();
 断线不取消 turn、取消不回滚已提交节点、超限快照后连接可用、协议转录不含配置/路径/原因/源码，
 以及真实跨 UID 拒绝与停机/重启 stale 可见性。
 
-- 本机结果：该文件 11 个用例全部通过（`pnpm exec vitest run packages/daemon/test/extensions-socket.test.ts`）。
+内置 shell 也在同一文件里过真实 socket 验收（用例 (k)）：未选择时内置条目只在清点里、不进入
+`LlmRequest.tools`；确认声明后条目按其冻结定义出现在 `tools` 中，`/bin/sh -c 'printf socket-shell'`
+真实执行并在会话里落下含 `exit code: 0` 与 `socket-shell` 的工具节点；`cwd: "../outside"`
+回填 `tool.denied` 与固定文案，不抛错、不终止 turn。工具自身的参数校验、截断标记与超时由
+`packages/daemon/test/shell-tool.test.ts` 覆盖，`exec` 与路径包含分别由
+`packages/daemon/test/exec-host.test.ts`、`packages/daemon/test/workspace-access.test.ts` 覆盖。
+
+- 本机结果：该文件 12 个用例全部通过（`pnpm exec vitest run packages/daemon/test/extensions-socket.test.ts`）。
 - 平台：Linux x86_64，Node v26.13.0，pnpm 12.8.1。
 - 跨 UID 回归使用 `unshare --map-auto` + `packages/daemon/test/fixtures/cross-uid-client.mjs`；
   缺少 subordinate-ID 映射时该用例**失败**而不是跳过。
