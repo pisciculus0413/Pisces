@@ -10,6 +10,7 @@ import {
   PiscesError,
 } from "@pisces/core";
 import { glob, isDynamicPattern } from "tinyglobby";
+import { readGlobalConfig, readWorkspaceConfig } from "./config.js";
 import { sha256 } from "./hash.js";
 import {
   compileWrapperSchema,
@@ -39,8 +40,12 @@ import type {
   DiscoveryResult,
   ExtensionConfig,
   ExtensionIssue,
+  ExtensionListing,
+  ExtensionListingEntry,
+  ExtensionOrigin,
   ExtensionsOptions,
   Inventory,
+  ListExtensionsOptions,
   WrapperConfigSpec,
 } from "./types.js";
 
@@ -58,7 +63,6 @@ const MANIFEST_KEYS: Record<EntryKind, "tools" | "wrappers" | "skills" | "contex
   skill: "skills",
   context: "context",
 };
-const SOURCE_LABELS = ["builtin", "config", "workspace"] as const;
 
 // logical: lexical path used for basename/sidecar derivation; canonical: realpath for
 // identity, containment and entry reads.
@@ -75,6 +79,7 @@ interface DirListing {
 interface Candidate {
   packageRoot: string;
   packageName: string;
+  origin: ExtensionOrigin;
   kind: EntryKind;
   entryPath: string;
   entryDigest: string;
@@ -282,6 +287,7 @@ async function readSidecar(
 async function readCandidate(
   packageRoot: string,
   packageName: string,
+  origin: ExtensionOrigin,
   kind: EntryKind,
   path: EntryPath,
 ): Promise<Candidate> {
@@ -313,6 +319,7 @@ async function readCandidate(
   const candidate: Candidate = {
     packageRoot,
     packageName,
+    origin,
     kind,
     entryPath: path.canonical,
     entryDigest,
@@ -389,22 +396,26 @@ function mergedConfigValid(candidate: Candidate, merged: JsonObject): boolean {
 
 export async function discoverExtensions(
   options: ExtensionsOptions,
-  workspace: string,
+  workspace: string | undefined,
   config: ExtensionConfig,
 ): Promise<DiscoveryResult> {
   const issues: ExtensionIssue[] = [];
-  const sources = [
-    options.builtinDir ?? defaultBuiltinDir(),
-    join(options.configDir, "extensions"),
-    join(workspace, ".pisces", "extensions"),
+  // The workspace source and label only exist when a workspace is given: without one,
+  // discovery must never read `<undefined>/.pisces/extensions`.
+  const sources: { dir: string; origin: ExtensionOrigin }[] = [
+    { dir: options.builtinDir ?? defaultBuiltinDir(), origin: "builtin" },
+    { dir: join(options.configDir, "extensions"), origin: "config" },
   ];
+  if (workspace !== undefined) {
+    sources.push({ dir: join(workspace, ".pisces", "extensions"), origin: "workspace" });
+  }
 
   const seenRoots = new Set<string>();
   const candidates: Candidate[] = [];
 
-  for (const [index, sourceDir] of sources.entries()) {
-    const label = SOURCE_LABELS[index] ?? "extensions";
-    const listed = await listPackageRoots(sourceDir, label);
+  for (const source of sources) {
+    const label = source.origin;
+    const listed = await listPackageRoots(source.dir, label);
     for (const failure of listed.failures) {
       pushIssue(issues, "extensions.invalid", failure);
     }
@@ -467,7 +478,7 @@ export async function discoverExtensions(
         }
         for (const path of paths) {
           try {
-            candidates.push(await readCandidate(packageRoot, name, kind, path));
+            candidates.push(await readCandidate(packageRoot, name, source.origin, kind, path));
           } catch (error) {
             if (error instanceof InvalidMetadataError) {
               reportFault();
@@ -543,6 +554,7 @@ export async function discoverExtensions(
 
     const record: DiscoveredEntry = {
       info: deepFreeze(buildInfo(candidate, buildDefinition(candidate))),
+      origin: candidate.origin,
       packageRoot: candidate.packageRoot,
       entryPath: candidate.entryPath,
       entryDigest: candidate.entryDigest,
@@ -571,4 +583,47 @@ export async function discoverExtensions(
   };
 }
 
-export type { DiscoveryResult, ExtensionConfig, ExtensionIssue, ExtensionsOptions, Inventory };
+/**
+ * Read-only listing over the same discovery pass the daemon uses, without
+ * importing entry modules, building tools or reading credentials.
+ *
+ * The workspace config layer is only read when a workspace is given; the two
+ * layers are merged exactly like `prepare` does before discovery.
+ */
+export async function listExtensions(options: ListExtensionsOptions): Promise<ExtensionListing> {
+  const config =
+    options.workspace === undefined
+      ? await readGlobalConfig(options.configDir)
+      : await readWorkspaceConfig(options.configDir, options.workspace);
+  const discoveryOptions: ExtensionsOptions = { configDir: options.configDir };
+  if (options.builtinDir !== undefined) discoveryOptions.builtinDir = options.builtinDir;
+
+  const discovery = await discoverExtensions(discoveryOptions, options.workspace, config);
+
+  const entries: ExtensionListingEntry[] = [];
+  for (const record of discovery.records.values()) {
+    const entry: ExtensionListingEntry = {
+      name: record.info.name,
+      type: record.info.type,
+      origin: record.origin,
+    };
+    if (record.info.description !== undefined && record.info.description !== "") {
+      entry.description = record.info.description;
+    }
+    entries.push(entry);
+  }
+
+  return { entries, issues: discovery.issues };
+}
+
+export type {
+  DiscoveryResult,
+  ExtensionConfig,
+  ExtensionIssue,
+  ExtensionListing,
+  ExtensionListingEntry,
+  ExtensionOrigin,
+  ExtensionsOptions,
+  Inventory,
+  ListExtensionsOptions,
+};

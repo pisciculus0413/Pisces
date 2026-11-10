@@ -35,6 +35,7 @@ test("normalizes host preparation failures without leaking raw errors", async ()
     .digest("hex");
   const entry: DiscoveredEntry = {
     info: { type: "tool", source: "pkg", name: "pkg#tool" as EntryName },
+    origin: "config",
     packageRoot,
     entryPath,
     entryDigest,

@@ -56,6 +56,7 @@ async function entry(): Promise<DiscoveredEntry> {
   await writeText(entryPath, 'export default () => "unexpected";\n');
   return {
     info: { type: "tool", source: "pkg", name: "pkg#tool" as DiscoveredEntry["info"]["name"] },
+    origin: "config",
     packageRoot,
     entryPath,
     entryDigest: createHash("sha256")

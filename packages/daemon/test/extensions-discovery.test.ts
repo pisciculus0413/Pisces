@@ -6,13 +6,18 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type EntryInfo, type EntryName, type JsonValue, PiscesError } from "@pisces/core";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { defaultBuiltinDir, discoverExtensions } from "../src/extensions/discovery.js";
+import {
+  defaultBuiltinDir,
+  discoverExtensions,
+  listExtensions,
+} from "../src/extensions/discovery.js";
 import type { ExtensionConfig } from "../src/extensions/types.js";
 import {
   contextSource,
   makePackage,
   toolSource,
   wrapperSource,
+  writeJson,
   writeSidecar,
   writeText,
 } from "./extensions-fixtures.js";
@@ -991,6 +996,92 @@ test("isolates ELOOP entry symlinks and keeps healthy siblings", async () => {
   expect(result.inventory.entries.map((entry) => entry.name)).toEqual(["entry-loop#good"]);
   expect(result.issues).toContainEqual(
     expect.objectContaining({ code: "extensions.invalid", source: "entry-loop" }),
+  );
+  expect(await exists(sentinel)).toBe(false);
+});
+
+// ---------------------------------------------------------------------------
+// origin and listExtensions
+// ---------------------------------------------------------------------------
+
+test("tags every entry with its source origin and skips the workspace source without one", async () => {
+  await makePackage(join(builtinDir, "built"), {
+    name: "built",
+    files: { "tools/b.ts": toolSource(sentinel) },
+  });
+  await makePackage(extensionsDir("cfg"), {
+    name: "cfg",
+    files: { "tools/c.ts": toolSource(sentinel) },
+  });
+  await makePackage(join(workspace, ".pisces", "extensions", "ws"), {
+    name: "ws",
+    files: { "tools/w.ts": toolSource(sentinel) },
+  });
+
+  const all = await discoverExtensions(options(), workspace, {});
+  expect([...all.records.values()].map((record) => [record.info.name, record.origin])).toEqual([
+    ["built#b", "builtin"],
+    ["cfg#c", "config"],
+    ["ws#w", "workspace"],
+  ]);
+
+  const withoutWorkspace = await discoverExtensions(options(), undefined, {});
+  expect(
+    [...withoutWorkspace.records.values()].map((record) => [record.info.name, record.origin]),
+  ).toEqual([
+    ["built#b", "builtin"],
+    ["cfg#c", "config"],
+  ]);
+  expect(withoutWorkspace.issues).toEqual([]);
+  expect(await exists(sentinel)).toBe(false);
+});
+
+test("listExtensions projects name, type, origin and description without loading code", async () => {
+  await makePackage(extensionsDir("cfg"), {
+    name: "cfg",
+    files: { "tools/c.ts": toolSource(sentinel) },
+  });
+  await writeSidecar(extensionsDir("cfg"), "tools/c.ts", { description: "config tool" });
+  await makePackage(join(workspace, ".pisces", "extensions", "ws"), {
+    name: "ws",
+    files: { "skills/helper/SKILL.md": "Skill body\n" },
+  });
+
+  const listed = await listExtensions({
+    configDir,
+    builtinDir: join(root, "no-builtin"),
+    workspace,
+  });
+
+  expect(listed.entries).toEqual([
+    { name: "cfg#c", type: "tool", origin: "config", description: "config tool" },
+    { name: "ws#helper", type: "skill", origin: "workspace" },
+  ]);
+  expect(listed.issues).toEqual([]);
+  expect(await exists(sentinel)).toBe(false);
+
+  const withoutWorkspace = await listExtensions({
+    configDir,
+    builtinDir: join(root, "no-builtin"),
+  });
+  expect(withoutWorkspace.entries.map((entry) => entry.name)).toEqual(["cfg#c"]);
+});
+
+test("listExtensions reads the merged config layers and rejects a bad entryConfig", async () => {
+  await makePackage(extensionsDir("wrapped"), {
+    name: "wrapped",
+    manifest: { wrappers: ["wrappers/w.ts"] },
+    files: { "wrappers/w.ts": wrapperSource(sentinel) },
+  });
+  await writeSidecar(extensionsDir("wrapped"), "wrappers/w.ts", {
+    config: { defaults: {}, schema: { type: "object" } },
+  });
+  await writeJson(join(workspace, ".pisces", "config.json"), {
+    entryConfig: { "wrapped#missing": {} },
+  });
+
+  await rejectsConfig(() =>
+    listExtensions({ configDir, builtinDir: join(root, "no-builtin"), workspace }),
   );
   expect(await exists(sentinel)).toBe(false);
 });

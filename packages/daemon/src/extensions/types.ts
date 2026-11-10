@@ -27,6 +27,29 @@ export interface ExtensionIssue {
   name?: EntryName;
 }
 
+/** Which discovery source contributed an entry; never part of the public `EntryInfo.source`. */
+export type ExtensionOrigin = "builtin" | "config" | "workspace";
+
+export interface ListExtensionsOptions {
+  configDir: string;
+  builtinDir?: string;
+  /** Workspace root; when absent the workspace source and layer are not read. */
+  workspace?: string;
+}
+
+/** Read-only projection of a discovered entry, safe to print. */
+export interface ExtensionListingEntry {
+  name: EntryName;
+  type: EntryInfo["type"];
+  origin: ExtensionOrigin;
+  description?: string;
+}
+
+export interface ExtensionListing {
+  entries: ExtensionListingEntry[];
+  issues: ExtensionIssue[];
+}
+
 export interface WrapperConfigSpec {
   defaults: JsonObject;
   schema: JsonObject;
@@ -34,6 +57,7 @@ export interface WrapperConfigSpec {
 
 export interface DiscoveredEntry {
   info: EntryInfo;
+  origin: ExtensionOrigin;
   packageRoot: string;
   entryPath: string;
   entryDigest: string;

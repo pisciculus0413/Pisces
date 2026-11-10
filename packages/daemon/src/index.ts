@@ -14,11 +14,22 @@ export {
   readGlobalConfig,
   readWorkspaceConfig,
 } from "./extensions/config.js";
+export {
+  defaultBuiltinDir,
+  discoverExtensions,
+  listExtensions,
+} from "./extensions/discovery.js";
 export type {
+  DiscoveredEntry,
   ExtensionBinding,
   ExtensionConfig,
+  ExtensionIssue,
+  ExtensionListing,
+  ExtensionListingEntry,
+  ExtensionOrigin,
   Extensions,
   ExtensionsOptions,
+  ListExtensionsOptions,
 } from "./extensions/types.js";
 export {
   type ActiveTurnMarker,

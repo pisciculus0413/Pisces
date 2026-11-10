@@ -44,6 +44,7 @@ async function entryFor(relative = "entry.ts"): Promise<DiscoveredEntry> {
   const entryPath = join(packageRoot, relative);
   return {
     info: { type: "tool", source: "pkg", name: "pkg#tool" as DiscoveredEntry["info"]["name"] },
+    origin: "config",
     packageRoot,
     entryPath,
     entryDigest: digest(await readFile(entryPath)),

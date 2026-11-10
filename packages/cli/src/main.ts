@@ -19,6 +19,7 @@ import {
   configUnset,
 } from "./config-commands.js";
 import { isEntryPath } from "./entry.js";
+import { extensionsList } from "./extensions.js";
 import {
   productionTemplatesDeps,
   type TemplatesDeps,
@@ -46,13 +47,14 @@ export const USAGE = [
   "  stop     stop the daemon",
   "  templates  list, preview or apply a template",
   "  config     list, get, set or unset configuration values",
+  "  extensions list discovered extensions without loading them",
   "",
   "options:",
   "  --config <path>     configuration file (default: <config home>/pisces/config.json)",
   "  --data-dir <path>   override the configured data directory",
   "  --scope <scope>     config scope: global (default) or workspace",
-  "  --workspace <dir>   workspace directory for the workspace config scope",
-  "  --json              machine-readable output (status, templates and config list/get)",
+  "  --workspace <dir>   workspace directory (config workspace scope, extensions list)",
+  "  --json              machine-readable output (status, templates, config, extensions)",
   "  --help              show this help",
   "  --version           print the version",
 ].join("\n");
@@ -65,6 +67,9 @@ type TemplatesSub = (typeof TEMPLATES_SUBS)[number];
 
 const CONFIG_SUBS = ["list", "get", "set", "unset"] as const;
 type ConfigSub = (typeof CONFIG_SUBS)[number];
+
+const EXTENSIONS_SUBS = ["list"] as const;
+type ExtensionsSub = (typeof EXTENSIONS_SUBS)[number];
 
 interface LifecycleParsed {
   command: Command;
@@ -109,7 +114,22 @@ type ConfigParsed =
   | (ConfigCommon & { sub: "unset"; path: string })
   | (ConfigCommon & { sub: "set"; path: string; value: string });
 
-type Outcome = LifecycleParsed | TemplatesParsed | ConfigParsed | "help" | "version" | undefined;
+interface ExtensionsParsed {
+  command: "extensions";
+  sub: "list";
+  configPath?: string;
+  workspace?: string;
+  json: boolean;
+}
+
+type Outcome =
+  | LifecycleParsed
+  | TemplatesParsed
+  | ConfigParsed
+  | ExtensionsParsed
+  | "help"
+  | "version"
+  | undefined;
 
 const isCommand = (value: string): value is Command =>
   (COMMANDS as readonly string[]).includes(value);
@@ -119,6 +139,9 @@ const isTemplatesSub = (value: string | undefined): value is TemplatesSub =>
 
 const isConfigSub = (value: string | undefined): value is ConfigSub =>
   value !== undefined && (CONFIG_SUBS as readonly string[]).includes(value);
+
+const isExtensionsSub = (value: string | undefined): value is ExtensionsSub =>
+  value !== undefined && (EXTENSIONS_SUBS as readonly string[]).includes(value);
 
 async function version(): Promise<string> {
   try {
@@ -139,6 +162,7 @@ async function parse(argv: readonly string[]): Promise<Outcome> {
   // they must not turn a usage error into a success.
   if (command === "templates") return parseTemplates(argv);
   if (command === "config") return parseConfig(argv);
+  if (command === "extensions") return parseExtensions(argv);
   if (command === undefined || !isCommand(command)) return undefined;
 
   let configPath: string | undefined;
@@ -297,6 +321,45 @@ function parseConfig(argv: readonly string[]): ConfigParsed | "help" | "version"
   return { ...common, sub, path };
 }
 
+/** `extensions <list>`; `undefined` is always a usage error. */
+function parseExtensions(
+  argv: readonly string[],
+): ExtensionsParsed | "help" | "version" | undefined {
+  const sub = argv[1];
+  if (sub === "--help") return "help";
+  if (sub === "--version") return "version";
+  if (!isExtensionsSub(sub)) return undefined;
+
+  let configPath: string | undefined;
+  let workspace: string | undefined;
+  let json = false;
+
+  for (let index = 2; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--help") return "help";
+    if (argument === "--version") return "version";
+    if (argument === "--json") {
+      json = true;
+      continue;
+    }
+    if (argument === "--config" || argument === "--workspace") {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("-")) return undefined;
+      if (argument === "--config") configPath = value;
+      else workspace = value;
+      index += 1;
+      continue;
+    }
+    // `list` takes no positionals.
+    return undefined;
+  }
+
+  const parsed: ExtensionsParsed = { command: "extensions", sub, json };
+  if (configPath !== undefined) parsed.configPath = configPath;
+  if (workspace !== undefined) parsed.workspace = workspace;
+  return parsed;
+}
+
 export async function runCli(
   argv: string[],
   io: CommandIo = processIo,
@@ -336,6 +399,15 @@ export async function runCli(
       default:
         return await configSet({ ...options, path: parsed.path, value: parsed.value });
     }
+  }
+
+  if (parsed.command === "extensions") {
+    return await extensionsList({
+      configPath: parsed.configPath ?? defaultConfigPath(process.env),
+      io,
+      json: parsed.json,
+      ...(parsed.workspace !== undefined ? { workspace: parsed.workspace } : {}),
+    });
   }
 
   if (parsed.command === "templates") {

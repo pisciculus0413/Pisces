@@ -40,6 +40,7 @@ function toolEntry(
 ): DiscoveredEntry {
   return {
     info: { type, source: "pkg", name: entryName(`pkg#${type}`) },
+    origin: "config",
     packageRoot,
     entryPath,
     entryDigest,

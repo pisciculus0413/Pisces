@@ -52,6 +52,7 @@ async function entry(): Promise<DiscoveredEntry> {
   const entryPath = join(packageRoot, "tools", "entry.ts");
   return {
     info: { type: "tool", source: "pkg", name: "pkg#tool" as EntryName },
+    origin: "config",
     packageRoot,
     entryPath,
     entryDigest: createHash("sha256")
