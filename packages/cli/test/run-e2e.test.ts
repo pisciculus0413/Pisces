@@ -30,10 +30,11 @@ import { type RunDeps, type RunOptions, runCommand } from "../src/run.js";
  *
  * A genuine in-process daemon (native transport, real Unix socket, real
  * `SessionStore`) serves host defaults for workspace/provider/model and three
- * providers: `ok` streams fixed text, `blocked` keeps the turn open until the
- * turn is cancelled, and `fail` throws while parsing the provider response. The
- * CLI function runs with production dependencies against that socket, so
- * session creation, queued prompt, event subscription, `--print`/`--json`
+ * providers: `ok` streams two text deltas (so `--print` can be shown to write
+ * only the concatenated final text, never the deltas), `blocked` keeps the turn
+ * open until the turn is cancelled, and `fail` throws while parsing the provider
+ * response. The CLI function runs with production dependencies against that
+ * socket, so session creation, queued prompt, event subscription, `--print`/`--json`
  * output, `--continue`, failure, interruption and the toggle rejection are all
  * proven end to end. One built-CLI subprocess test covers `--print` against a
  * daemon held by this process (no network).
@@ -43,7 +44,9 @@ const MAIN = fileURLToPath(new URL("../dist/main.js", import.meta.url));
 const BUILT = existsSync(MAIN);
 const KEY_ENV = "PISCES_TEST_KEY";
 const KEY_VALUE = "sk-test-not-real";
-const FINAL_TEXT = "provider text";
+const FIRST_DELTA = "hel";
+const SECOND_DELTA = "lo";
+const FINAL_TEXT = `${FIRST_DELTA}${SECOND_DELTA}`;
 const SOCKET_TIMEOUT_MS = 30_000;
 const CLI_TIMEOUT_MS = 60_000;
 const WAIT_TIMEOUT_MS = 5_000;
@@ -97,8 +100,11 @@ const adapter: LlmAdapter = {
     return { path: "/v1/chat/completions", body: JSON.stringify(request) };
   },
   parseChunk() {
+    // Two content deltas make the accumulated final text distinguishable from
+    // the streamed increments.
     return [
-      { type: "content", delta: FINAL_TEXT },
+      { type: "content", delta: FIRST_DELTA },
+      { type: "content", delta: SECOND_DELTA },
       { type: "stop", reason: "stop" },
     ];
   },
@@ -292,7 +298,8 @@ test("run --print completes a real turn and persists the session with daemon def
   const printed = recorder();
   expect(await runCommand(runOptions(fixture, { io: printed.io, print: true }))).toBe(0);
   expect(printed.err).toEqual([]);
-  // `--print` emits the final text once, not the streamed deltas.
+  // The provider streams "hel" and "lo"; `--print` writes only the joined
+  // final text once, so a delta-per-line implementation would fail here.
   expect(printed.out).toEqual([FINAL_TEXT]);
 
   const client = await openClient(host.socketPath);
@@ -360,6 +367,15 @@ test("run --continue picks the persisted session", {
   expect(parsed).toMatchObject({ sessionId: firstId, reason: "completed", text: FINAL_TEXT });
   // `--continue` reuses the session instead of creating another one.
   expect((await sessionList(client)).sessions.map((session) => session.id)).toEqual([firstId]);
+  // The second turn was really appended to that session.
+  const records = await readRecords(client, firstId);
+  expect(records.map((node) => node.role)).toEqual(["user", "assistant", "user", "assistant"]);
+  expect(records.map((node) => node.content)).toEqual([
+    [{ type: "text", text: "hello" }],
+    [{ type: "text", text: FINAL_TEXT }],
+    [{ type: "text", text: "hello" }],
+    [{ type: "text", text: FINAL_TEXT }],
+  ]);
 });
 
 test("a failed turn exits 1 with a JSON error and no success text", {
@@ -439,7 +455,8 @@ test("run reports daemon.unreachable after the daemon stops", {
   const fixture = await makeFixture();
   const host = await startAcceptanceDaemon(fixture);
   await host.stop();
-  hosts.splice(hosts.indexOf(host), 1);
+  const index = hosts.indexOf(host);
+  if (index !== -1) hosts.splice(index, 1);
 
   const unreachable = recorder();
   expect(await runCommand(runOptions(fixture, { io: unreachable.io, print: true }))).toBe(1);

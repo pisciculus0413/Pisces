@@ -1,9 +1,10 @@
 # CLI：本地 daemon 生命周期
 
-本文件描述当前已实现、并已被真实 socket 与真实进程验收（真实 `dist/main.js`、真实后台 daemon、
-真实 Unix socket 握手）覆盖的 CLI 子集：`start`、`status`、`stop`、`templates`、`config`、
-`extensions list`、`sessions list|export|cancel`、`run`、`provider list` 与 `models list`，以及配置文件、
-凭据来源、退出码、文件位置与失败恢复。
+本文件描述当前已实现、并在真实 socket 与真实进程上验收覆盖的 CLI 子集：`start`、`status`、`stop`、
+`templates`、`config`、`extensions list`、`sessions list|export|cancel`、`run`、`provider list` 与
+`models list`，以及配置文件、凭据来源、退出码、文件位置与失败恢复。生命周期命令（`start`/`status`/
+`stop`）由真实后台 daemon 与构建后的 `dist/main.js` 验收；`run` 由进程内真实 daemon 加构建后的 CLI
+验收（见 §10）。
 **未交付**的命令与平台在 §8 明确列出。权威契约见
 `docs/2 Detailed Design Specification/2 Detailed Design Specification.md` §7.1、§7.2、§7.5、§8.6，
 daemon 侧的安全边界见 `docs/daemon-linux.md`。
@@ -350,7 +351,7 @@ pisces run [prompt] [--new | --continue | --session <id> [--create]]
   - `--new`：调用 `session.create` 新建会话。新会话在 `turn.start` 后首次提交时才落盘。
   - `--continue`：调用 `session.list`，取 `createdAt` 最大的已落盘会话；并列时取 daemon 返回顺序中的
     第一个。没有已落盘会话时按 `session.not_found` 退出 1。
-  - `--session <id>`：先用一次有界 `session.read`（`limit: 1`）确认会话存在并使用其 meta。id 必须匹配
+  - `--session <id>`：先用一次有界 `session.read`（`limit: 1`）确认会话存在，之后的操作都使用该 id。id 必须匹配
     `[A-Za-z0-9_-]+`，否则是用法错误。会话不存在且带 `--create` 时新建（服务端生成新 id）；不带
     `--create` 时按 `session.not_found` 退出 1。`--create` 只能与 `--session` 同用。
 - 会话选项：
@@ -373,7 +374,7 @@ pisces run [prompt] [--new | --continue | --session <id> [--create]]
   `turn.start`；提示词从不写入请求体。`session.subscribe` 在入队前建立，事件不会漏收。
 - 输出模式：
   - 默认：`turn.delta` 的文本增量直接写 stdout，结束时补一个换行。
-  - `--print`：不写增量，结束后只写最终文本加换行；失败的 turn 只写一个空行。
+  - `--print`：不写增量，结束后只写累积的最终文本加换行；失败的 turn 写累积文本（通常为空，即只输出一个换行）。
   - `--json`：结束后写**一行** JSON `{sessionId,turnId,reason,text,error?}`，`reason` 为
     `completed`/`cancelled`/`failed`，`error` 只在 `failed` 时出现且为 daemon 投影的
     `{code,message}`；stdout 没有其他内容。`--print` 与 `--json` 互斥。
@@ -381,7 +382,7 @@ pisces run [prompt] [--new | --continue | --session <id> [--create]]
   - `0`：turn `completed`。
   - `1`：运行时/协议/会话失败，包括 `failed` turn、`daemon.unreachable`、`client.protocol` 与
     `queue.invalid_control` 等协议错误。人类模式把 failed 的 `error: <code>: <message>` 写 stderr；
-    `--json` 只写对象，不写 stderr。
+    failed turn 在 `--json` 下只写对象、不写 stderr（协议错误与运行中途断连仍写 stderr，见下）。
   - `2`：用法错误或 `config.invalid`。这两类错误一律只写 stderr，**不产生 JSON 对象**。
   - `130`：turn 被取消（`reason=cancelled`）。Ctrl-C 只发送一次 `turn.cancel` 并等待 `turn.ended`；
     在另一个终端执行 `pisces sessions cancel <id>` 造成的取消同样以 130 退出，CLI 无法区分取消来源。
