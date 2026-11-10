@@ -395,6 +395,7 @@ test("runCli rejects empty sessions option values as usage errors", async () => 
 test("runCli rejects sessions export and cancel usage errors without connecting", async () => {
   const cases = [
     ["sessions", "export"],
+    ["sessions", "export", ""],
     ["sessions", "export", "s1", "s2"],
     ["sessions", "export", "s1", "--json"],
     ["sessions", "export", "s1", "--bogus"],
@@ -402,6 +403,7 @@ test("runCli rejects sessions export and cancel usage errors without connecting"
     ["sessions", "export", "--data-dir"],
     ["sessions", "list", "--node", "n1"],
     ["sessions", "cancel"],
+    ["sessions", "cancel", ""],
     ["sessions", "cancel", "s1", "--json"],
     ["sessions", "cancel", "s1", "--node", "n1"],
     ["sessions", "cancel", "s1", "s2"],

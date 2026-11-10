@@ -465,7 +465,7 @@ function parseSessions(argv: readonly string[]): SessionsParsed | "help" | "vers
   if (sub === "list") return { ...common, sub, json };
 
   const [sessionId] = positionals;
-  if (positionals.length !== 1 || sessionId === undefined) return undefined;
+  if (positionals.length !== 1 || sessionId === undefined || sessionId === "") return undefined;
   if (sub === "export") {
     return { ...common, sub, sessionId, ...(nodeId !== undefined ? { nodeId } : {}) };
   }

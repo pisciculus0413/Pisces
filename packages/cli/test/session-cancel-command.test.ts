@@ -133,6 +133,26 @@ test("cancels only the turn whose session id matches", async () => {
   expect(client.closed).toBe(true);
 });
 
+test("a matching turn with extra unknown fields still cancels", async () => {
+  const client = fakeClient((method) => {
+    if (method === "turn.list") return { turns: [{ ...turn("s1", "t1"), extra: 1 }] };
+    return { cancelled: true };
+  });
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await sessionCancel({ configPath, io: rec.io, sessionId: "s1" }, client.deps);
+
+  expect(code).toBe(0);
+  expect(client.calls).toEqual([
+    { method: "turn.list", params: {} },
+    { method: "turn.cancel", params: { turnId: "t1" } },
+  ]);
+  expect(rec.out).toEqual(["cancelled t1"]);
+  expect(rec.err).toEqual([]);
+  expect(client.closed).toBe(true);
+});
+
 test("no matching turn prints no active turn and never cancels", async () => {
   const client = fakeClient(() => ({ turns: [turn("other", "t0")] }));
   const { configPath } = await fixture();
@@ -368,6 +388,7 @@ test("runCli routes sessions cancel with --data-dir", async () => {
 test("runCli rejects sessions cancel usage errors without connecting", async () => {
   const cases = [
     ["sessions", "cancel"],
+    ["sessions", "cancel", ""],
     ["sessions", "cancel", "s1", "s2"],
     ["sessions", "cancel", "s1", "--json"],
     ["sessions", "cancel", "s1", "--node", "n1"],
