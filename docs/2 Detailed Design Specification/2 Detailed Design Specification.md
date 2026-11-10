@@ -1372,7 +1372,7 @@ daemon 是用户级单实例进程，负责监听、路由、持久化、扩展�
 - 已受理请求超时、仍有登记 turn（含 `turn.cleanup_failed`）、标记删除失败或监听器/锁释放失败统一抛 `daemon.stop_incomplete`，按其实际状态保留锁、socket、`Gateway` 与 `quiescing`，允许重试；不自动强杀进程，也不声称已优雅停止。操作者终止进程后由下一次启动按 §6.5 恢复。成功返回后 `stop()` 幂等。
 - daemon 崩溃后只恢复已落盘会话；临时会话与消息队列随进程退出丢失。
 - 未完成的热会话在恢复时标记为中断，由用户决定是否继续。
-- 本阶段尚未装配：`ClientRegistry`、`CredentialStore`，以及清单中的 `providers`/`clients` 扩展装配；这些仍为目标设计。已装配的是目录驱动模式的 `Extensions`（`startDaemon({ extensions: { configDir } })` 或 `{ configPath }`，配置层与目录在 `session.create` 时读取与扫描）、CLI 启动时的配置加载器与模板存储（`startDaemon({ templates: { configDir } })`）。
+- 本阶段尚未装配：`ClientRegistry`、`CredentialStore`，以及清单中的 `providers`/`clients` 扩展装配；这些仍为目标设计。已装配的是目录驱动模式的 `Extensions`：通过 `startDaemon({ extensions: { configDir } })` 或 `{ configPath }` 装配，配置层与目录在 `session.create` 时读取与扫描；模板通过 `startDaemon({ templates: { configDir } })` 装配；CLI 的配置加载器在 spawn daemon 之前运行，并把配置路径传给 daemon 子进程。
 
 #### 5.1.2 `Transport`
 

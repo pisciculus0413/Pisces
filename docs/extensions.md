@@ -15,7 +15,7 @@
 | 来源 | 路径 |
 |---|---|
 | 内置 | `<repo>/extensions/builtin`（由 daemon 模块 URL 向上推导到仓库根，与进程工作目录无关） |
-| 软件配置目录 | `<configDir>/extensions/`；`<configDir>` 是 `dirname(configPath)`，而 `configPath` 是 CLI `--config` 的精确路径（默认 `<configDir>/config.json`） |
+| 软件配置目录 | `<configDir>/extensions/`；`<configDir>` 即 `dirname(configPath)`：CLI `--config` 指定精确配置文件，默认 `<configDir>/config.json` |
 | 工作区 | `<workspace>/.pisces/extensions/` |
 
 - 每个直接子目录为一个包；以 `@scope` 开头的目录下再取一层子目录，包名仍以 `package.json` 的
@@ -465,13 +465,14 @@ await host.stop();
 `packages/daemon/test/shell-tool.test.ts` 覆盖，`exec` 与路径包含分别由
 `packages/daemon/test/exec-host.test.ts`、`packages/daemon/test/workspace-access.test.ts` 覆盖。
 
-CLI 装配由 `packages/cli/test/extensions-e2e.test.ts` 验收：真实 `buildDaemonOptions` + `startDaemon`
-（真实 provider host 指向本机 OpenAI 兼容 SSE 服务器）上，配置 `extensions` 启用内置 shell 并执行
-`printf tool-ok`、无 `extensions` 时 `run --enable` 成功、`--config alt.json` 读取 alt 文件与
-`dirname(alt.json)/extensions`、工作区 `.pisces/extensions` 中的工具被发现并执行。
-
-- 本机结果：该文件 12 个用例全部通过（`pnpm exec vitest run packages/daemon/test/extensions-socket.test.ts`）。
+- 本机结果：daemon socket 契约文件 `packages/daemon/test/extensions-socket.test.ts` 12 个用例全部通过（`pnpm exec vitest run packages/daemon/test/extensions-socket.test.ts`）。
 - 平台：Linux x86_64，Node v26.13.0，pnpm 12.8.1。
 - 跨 UID 回归使用 `unshare --map-auto` + `packages/daemon/test/fixtures/cross-uid-client.mjs`；
   缺少 subordinate-ID 映射时该用例**失败**而不是跳过。
 - **远端 CI 未运行**，不得据此宣称远端 Node 22/24/26 矩阵通过。
+
+CLI 装配由 `packages/cli/test/extensions-e2e.test.ts` 验收：真实 `buildDaemonOptions` + `startDaemon`
+（真实 provider host 指向本机 OpenAI 兼容 SSE 服务器）上，配置 `extensions` 启用内置 shell 并执行
+`printf tool-ok`、无 `extensions` 时 `run --enable` 成功、`--config alt.json` 读取 alt 文件与
+`dirname(alt.json)/extensions`、工作区 `.pisces/extensions` 中的工具被发现并执行。本机结果：该文件
+4 个用例全部通过（`pnpm exec vitest run packages/cli/test/extensions-e2e.test.ts`）。

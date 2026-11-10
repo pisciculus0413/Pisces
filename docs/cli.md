@@ -93,8 +93,9 @@ OpenAI 兼容示例：
 - `defaults` 是 CLI 与扩展层共用的唯一默认 provider/model 键；旧的 `defaultProvider`/`defaultModel`
   已移除（pre-release 变更，无迁移）：出现时按未知键退出 2。
 - 全局文件还允许扩展组的 `defaultWorkspace`、`extensions`、`entryConfig`。`start` 启动的 daemon
-  始终进入目录驱动扩展模式：CLI 只把解析后的绝对 `--config` 路径作为 `extensions: { configPath }`
-  传给 daemon，不再合并 `defaults` 或 `defaultWorkspace`；daemon 在每次 `session.create` 时读取该文件
+  始终进入目录驱动扩展模式：CLI 只把命令行给出的 `--config` 路径原样交给 daemon 子进程，由子进程
+  在传入 `extensions: { configPath }` 前把它解析为绝对路径（继承子进程启动时的 cwd）；CLI 不再合并
+  `defaults` 或 `defaultWorkspace`；daemon 在每次 `session.create` 时读取该文件
   与 `<workspace>/.pisces/config.json`，并扫描 `dirname(configPath)/extensions` 与
   `<workspace>/.pisces/extensions`。daemon 的扩展加载器忽略 CLI 键；`config` 命令同时按两侧规则
   校验，因此它写出的全局文件对两个加载器都合法。
