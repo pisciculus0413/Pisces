@@ -55,7 +55,10 @@ function humanRows(entries: readonly ExtensionListingEntry[]): string[] {
 export async function extensionsList(options: ExtensionsListOptions): Promise<number> {
   const io = options.io ?? processIo;
 
-  const request: ListExtensionsOptions = { configDir: dirname(options.configPath) };
+  const request: ListExtensionsOptions = {
+    configDir: dirname(options.configPath),
+    configPath: options.configPath,
+  };
   if (options.workspace !== undefined) request.workspace = resolve(options.workspace);
   if (options.builtinDir !== undefined) request.builtinDir = options.builtinDir;
 

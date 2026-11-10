@@ -480,13 +480,14 @@ test.skipIf(!BUILT)(
     );
     expect(await exists(sentinel)).toBe(false);
 
-    const badConfig = join(fixture.configDir, "config.json");
-    await writeJson(badConfig, { entryConfig: { "missing#wrapper": { timeoutMs: 1 } } });
+    // An alternate file name must be honored: only `alt.json` carries the bad key.
+    const altConfig = join(fixture.configDir, "alt.json");
+    await writeJson(altConfig, { entryConfig: { "missing#wrapper": { timeoutMs: 1 } } });
     const bad = await run([
       "extensions",
       "list",
       "--config",
-      badConfig,
+      altConfig,
       "--workspace",
       fixture.workspace,
     ]);
@@ -494,6 +495,18 @@ test.skipIf(!BUILT)(
     expect(bad.stdout).toBe("");
     expect(bad.stderr).toBe("error: config.invalid: Invalid extension configuration\n");
     expect(await exists(sentinel)).toBe(false);
+
+    // `config.json` is still the valid empty file, so the default path lists normally.
+    const defaultPath = await run([
+      "extensions",
+      "list",
+      "--config",
+      fixture.configPath,
+      "--workspace",
+      fixture.workspace,
+    ]);
+    expect(defaultPath.code).toBe(0);
+    expect(defaultPath.stderr).toBe("");
   },
   TEST_TIMEOUT_MS,
 );

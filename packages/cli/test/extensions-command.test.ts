@@ -250,6 +250,65 @@ test("ignores the workspace source and workspace config without --workspace", as
   expect(await exists(fx.sentinel)).toBe(false);
 });
 
+test("an alternate --config file is read instead of <configDir>/config.json", async () => {
+  const fx = await fixture();
+  await makePackage(
+    configExtensions(fx, "wrapped"),
+    "wrapped",
+    { "wrappers/w.ts": wrapperSource(fx.sentinel) },
+    { wrappers: ["wrappers/w.ts"] },
+  );
+  const altPath = join(fx.configDir, "alt.json");
+  // `config.json` is empty (valid); `alt.json` alone carries the bad key.
+  await writeJson(fx.configPath, {});
+  await writeJson(altPath, { entryConfig: { "wrapped#missing": {} } });
+
+  expect(
+    await extensionsList({ configPath: altPath, builtinDir: fx.builtinDir, io: fx.io.io }),
+  ).toBe(2);
+  expect(fx.io.out).toEqual([]);
+  expect(fx.io.err).toEqual([`error: config.invalid: ${INVALID_MESSAGE}`]);
+
+  // Reverse: only `config.json` is bad, so reading it would fail the command.
+  await writeJson(fx.configPath, { entryConfig: { "wrapped#missing": {} } });
+  await writeJson(altPath, {});
+  fx.io.out.length = 0;
+  fx.io.err.length = 0;
+
+  expect(
+    await extensionsList({ configPath: altPath, builtinDir: fx.builtinDir, io: fx.io.io }),
+  ).toBe(0);
+  expect(fx.io.err).toEqual([]);
+  expect(firstColumn(fx.io.out)).toEqual(["wrapped#w"]);
+
+  fx.io.out.length = 0;
+  expect(
+    await extensionsList({
+      configPath: altPath,
+      builtinDir: fx.builtinDir,
+      json: true,
+      io: fx.io.io,
+    }),
+  ).toBe(0);
+  expect(JSON.parse(fx.io.out[0] ?? "")).toEqual({
+    entries: [{ name: "wrapped#w", type: "wrapper", origin: "config" }],
+  });
+
+  // The workspace layer merges on top of the same exact global file.
+  await writeJson(join(fx.workspace, ".pisces", "config.json"), {});
+  fx.io.out.length = 0;
+  expect(
+    await extensionsList({
+      configPath: altPath,
+      builtinDir: fx.builtinDir,
+      workspace: fx.workspace,
+      io: fx.io.io,
+    }),
+  ).toBe(0);
+  expect(fx.io.err).toEqual([]);
+  expect(await exists(fx.sentinel)).toBe(false);
+});
+
 test("prints no extensions and exits 0 when nothing is discovered", async () => {
   const fx = await fixture();
   const code = await extensionsList({

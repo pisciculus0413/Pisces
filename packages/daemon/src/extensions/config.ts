@@ -214,8 +214,12 @@ export async function readGlobalConfig(configDir: string): Promise<ExtensionConf
 export async function readWorkspaceConfig(
   configDir: string,
   workspace: string,
+  globalConfigPath?: string,
 ): Promise<ExtensionConfig> {
-  const global = await readGlobalConfig(configDir);
+  const global =
+    globalConfigPath === undefined
+      ? await readGlobalConfig(configDir)
+      : await readConfigLayer(globalConfigPath, "global");
   const local = await readConfigLayer(join(workspace, ".pisces", "config.json"), "workspace");
   return mergeConfigLayers([global, local]);
 }

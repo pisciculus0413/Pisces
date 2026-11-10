@@ -32,6 +32,11 @@ export type ExtensionOrigin = "builtin" | "config" | "workspace";
 
 export interface ListExtensionsOptions {
   configDir: string;
+  /**
+   * Exact global config file to read; when absent `<configDir>/config.json` is
+   * used. `configDir` still selects `<configDir>/extensions`.
+   */
+  configPath?: string;
   builtinDir?: string;
   /** Workspace root; when absent the workspace source and layer are not read. */
   workspace?: string;

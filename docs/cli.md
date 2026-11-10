@@ -195,7 +195,9 @@ pisces config unset <path> [--scope ...] [--workspace <dir>]
 
 - 默认 `--scope global`，读写 `--config` 指定的全局文件；`--scope workspace` 读写
   `<workspace>/.pisces/config.json`。工作区取 `--workspace`，缺省为当前目录，且必须是已存在的目录。
-- `--config` 被所有 `config` 子命令接受；扩展目录取 `dirname(configPath)/extensions`。
+- `--config` 被所有 `config` 子命令接受，并**精确**读写该文件（默认
+  `$XDG_CONFIG_HOME/pisces/config.json`，即 `~/.config/pisces/config.json`）。扩展目录取
+  `dirname(configPath)/extensions`，与 `config` 层读取的文件名无关。
 - 路径语法：点号分段；数组用数字段（`providers.0.models.1.maxOutput`）；键含 `.` 时用 JSON 引号段
   （`entryConfig."@scope/pkg#tool".timeout`）。空段、`__proto__`、`constructor`、`prototype` 一律拒绝。
 - `list` 输出目标层原始 JSON；文件缺失视为 `{}`。人类模式按键排序并缩进，`--json` 原样输出。
@@ -231,8 +233,10 @@ pisces extensions list [--workspace <dir>] [--json]
 ```
 
 - 来源：内置 `extensions/builtin`、`<configDir>/extensions/`、`<workspace>/.pisces/extensions/`
-  （只有给出 `--workspace` 才含第三项）。`<configDir>` 是 `dirname(--config 或默认 configPath)`；
-  扩展配置层固定读取 `<configDir>/config.json`，`--config` 的其它文件名只用于定位该目录。
+  （只有给出 `--workspace` 才含第三项）。`<configDir>` 始终是 `dirname(--config <path> 或默认
+  全局配置路径)`，**不是** XDG 配置主目录本身。扩展配置层读取的就是解析后的那个 `--config` 文件
+  （默认 `<configDir>/config.json`），所以 `--config /path/alt.json` 会读 `alt.json` 而不是
+  `/path/config.json`；`<configDir>/extensions/` 仍由同一个目录定位。
 - 只读清单、sidecar 与技能正文；**不导入**工具/包装器/上下文代码，不读取凭据。
 - 每行 `name type origin`，`origin` 为 `builtin`、`config` 或 `workspace`；`--json` 输出
   `{ "entries": [{ "name", "type", "origin", "description?" }] }`。
@@ -255,6 +259,8 @@ pisces sessions list [--data-dir <dir>] [--json]
 - 打开一个短连接调用 `session.list`；只列出已落盘会话，临时会话不出现。
 - 人类模式按 `createdAt` 降序，每行 `id provider/model workspace createdAt`；`--json` 输出 daemon
   原始结果。
+- 没有已落盘会话时，人类模式不打印任何行（stdout 为空）、退出 0；`--json` 输出
+  `{"sessions":[]}`。
 - `--data-dir` 与生命周期命令同义，覆盖配置里的 `dataDir`。
 - 配置不合法退出 2；daemon 未运行或握手失败输出 `error: daemon.unreachable: Daemon is not reachable`，
   退出 1。
@@ -269,7 +275,7 @@ $ pisces sessions list --json
 | 命令 | 退出码 |
 |---|---|
 | 全部命令成功 | 0 |
-| `config get|unset` 未命中（`config.key_not_found`）、`sessions list` 连接失败 | 1 |
+| `config get` / `config unset` 未命中（`config.key_not_found`）、`sessions list` 连接失败 | 1 |
 | 已在运行 / 未知属主 / 启动失败 / 停止超时 / socket 无属主 / pid 记录写入或清除失败 | 1 |
 | 用法错误、配置不合法、配置键未知、工作区不可用、缺少密钥、数据目录不可用 | 2 |
 
@@ -297,8 +303,11 @@ $ pisces sessions list --json
 | `<dataDir>/run/pisces.sock` | 本地 Unix socket | `0600` |
 | `<dataDir>/run/pisces.lock` | daemon 单实例锁 | `0600` |
 | `<dataDir>/sessions/` | 会话记录（由 daemon 维护） | 目录 |
-| `<configDir>/pisces/config.json` | 本文件所述的全局配置（统一 schema） | 用户自定；`config set` 写入时 `0600` |
+| `<config home>/pisces/config.json` | 本文件所述的全局配置（统一 schema） | 用户自定；`config set` 写入时 `0600` |
 | `<workspace>/.pisces/config.json` | 工作区配置（只允许扩展子集） | `config set` 写入时 `0600` |
+
+`<config home>` 是 `$XDG_CONFIG_HOME`（缺省 `~/.config`）。§5 中的 `<configDir>` 不是它，而是
+`dirname(解析后的 --config 路径)`；两者只在默认配置路径下重合于 `~/.config/pisces`。
 
 - **只有 `start` 会创建并校验 `dataDir` 策略**：路径必须是绝对路径（`--data-dir` 相对路径直接
   以 `daemon.insecure_directory` 退出 2）、存在或可创建、属于当前有效 uid、且不带 group/world

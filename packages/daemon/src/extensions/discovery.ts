@@ -10,7 +10,7 @@ import {
   PiscesError,
 } from "@pisces/core";
 import { glob, isDynamicPattern } from "tinyglobby";
-import { readGlobalConfig, readWorkspaceConfig } from "./config.js";
+import { readConfigLayer, readGlobalConfig, readWorkspaceConfig } from "./config.js";
 import { sha256 } from "./hash.js";
 import {
   compileWrapperSchema,
@@ -588,13 +588,17 @@ export async function discoverExtensions(
  * importing entry modules, building tools or reading credentials.
  *
  * The workspace config layer is only read when a workspace is given; the two
- * layers are merged exactly like `prepare` does before discovery.
+ * layers are merged exactly like `prepare` does before discovery. The global
+ * layer is `options.configPath` when given, so a CLI `--config <file>` is
+ * honored, and `<configDir>/config.json` otherwise.
  */
 export async function listExtensions(options: ListExtensionsOptions): Promise<ExtensionListing> {
   const config =
     options.workspace === undefined
-      ? await readGlobalConfig(options.configDir)
-      : await readWorkspaceConfig(options.configDir, options.workspace);
+      ? options.configPath === undefined
+        ? await readGlobalConfig(options.configDir)
+        : await readConfigLayer(options.configPath, "global")
+      : await readWorkspaceConfig(options.configDir, options.workspace, options.configPath);
   const discoveryOptions: ExtensionsOptions = { configDir: options.configDir };
   if (options.builtinDir !== undefined) discoveryOptions.builtinDir = options.builtinDir;
 

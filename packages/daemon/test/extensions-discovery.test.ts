@@ -1085,3 +1085,42 @@ test("listExtensions reads the merged config layers and rejects a bad entryConfi
   );
   expect(await exists(sentinel)).toBe(false);
 });
+
+test("listExtensions honors configPath over <configDir>/config.json", async () => {
+  await makePackage(extensionsDir("wrapped"), {
+    name: "wrapped",
+    manifest: { wrappers: ["wrappers/w.ts"] },
+    files: { "wrappers/w.ts": wrapperSource(sentinel) },
+  });
+  await writeSidecar(extensionsDir("wrapped"), "wrappers/w.ts", {
+    config: { defaults: {}, schema: { type: "object" } },
+  });
+  const configPath = join(configDir, "alt.json");
+  const builtin = join(root, "no-builtin");
+
+  // The named file is clean; the default file is not, so it was never read.
+  await writeJson(join(configDir, "config.json"), { entryConfig: { "wrapped#missing": {} } });
+  await writeJson(configPath, {});
+  const listed = await listExtensions({ configDir, configPath, builtinDir: builtin });
+  expect(listed.entries.map((entry) => entry.name)).toEqual(["wrapped#w"]);
+  expect(listed.issues).toEqual([]);
+
+  // Reverse: only the default file is clean, so the named file must be read.
+  await writeJson(join(configDir, "config.json"), {});
+  await writeJson(configPath, { entryConfig: { "wrapped#missing": {} } });
+  await rejectsConfig(() => listExtensions({ configDir, configPath, builtinDir: builtin }));
+
+  // Workspace mode merges the workspace layer on top of the same exact file.
+  await writeJson(configPath, {});
+  await writeJson(join(workspace, ".pisces", "config.json"), {
+    entryConfig: { "wrapped#w": {} },
+  });
+  const merged = await listExtensions({
+    configDir,
+    configPath,
+    builtinDir: builtin,
+    workspace,
+  });
+  expect(merged.entries.map((entry) => entry.name)).toEqual(["wrapped#w"]);
+  expect(await exists(sentinel)).toBe(false);
+});
