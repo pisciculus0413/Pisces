@@ -3,8 +3,8 @@ import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MAX_FRAME_BYTES, PROTOCOL_VERSION } from "@pisces/protocol";
-import { afterEach, expect, test } from "vitest";
-import { ClientError, connectClient } from "../src/client.js";
+import { afterEach, expect, test, vi } from "vitest";
+import { CLIENT_TIMEOUT_MS, ClientError, connectClient } from "../src/client.js";
 
 const roots: string[] = [];
 
@@ -160,6 +160,58 @@ test("times out one request after the configured budget", async () => {
     expect(error).toMatchObject({ code: "client.timeout", message: "Daemon did not respond" });
     expect(Date.now() - started).toBeGreaterThanOrEqual(50);
   } finally {
+    client.close();
+    await daemon.close();
+  }
+});
+
+test("a per-request budget overrides the connection default", async () => {
+  const daemon = await fakeDaemon(
+    autoHello((frame, reply) => {
+      setTimeout(() => {
+        reply({ id: frame.id, result: { method: frame.method } });
+      }, 250);
+    }),
+  );
+  // The connection default is far too small for a scripted apply, but the
+  // explicit per-request budget must still be honoured.
+  const client = await connectClient(daemon.path, 100);
+  try {
+    const result = await client.request("template.apply", {}, { timeoutMs: 5000 });
+    expect(result).toEqual({ method: "template.apply" });
+  } finally {
+    client.close();
+    await daemon.close();
+  }
+});
+
+test("a request without an override still times out at the 5 s default", async () => {
+  const daemon = await fakeDaemon(autoHello(() => {}));
+  const client = await connectClient(daemon.path);
+  try {
+    expect(CLIENT_TIMEOUT_MS).toBe(5000);
+    vi.useFakeTimers();
+    let settled: unknown;
+    const pending = client.request("template.apply", {}).then(
+      (value) => {
+        settled = value;
+        return value;
+      },
+      (error: unknown) => {
+        settled = error;
+        return error;
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(CLIENT_TIMEOUT_MS - 1);
+    expect(settled).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await pending;
+    expect(error).toBeInstanceOf(ClientError);
+    expect(error).toMatchObject({ code: "client.timeout", message: "Daemon did not respond" });
+  } finally {
+    vi.useRealTimers();
     client.close();
     await daemon.close();
   }

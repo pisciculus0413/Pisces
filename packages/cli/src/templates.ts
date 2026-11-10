@@ -1,5 +1,11 @@
 import type { TemplateInfo, TemplatePreview } from "@pisces/core";
-import { type Client, ClientError, connectClient, UNREACHABLE_MESSAGE } from "./client.js";
+import {
+  type Client,
+  ClientError,
+  connectClient,
+  type RequestOptions,
+  UNREACHABLE_MESSAGE,
+} from "./client.js";
 import { type CommandIo, processIo } from "./commands.js";
 import { loadConfig } from "./config.js";
 import { socketPathFor } from "./lifecycle.js";
@@ -35,8 +41,14 @@ export const TEMPLATES_USAGE = [
 const CONFIG_MESSAGE = "Invalid configuration";
 const PROTOCOL_MESSAGE = "Invalid response from daemon";
 
+/**
+ * `template.apply` budget: the 600 s `initScript` cap plus 60 s of I/O.
+ * Every other request keeps the 5 s client default.
+ */
+export const APPLY_REQUEST_TIMEOUT_MS = 660_000;
+
 export interface TemplatesClient {
-  request(method: string, params?: unknown): Promise<unknown>;
+  request(method: string, params?: unknown, options?: RequestOptions): Promise<unknown>;
   close(): void;
 }
 
@@ -241,12 +253,16 @@ export async function templatesApply(
     return 2;
   }
   return await withClient(options, deps, async (client, output) => {
-    const result = await client.request("template.apply", {
-      templateId: options.templateId,
-      workspace: options.workspace,
-      confirmed: true,
-      ...(options.overwrite === true ? { overwrite: true } : {}),
-    });
+    const result = await client.request(
+      "template.apply",
+      {
+        templateId: options.templateId,
+        workspace: options.workspace,
+        confirmed: true,
+        ...(options.overwrite === true ? { overwrite: true } : {}),
+      },
+      { timeoutMs: APPLY_REQUEST_TIMEOUT_MS },
+    );
     if (options.json === true) {
       output.out(JSON.stringify(result));
       return 0;

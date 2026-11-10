@@ -9,6 +9,7 @@ import { type CommandDeps, type CommandIo, startCommand } from "../src/commands.
 import { loadConfig } from "../src/config.js";
 import { runCli } from "../src/main.js";
 import {
+  APPLY_REQUEST_TIMEOUT_MS,
   type TemplatesClient,
   type TemplatesDeps,
   templatesApply,
@@ -74,6 +75,7 @@ interface Call {
 
 interface FakeClient {
   calls: Call[];
+  budgets: (number | undefined)[];
   closed: boolean;
   socketPath: string | undefined;
   deps: TemplatesDeps;
@@ -84,14 +86,20 @@ type Responder = (method: string, params: unknown) => unknown;
 function fakeClient(responder: Responder): FakeClient {
   const state: FakeClient = {
     calls: [],
+    budgets: [],
     closed: false,
     socketPath: undefined,
     deps: {
       async connect(socketPath: string): Promise<TemplatesClient> {
         state.socketPath = socketPath;
         return {
-          async request(method: string, params?: unknown): Promise<unknown> {
+          async request(
+            method: string,
+            params?: unknown,
+            options?: { timeoutMs?: number },
+          ): Promise<unknown> {
             state.calls.push({ method, params });
+            state.budgets.push(options?.timeoutMs);
             return responder(method, params);
           },
           close(): void {
@@ -274,6 +282,36 @@ test("templates apply omits overwrite unless asked and always closes the client"
   expect(params).toEqual({ templateId: "notes", workspace: "/tmp/work", confirmed: true });
   expect("overwrite" in params).toBe(false);
   expect(client.closed).toBe(true);
+});
+
+test("only apply spends the 660 s request budget", async () => {
+  const { configPath } = await fixture();
+
+  const applyClient = fakeClient(() => ({ projectId: "p1", sessionId: "s1" }));
+  const applyCode = await templatesApply(
+    {
+      configPath,
+      io: recorder().io,
+      confirm: true,
+      templateId: "notes",
+      workspace: "/tmp/work",
+    },
+    applyClient.deps,
+  );
+  expect(applyCode).toBe(0);
+  expect(APPLY_REQUEST_TIMEOUT_MS).toBe(660_000);
+  expect(applyClient.budgets).toEqual([660_000]);
+
+  const listClient = fakeClient(() => LIST_RESULT);
+  await templatesList({ configPath, io: recorder().io }, listClient.deps);
+  expect(listClient.budgets).toEqual([undefined]);
+
+  const previewClient = fakeClient(() => PREVIEW_RESULT);
+  await templatesPreview(
+    { configPath, io: recorder().io, templateId: "notes", workspace: "/tmp/work" },
+    previewClient.deps,
+  );
+  expect(previewClient.budgets).toEqual([undefined]);
 });
 
 test("a protocol error is printed unchanged and exits 1", async () => {

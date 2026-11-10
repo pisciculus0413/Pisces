@@ -19,6 +19,11 @@ import {
 /** Default budget for connecting and for each individual request. */
 export const CLIENT_TIMEOUT_MS = 5000;
 
+/** Per-request override of the connection's default budget. */
+export interface RequestOptions {
+  timeoutMs?: number;
+}
+
 /** Fixed text printed for an unreachable or handshake-failing daemon. */
 export const UNREACHABLE_MESSAGE = "Daemon is not reachable";
 
@@ -43,7 +48,7 @@ export class ClientError extends Error {
 }
 
 export interface Client {
-  request(method: string, params?: unknown): Promise<unknown>;
+  request(method: string, params?: unknown, options?: RequestOptions): Promise<unknown>;
   close(): void;
 }
 
@@ -192,7 +197,7 @@ function createClient(socket: Socket, timeoutMs: number): Client {
   socket.once("close", () => close());
 
   return {
-    request(method, params = {}) {
+    request(method, params = {}, options = {}) {
       return new Promise((resolve, reject) => {
         if (closed) {
           reject(new ClientError("client.closed", CLOSED_MESSAGE));
@@ -200,10 +205,11 @@ function createClient(socket: Socket, timeoutMs: number): Client {
         }
         nextId += 1;
         const id = `cli-${nextId}`;
+        const budget = options.timeoutMs ?? timeoutMs;
         const timer = setTimeout(() => {
           if (!waiters.delete(id)) return;
           reject(new ClientError("client.timeout", TIMEOUT_MESSAGE));
-        }, timeoutMs);
+        }, budget);
         waiters.set(id, { resolve, reject, timer });
 
         let frame: Uint8Array;
