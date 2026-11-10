@@ -1152,7 +1152,8 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
   - `apply <id> <workspace>`：确认后创建项目与会话。
 - `sessions`：会话管理。
   - `list`：列出会话（已实现）。
-  - `export <id>`：以 JSONL 导出会话（已实现；默认导出整棵树，`--node <id>` 只导出该节点的祖先链）。
+  - `export <id>`：以 JSONL 导出会话（已实现；默认导出整棵树，`--node <id>` 只导出从根节点到该
+    节点（含该节点）的祖先链）。
   - `cancel <id>`：中止该会话当前活跃 turn（已实现；无活跃 turn 时为幂等成功 `no active turn`）。
 - `--help`：显示帮助。
 - `--version`：显示版本。
@@ -1278,7 +1279,8 @@ interface ProjectRef {
   `defaults` 的 `config.json` 加载器；daemon 本身仍不读取配置，嵌入程序调用
   `startDaemon({ dataDir, providers, providerHost, ... })` 启动，返回的 `DaemonHost` 提供
   `socketPath`、`initializationIssues`、`recoveryIssues`、`status()` 与 `stop()`。CLI 的 pid 记录、
-  日志、socket/lock 文件与退出码约定见 DDS §7.5；`run`、`sessions` 等命令未实现。daemon 只监听本地
+  日志、socket/lock 文件与退出码约定见 DDS §7.5；`run`、`client`、`providers check`、`auth` 命令
+  未实现。daemon 只监听本地
   Unix socket，不监听网络地址。
 - 连接在读取任何协议字节前用原生 `SO_PEERCRED` 校验 peer UID 必须等于 daemon 有效 UID；不一致只销毁该连接。原生插件为仓内 plain C Node-API，使用固定 `node-gyp` 编译为被忽略的 `packages/daemon/native/peercred.node`，需在测试前按当前 Node ABI 显式构建；缺失或构建失败以 `daemon.native_unavailable` 拒绝启动，无降级认证。
 - `stop()` 先阻断新帧并停止 accept，等待已受理请求与尽力取消活跃 turn，再关闭连接、按 inode 清理 socket、释放锁并 dispose `Gateway`；无法完成时以 `daemon.stop_incomplete` 失败并保留锁、标记与 `quiescing` 状态，不自动强杀进程，也不声称已优雅停止。

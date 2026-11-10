@@ -284,13 +284,31 @@ function recorder(): Recorder {
 const jsonl = (lines: readonly string[]): SessionNode[] =>
   lines.map((line) => JSON.parse(line) as SessionNode);
 
-test("sessions export streams the committed tree and one node branch", {
+test("sessions export streams the forked tree and one node branch", {
   timeout: SOCKET_TIMEOUT_MS,
 }, async () => {
   const fixture = await makeFixture();
   const host = await startAcceptanceDaemon(fixture);
   const client = await openClient(host.socketPath);
-  const { sessionId, records: tree } = await committedSession(fixture, client);
+  const base = await committedSession(fixture, client);
+  const sessionId = base.sessionId;
+  const rootId = base.records[0]?.id;
+  if (rootId === undefined) throw new Error("missing root node");
+
+  // Fork: start a second turn from the root with a fresh queued entry. The session
+  // now holds two real branches, so the tree and the selected branch differ.
+  await request(client, "queue.enqueue", queueUserEntry(sessionId));
+  await request(client, "turn.start", { sessionId, nodeId: rootId });
+  let tree: SessionNode[] = [];
+  await vi.waitFor(
+    async () => {
+      expect((await turnList(client)).turns).toEqual([]);
+      tree = await readTree(client, sessionId);
+      expect(tree).toHaveLength(base.records.length + 2);
+    },
+    { timeout: WAIT_TIMEOUT_MS, interval: 20 },
+  );
+  const treeIds = tree.map((node) => node.id);
 
   const exported = recorder();
   expect(await sessionExport({ configPath: fixture.configPath, io: exported.io, sessionId })).toBe(
@@ -300,17 +318,32 @@ test("sessions export streams the committed tree and one node branch", {
   // One JSON object per line, no wrapper: the line count is the record count.
   expect(exported.out).toHaveLength(tree.length);
   const lines = jsonl(exported.out);
-  expect(lines.map((node) => node.id)).toEqual(tree.map((node) => node.id));
+  expect(lines.map((node) => node.id)).toEqual(treeIds);
   // Every line is exactly the record the daemon returned.
   expect(lines).toEqual(tree);
 
-  const last = tree.at(-1);
-  if (last === undefined) throw new Error("missing last exported node");
-  const lastId = last.id;
+  const leaf = tree.at(-1);
+  if (leaf === undefined) throw new Error("missing last exported node");
+  const leafId = leaf.id;
   const branchWire = (
-    await request<SessionReadResult>(client, "session.read", { sessionId, nodeId: lastId })
+    await request<SessionReadResult>(client, "session.read", { sessionId, nodeId: leafId })
   ).records;
-  expect(branchWire.length).toBeGreaterThan(0);
+  const branchIds = branchWire.map((node) => node.id);
+  // The fork makes the tree wider than the selected branch.
+  expect(branchIds.length).toBeLessThan(treeIds.length);
+  expect(branchIds).not.toEqual(treeIds);
+
+  // The branch is exactly the leaf and its ancestors, from root through the leaf.
+  const byId = new Map(tree.map((node) => [node.id, node]));
+  const ancestors: string[] = [];
+  let current: SessionNode | undefined = byId.get(leafId);
+  while (current !== undefined) {
+    ancestors.push(current.id);
+    current = current.id === current.parentId ? undefined : byId.get(current.parentId);
+  }
+  ancestors.reverse();
+  expect(branchIds).toEqual(ancestors);
+  expect(branchIds).toContain(rootId);
 
   const branch = recorder();
   expect(
@@ -318,21 +351,17 @@ test("sessions export streams the committed tree and one node branch", {
       configPath: fixture.configPath,
       io: branch.io,
       sessionId,
-      nodeId: lastId,
+      nodeId: leafId,
     }),
   ).toBe(0);
   expect(branch.err).toEqual([]);
   const branchLines = jsonl(branch.out);
   expect(branchLines).toEqual(branchWire);
+  expect(branchLines.map((node) => node.id)).toEqual(branchIds);
 
-  // The branch is one linear ancestor chain and a tree-order subset of the export.
-  expect(branchLines[0]?.parentId).toBe(branchLines[0]?.id);
-  for (let index = 1; index < branchLines.length; index += 1) {
-    expect(branchLines[index]?.parentId).toBe(branchLines[index - 1]?.id);
-  }
-  const treeIds = tree.map((node) => node.id);
-  const branchIds = branchLines.map((node) => node.id);
-  expect(branchIds).toEqual(treeIds.filter((id) => branchIds.includes(id)));
+  // Export is read-only: neither export changed the stored tree.
+  const reread = await readTree(client, sessionId);
+  expect(reread.map((node) => node.id)).toEqual(treeIds);
 
   await host.stop();
   hosts.splice(hosts.indexOf(host), 1);

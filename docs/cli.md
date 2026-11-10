@@ -314,8 +314,10 @@ pisces sessions cancel <session-id> [--config <path>] [--data-dir <dir>]
   `turn.cancel { turnId }`。
 - 成功时每个 turn 打印一行 `cancelled <turnId>`，退出 0。取消中止供应商流；已产生的节点仍写入
   会话。
-- 没有匹配的活跃 turn（包括刚取消过）时打印 `no active turn`，退出 0（幂等）；此时不调用
-  `turn.cancel`。
+- 没有匹配的活跃 turn 时打印 `no active turn`，退出 0；此时不调用 `turn.cancel`。取消进入收尾阶段后，
+  turn 在从 `turn.list` 消失前仍可能被列出：紧接着重复取消可能因 `turn.cancel` 返回
+  `{cancelled:false}` 而以 `turn.cancel_failed` 退出 1，待该 turn 消失后重复取消才是稳定的
+  `no active turn`。
 - 任一 `turn.cancel` 返回 `{cancelled:false}`（竞态或收尾中）时向 stderr 打印
   `error: turn.cancel_failed: Cancel request was not accepted`，退出 1；此前已成功取消的 turn 仍保留
   其 `cancelled` 行。`turn.cancel_failed` 由 CLI 本地产生。
@@ -395,7 +397,7 @@ $ pisces models list --json
 | 命令 | 退出码 |
 |---|---|
 | 全部命令成功 | 0 |
-| `config get` / `config unset` 未命中（`config.key_not_found`）；`sessions list|export|cancel` / `provider list` / `models list` 连接失败（`daemon.unreachable`）或协议响应不合法（`client.protocol`）；`sessions export` 的 `session.not_found` / `session.node_not_found`；`sessions cancel` 被拒绝（`turn.cancel_failed`）；`models list --provider` 未知 id（`provider.not_found`） | 1 |
+| `config get` / `config unset` 未命中（`config.key_not_found`）；`sessions list|export|cancel` / `provider list` / `models list` 连接失败（`daemon.unreachable`）；`sessions export|cancel` 与人类模式的 `sessions list` 协议响应不合法（`client.protocol`，`sessions list --json` 原样透传、不校验）；`sessions export` 的 `session.not_found` / `session.node_not_found`；`sessions cancel` 被拒绝（`turn.cancel_failed`）；`models list --provider` 未知 id（`provider.not_found`） | 1 |
 | 已在运行 / 未知属主 / 启动失败 / 停止超时 / socket 无属主 / pid 记录写入或清除失败 | 1 |
 | 用法错误、配置不合法、配置键未知、工作区不可用、缺少密钥、数据目录不可用 | 2 |
 
@@ -472,7 +474,7 @@ $ pisces models list --json
 - **`config.unknown_key` / `config.no_workspace`**：`config` 的目标层出现不允许的键，或
   `--scope workspace` 没有可用目录；命令退出 2，不写任何文件。
 - **未知键的码取决于命令**：同一个不允许的顶层键，`config list|get|set|unset` 报
-  `config.unknown_key`，而 `start`/`status`/`stop`/`templates`/`extensions list`/`sessions list`
+  `config.unknown_key`，而 `start`/`status`/`stop`/`templates`/`extensions list`/`sessions list|export|cancel`
   等生命周期与读取命令统一报 `config.invalid`（加载器只映射固定码）。看到 `config.invalid` 时，
   先用 `config list` 看原始内容，再对照 §3 的键白名单排查。
 - **`config unset` 在删除后重新校验整份草稿**：文件里有多个未知键（或残留的悬空 `defaults`）时，
@@ -566,11 +568,11 @@ pnpm exec vitest run packages/cli/test/providers-e2e.test.ts
 
 `packages/cli/test/sessions-export-cancel-e2e.test.ts` 在进程内真实 daemon（原生 transport、真实
 Unix socket、真实 `SessionStore`）上验收 `sessions export` 与 `sessions cancel`：正常 provider 提交
-节点后，全树导出逐行 `JSON.parse` 与 `session.read` 记录深度相等，`--node` 只导出祖先链且为全树
-子集；挂起 provider 让 turn 保持 `running`，真实 CLI 取消后输出 `cancelled <turnId>`、轮询
+节点后，全树导出逐行 `JSON.parse` 与 `session.read` 记录深度相等，分叉树上的 `--node` 只导出祖先
+链且为全树的严格子集；挂起 provider 让 turn 保持 `running`，真实 CLI 取消后输出 `cancelled <turnId>`、轮询
 `turn.list` 直到该 turn 消失，再次取消得到 `no active turn`；daemon 停止后两命令均退出 1
-（`daemon.unreachable`）。构建后的 `dist/main.js` 子进程另对同一 daemon 导出真实会话，并在空闲
-会话上得到 `no active turn`（退出 0）。本地在 Node 26.13.0 x64 上通过；远端 CI 未运行。运行方式：
+（`daemon.unreachable`）。构建后的 `dist/main.js` 子进程另在独立的进程内 daemon 实例上导出真实会话，
+并在空闲会话上得到 `no active turn`（退出 0）。本地在 Node 26.13.0 x64 上通过；远端 CI 未运行。运行方式：
 
 ```bash
 pnpm exec vitest run packages/cli/test/sessions-export-cancel-e2e.test.ts

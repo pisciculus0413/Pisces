@@ -207,7 +207,9 @@ demo/
 | `provider.list`、`turn.list`、`turn.cancel`、`session.subscribe`、`session.unsubscribe` | 沿用既有契约，未因扩展改变 |
 
 未路由（仍返回 `protocol.unknown_method`）：`client.*`。`session.list` 与 `template.*` 已路由，
-分别是已落盘会话枚举与模板操作（未装配 `TemplateStore` 时 `template.*` 仍返回未知方法）。
+分别是已落盘会话枚举与模板操作（未装配 `TemplateStore` 时 `template.*` 仍返回未知方法）。CLI 已交付
+`sessions list`（`session.list`）、`sessions export`（`session.read`，默认整棵树，`--node` 从根到该
+节点的祖先链）与 `sessions cancel`（`turn.list` + `turn.cancel`）。
 
 ## 6. 执行时机与失败隔离
 
@@ -437,8 +439,6 @@ await host.stop();
 - **依赖树锁定**：只哈希条目文件本身（`definitionHash`）与合并后的包装器配置
   （`configHash`），不哈希被导入的依赖；修改扩展的依赖不会让旧定义变 stale。
 - **技能/上下文历史清理**：已写入的历史正文只按选择过滤，不会被删除或重新固化为新版本。
-- **`sessions export/cancel`**：`session.list` 已路由，但 CLI 只交付 `sessions list`；导出与取消仍
-  未实现。
 
 ## 11. 验证状态
 
