@@ -11,6 +11,13 @@ import {
   stopCommand,
 } from "./commands.js";
 import { defaultConfigPath } from "./config.js";
+import {
+  type ConfigCommandOptions,
+  configGet,
+  configList,
+  configSet,
+  configUnset,
+} from "./config-commands.js";
 import { isEntryPath } from "./entry.js";
 import {
   productionTemplatesDeps,
@@ -38,11 +45,14 @@ export const USAGE = [
   "  status   report the daemon state",
   "  stop     stop the daemon",
   "  templates  list, preview or apply a template",
+  "  config     list, get, set or unset configuration values",
   "",
   "options:",
   "  --config <path>     configuration file (default: <config home>/pisces/config.json)",
   "  --data-dir <path>   override the configured data directory",
-  "  --json              machine-readable output (status and templates)",
+  "  --scope <scope>     config scope: global (default) or workspace",
+  "  --workspace <dir>   workspace directory for the workspace config scope",
+  "  --json              machine-readable output (status, templates and config list/get)",
   "  --help              show this help",
   "  --version           print the version",
 ].join("\n");
@@ -52,6 +62,9 @@ type Command = (typeof COMMANDS)[number];
 
 const TEMPLATES_SUBS = ["list", "preview", "apply"] as const;
 type TemplatesSub = (typeof TEMPLATES_SUBS)[number];
+
+const CONFIG_SUBS = ["list", "get", "set", "unset"] as const;
+type ConfigSub = (typeof CONFIG_SUBS)[number];
 
 interface LifecycleParsed {
   command: Command;
@@ -82,13 +95,30 @@ type TemplatesParsed =
       overwrite: boolean;
     });
 
-type Outcome = LifecycleParsed | TemplatesParsed | "help" | "version" | undefined;
+interface ConfigCommon {
+  command: "config";
+  configPath?: string;
+  scope: "global" | "workspace";
+  workspace?: string;
+  json: boolean;
+}
+
+type ConfigParsed =
+  | (ConfigCommon & { sub: "list" })
+  | (ConfigCommon & { sub: "get"; path: string })
+  | (ConfigCommon & { sub: "unset"; path: string })
+  | (ConfigCommon & { sub: "set"; path: string; value: string });
+
+type Outcome = LifecycleParsed | TemplatesParsed | ConfigParsed | "help" | "version" | undefined;
 
 const isCommand = (value: string): value is Command =>
   (COMMANDS as readonly string[]).includes(value);
 
 const isTemplatesSub = (value: string | undefined): value is TemplatesSub =>
   value !== undefined && (TEMPLATES_SUBS as readonly string[]).includes(value);
+
+const isConfigSub = (value: string | undefined): value is ConfigSub =>
+  value !== undefined && (CONFIG_SUBS as readonly string[]).includes(value);
 
 async function version(): Promise<string> {
   try {
@@ -108,6 +138,7 @@ async function parse(argv: readonly string[]): Promise<Outcome> {
   // Help and version are only global as the first argument; after a bad command
   // they must not turn a usage error into a success.
   if (command === "templates") return parseTemplates(argv);
+  if (command === "config") return parseConfig(argv);
   if (command === undefined || !isCommand(command)) return undefined;
 
   let configPath: string | undefined;
@@ -199,6 +230,73 @@ function parseTemplates(argv: readonly string[]): TemplatesParsed | "help" | "ve
   return { command: "templates", sub, ...common, templateId, workspace, overwrite };
 }
 
+/**
+ * `config <list|get|set|unset>`; `undefined` is always a usage error.
+ *
+ * `--workspace` only makes sense together with `--scope workspace`, and
+ * `--json` only for the read-only subcommands.
+ */
+function parseConfig(argv: readonly string[]): ConfigParsed | "help" | "version" | undefined {
+  const sub = argv[1];
+  if (sub === "--help") return "help";
+  if (sub === "--version") return "version";
+  if (!isConfigSub(sub)) return undefined;
+
+  let configPath: string | undefined;
+  let scope: "global" | "workspace" = "global";
+  let workspace: string | undefined;
+  let json = false;
+  const positionals: string[] = [];
+
+  for (let index = 2; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === undefined) return undefined;
+    if (argument === "--help") return "help";
+    if (argument === "--version") return "version";
+    if (argument === "--json") {
+      json = true;
+      continue;
+    }
+    if (argument === "--config" || argument === "--workspace" || argument === "--scope") {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("-")) return undefined;
+      if (argument === "--config") configPath = value;
+      else if (argument === "--workspace") workspace = value;
+      else if (value === "global" || value === "workspace") scope = value;
+      else return undefined;
+      index += 1;
+      continue;
+    }
+    // JSON values may start with `-`, so every other token is a positional.
+    positionals.push(argument);
+  }
+
+  if (workspace !== undefined && scope !== "workspace") return undefined;
+
+  const common = {
+    command: "config" as const,
+    scope,
+    json,
+    ...(configPath !== undefined ? { configPath } : {}),
+    ...(workspace !== undefined ? { workspace } : {}),
+  };
+
+  if (sub === "list") {
+    if (positionals.length !== 0) return undefined;
+    return { ...common, sub };
+  }
+  if (sub === "set") {
+    if (json) return undefined;
+    const [path, value] = positionals;
+    if (positionals.length !== 2 || path === undefined || value === undefined) return undefined;
+    return { ...common, sub, path, value };
+  }
+  if (json && sub === "unset") return undefined;
+  const path = positionals[0];
+  if (positionals.length !== 1 || path === undefined) return undefined;
+  return { ...common, sub, path };
+}
+
 export async function runCli(
   argv: string[],
   io: CommandIo = processIo,
@@ -218,6 +316,26 @@ export async function runCli(
   if (parsed === undefined) {
     io.err(USAGE);
     return 2;
+  }
+
+  if (parsed.command === "config") {
+    const options: ConfigCommandOptions = {
+      configPath: parsed.configPath ?? defaultConfigPath(process.env),
+      scope: parsed.scope,
+      json: parsed.json,
+      io,
+      ...(parsed.workspace !== undefined ? { workspace: parsed.workspace } : {}),
+    };
+    switch (parsed.sub) {
+      case "list":
+        return await configList(options);
+      case "get":
+        return await configGet({ ...options, path: parsed.path });
+      case "unset":
+        return await configUnset({ ...options, path: parsed.path });
+      default:
+        return await configSet({ ...options, path: parsed.path, value: parsed.value });
+    }
   }
 
   if (parsed.command === "templates") {

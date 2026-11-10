@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { PiscesError } from "@pisces/core";
+import { parseExtensionConfig } from "@pisces/daemon";
 
 export interface CliModelConfig {
   id: string;
@@ -26,6 +27,7 @@ export interface CliConfig {
 }
 
 const INVALID_MESSAGE = "Invalid configuration";
+const UNKNOWN_KEY_MESSAGE = "Unknown configuration key";
 const CONFIG_KEYS = [
   "dataDir",
   "providers",
@@ -47,6 +49,10 @@ type Modality = (typeof MODALITIES)[number];
 
 function invalid(): never {
   throw new PiscesError("config.invalid", INVALID_MESSAGE);
+}
+
+function unknownKey(): never {
+  throw new PiscesError("config.unknown_key", UNKNOWN_KEY_MESSAGE);
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -162,7 +168,7 @@ function parseProvider(value: unknown): CliProviderConfig {
   return provider;
 }
 
-function parseProviders(value: unknown): CliProviderConfig[] {
+export function parseProviders(value: unknown): CliProviderConfig[] {
   if (!Array.isArray(value) || value.length === 0) invalid();
   const providers = value.map(parseProvider);
   assertUnique(providers.map((provider) => provider.id));
@@ -219,6 +225,66 @@ export function defaultConfigPath(env: NodeJS.ProcessEnv): string {
     return join(homeDir(env), ".config", "pisces", "config.json");
   }
   return join(configHome, "pisces", "config.json");
+}
+
+const EXTENSION_KEYS = ["defaults", "defaultWorkspace", "extensions", "entryConfig"] as const;
+const WORKSPACE_DRAFT_KEYS: readonly string[] = ["defaults", "extensions", "entryConfig"];
+
+/**
+ * Copies the extension-owned keys so the daemon parser validates exactly those,
+ * never the CLI group it would silently skip.
+ */
+function extensionSubset(value: UnknownRecord): UnknownRecord {
+  const subset: UnknownRecord = {};
+  for (const key of EXTENSION_KEYS) {
+    if (value[key] !== undefined) subset[key] = value[key];
+  }
+  return subset;
+}
+
+/** The daemon parser owns the rules; the CLI only re-labels the fixed code. */
+function parseExtensionSubset(value: UnknownRecord, scope: "global" | "workspace"): void {
+  try {
+    parseExtensionConfig(value, scope);
+  } catch (error) {
+    if (error instanceof PiscesError && error.code === "config.unknown_key") unknownKey();
+    invalid();
+  }
+}
+
+/**
+ * Global draft: every present top-level key must be valid, but `dataDir` and
+ * `providers` may be missing so an empty file can be filled in step by step.
+ */
+export function validateGlobalDraft(value: unknown): void {
+  if (!isRecord(value)) invalid();
+  for (const key of Object.keys(value)) {
+    if (!(CONFIG_KEYS as readonly string[]).includes(key)) unknownKey();
+  }
+  if (value.dataDir !== undefined) parseDataDir(value.dataDir);
+  if (value.templatesDir !== undefined) parseDataDir(value.templatesDir);
+  if (value.providers !== undefined) {
+    const providers = parseProviders(value.providers);
+    if (value.defaults !== undefined) parseDefaults(value.defaults, providers);
+  }
+  parseExtensionSubset(extensionSubset(value), "global");
+}
+
+/**
+ * Workspace draft: only the extension subset is allowed, and `defaults` is also
+ * checked against the global providers when that file is readable.
+ */
+export function validateWorkspaceDraft(
+  value: unknown,
+  globalProviders?: readonly CliProviderConfig[],
+): void {
+  if (!isRecord(value)) invalid();
+  for (const key of Object.keys(value)) {
+    if (!WORKSPACE_DRAFT_KEYS.includes(key)) unknownKey();
+  }
+  parseExtensionSubset(extensionSubset(value), "workspace");
+  if (value.defaults === undefined || globalProviders === undefined) return;
+  parseDefaults(value.defaults, globalProviders);
 }
 
 export function parseConfig(value: unknown): CliConfig {
