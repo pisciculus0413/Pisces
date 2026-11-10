@@ -209,7 +209,7 @@ git commit -m "feat(templates): route template methods and session defaults"
 
 - [ ] **Step 1: Write failing client tests**
 
-Fake `node:net` server that speaks NDJSON: handshake `protocol.hello` must happen first; `request` resolves matching `id`, rejects on `error`, times out at 5 s, rejects on close; two concurrent requests on one client resolve independently; oversized/invalid line rejects safely without a raw stack. Assert the client sends `{id, method, params}` and closes on `close()`.
+Fake `node:net` server that speaks NDJSON: handshake `protocol.hello` must happen first; `request` resolves matching `id`, rejects on `error`, times out at the per-request budget (default 5 s; `templates apply` passes 660 s), rejects on close; two concurrent requests on one client resolve independently; oversized/invalid line rejects safely without a raw stack. Assert the client sends `{id, method, params}` and closes on `close()`.
 
 - [ ] **Step 2: Write failing command tests** with an injected client factory:
   - `templates list` prints ids/names and `--json` outputs `{templates}`.
@@ -226,7 +226,7 @@ Expected: FAIL.
 
 - [ ] **Step 4: Implement the client and commands**
 
-`client.ts`: net connect, `hello` first (single request id), line-buffered JSON parse, per-id waiters, 5 s per-request timeout, `close()` destroys; map socket/parse failures to a `ClientError` with a fixed message (no raw error). `templates.ts`: parse `list`, `preview <id>`, `apply <id>` with `--workspace`, `--confirm`, `--overwrite`, `--json`; usage errors 2; call the daemon at `socketPathFor(dataDir)`; no secret output. `config.ts`: optional absolute `templatesDir`. `commands.ts`/`daemon-child.ts`: forward `templatesDir` as the fourth child argv when present; child passes `templates: {configDir}` to `startDaemon`.
+`client.ts`: net connect, `hello` first (single request id), line-buffered JSON parse, per-id waiters, per-request timeout (default 5 s, caller override), `close()` destroys; map socket/parse failures to a `ClientError` with a fixed message (no raw error). `templates apply` passes 660 s (script cap + I/O); other commands stay at 5 s. `templates.ts`: parse `list`, `preview <id>`, `apply <id>` with `--workspace`, `--confirm`, `--overwrite`, `--json`; usage errors 2; call the daemon at `socketPathFor(dataDir)`; no secret output. `config.ts`: optional absolute `templatesDir`. `commands.ts`/`daemon-child.ts`: forward `templatesDir` as the fourth child argv when present; child passes `templates: {configDir}` to `startDaemon`.
 
 - [ ] **Step 5: Gate and commit**
 

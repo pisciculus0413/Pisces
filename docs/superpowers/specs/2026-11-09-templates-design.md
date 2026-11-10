@@ -163,7 +163,7 @@ interface TemplateStore {
 ### 5.6 CLI
 
 - 配置增加可选 `templatesDir`（绝对路径）；`start` 把它传给子进程（第四个 argv 或环境变量，选 argv），子进程转成 `templates: {configDir}`。
-- 新增最小协议客户端：连接 `<dataDir>/run/pisces.sock`，`hello` 后按 id 发请求、读到响应即关闭；固定 5 s 超时；错误映射为固定消息。
+- 新增最小协议客户端：连接 `<dataDir>/run/pisces.sock`，`hello` 后按 id 发请求、读到响应即关闭；普通请求 5 s 超时；`template.apply` 单独使用 660 s 预算（脚本上限 600 s + 60 s I/O），错误映射为固定消息。
 - `pisces templates list [--json]`
 - `pisces templates preview <id> --workspace <dir> [--json]`：人类输出列出目录、文件、冲突与脚本 argv。
 - `pisces templates apply <id> --workspace <dir> --confirm [--overwrite] [--json]`：无 `--confirm` 退出 2；成功打印 `project <id> session <id>`。
@@ -176,7 +176,8 @@ interface TemplateStore {
 - 写文件全部经 `WorkspaceAccess`，越界在 preview 阶段就已拒绝。
 - 模板配置中的 `systemPromptFile` 只能引用模板自身声明的文件或工作区已有文件？**决定：必须是模板 `files` 中声明的路径**，避免读取工作区无关内容。
 - 模板 JSON 不包含凭据字段；出现未知键直接无效。
-- `initScript` 的超时完全由模板字段 `timeoutMs` 决定（缺省 60 s，上限 600 s，即 `ExecHost` 的既有上限）；超时后由 `ExecHost` 杀掉直接子进程，模板按 `template.init_failed` 处理。`template.apply` 是已准入请求，期间调用 `stop` 可能因 5 s 关闭预算而返回 `daemon.stop_incomplete`；长脚本会放大该窗口，这是本阶段的已知限制，文档写明，不新增取消 seam。
+- `initScript` 的超时完全由模板字段 `timeoutMs` 决定（缺省 60 s，上限 600 s，即 `ExecHost` 的既有上限）；超时后由 `ExecHost` 杀掉直接子进程，模板按 `template.init_failed` 处理。
+- `template.apply` 的 CLI 请求预算是 660 s（覆盖最长脚本 + I/O）；客户端超时只说明“未在预算内收到响应”，daemon 可能仍在执行，用户重试前应先用 `status`/检查工作区确认。`template.apply` 是已准入请求，期间调用 `stop` 可能因 5 s 关闭预算而返回 `daemon.stop_incomplete`；长脚本会放大该窗口，这是本阶段的已知限制，文档写明，不新增取消 seam。
 
 ### 5.8 验证
 
