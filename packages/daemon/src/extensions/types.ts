@@ -10,7 +10,16 @@ import type {
 } from "@pisces/core";
 
 export interface ExtensionsOptions {
-  configDir: string;
+  /**
+   * Directory holding `<configDir>/config.json` and `<configDir>/extensions`; when absent it
+   * is derived from `configPath`. At least one of `configDir`/`configPath` is required.
+   */
+  configDir?: string;
+  /**
+   * Exact global config file (CLI `--config`); wins over `<configDir>/config.json`.
+   * Discovery still uses `configDir ?? dirname(configPath)`. Never read at construction.
+   */
+  configPath?: string;
   builtinDir?: string;
 }
 

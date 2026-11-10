@@ -4,6 +4,7 @@
 
 export type { ProtocolEvent } from "@pisces/protocol";
 export {
+  type ConfigLocation,
   type ConfigScope,
   mergeConfigLayers,
   parseExtensionConfig,
@@ -11,6 +12,7 @@ export {
   readConfigLayer,
   readGlobalConfig,
   readWorkspaceConfig,
+  resolveConfigLocation,
 } from "./extensions/config.js";
 export {
   defaultBuiltinDir,

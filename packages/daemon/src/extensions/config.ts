@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { type EntryName, type JsonObject, type JsonValue, PiscesError } from "@pisces/core";
 import type { ExtensionConfig } from "./types.js";
 
@@ -205,6 +205,33 @@ function mergeLayers(layers: readonly ExtensionConfig[]): ExtensionConfig {
     result.entryConfig = merged;
   }
   return result;
+}
+
+export interface ConfigLocation {
+  /** Extension root: `configDir` itself, or `dirname(configPath)`. */
+  configDir: string;
+  /** Exact global config file to read. */
+  configPath: string;
+}
+
+/**
+ * Pure path resolution for the two accepted option shapes; never touches disk.
+ * `configPath` wins for the file, `configDir` still selects the extension root.
+ */
+export function resolveConfigLocation(options: {
+  configDir?: string | undefined;
+  configPath?: string | undefined;
+}): ConfigLocation {
+  if (options.configPath !== undefined) {
+    return {
+      configPath: options.configPath,
+      configDir: options.configDir ?? dirname(options.configPath),
+    };
+  }
+  if (options.configDir !== undefined) {
+    return { configDir: options.configDir, configPath: join(options.configDir, "config.json") };
+  }
+  invalid();
 }
 
 export async function readGlobalConfig(configDir: string): Promise<ExtensionConfig> {

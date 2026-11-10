@@ -15,7 +15,7 @@ import {
   type Tools,
   type ToolWrapper,
 } from "@pisces/core";
-import { readGlobalConfig as readGlobalLayer, readWorkspaceConfig } from "./config.js";
+import { readConfigLayer, readWorkspaceConfig, resolveConfigLocation } from "./config.js";
 import { discoverExtensions } from "./discovery.js";
 import { canonicalJson } from "./hash.js";
 import { createExtensionLoader, ExtensionLoadError, type ExtensionLoader } from "./loader.js";
@@ -181,8 +181,11 @@ function createBinding(
 }
 
 export function createExtensions(options: ExtensionsOptions): Extensions {
+  // Resolve once, without reading the file or scanning directories: construction only locks in
+  // which global file `readGlobalConfig`/`prepare` will read and which root discovery will scan.
+  const location = resolveConfigLocation(options);
   return {
-    readGlobalConfig: () => readGlobalLayer(options.configDir),
+    readGlobalConfig: () => readConfigLayer(location.configPath, "global"),
     async prepare(workspace: string): Promise<ExtensionBinding> {
       // realpath identifies the workspace; an inaccessible path fails with the module's
       // existing safe configuration error instead of falling back or leaking Node details.
@@ -192,7 +195,9 @@ export function createExtensions(options: ExtensionsOptions): Extensions {
       } catch {
         throw new PiscesError("config.invalid", "Invalid extension configuration");
       }
-      const config = deepFreeze(await readWorkspaceConfig(options.configDir, canonical));
+      const config = deepFreeze(
+        await readWorkspaceConfig(location.configDir, canonical, location.configPath),
+      );
       // Every prepare rescans and freezes a new inventory without importing module code.
       const discovery = await discoverExtensions(options, canonical, config);
       return createBinding(canonical, config, discovery);

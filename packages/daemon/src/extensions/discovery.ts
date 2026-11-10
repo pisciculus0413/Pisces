@@ -10,7 +10,12 @@ import {
   PiscesError,
 } from "@pisces/core";
 import { glob, isDynamicPattern } from "tinyglobby";
-import { readConfigLayer, readGlobalConfig, readWorkspaceConfig } from "./config.js";
+import {
+  readConfigLayer,
+  readGlobalConfig,
+  readWorkspaceConfig,
+  resolveConfigLocation,
+} from "./config.js";
 import { sha256 } from "./hash.js";
 import {
   compileWrapperSchema,
@@ -400,11 +405,14 @@ export async function discoverExtensions(
   config: ExtensionConfig,
 ): Promise<DiscoveryResult> {
   const issues: ExtensionIssue[] = [];
+  // The extension root is `configDir` when given, otherwise `dirname(configPath)`; the global
+  // config file itself is never read here.
+  const { configDir } = resolveConfigLocation(options);
   // The workspace source and label only exist when a workspace is given: without one,
   // discovery must never read `<undefined>/.pisces/extensions`.
   const sources: { dir: string; origin: ExtensionOrigin }[] = [
     { dir: options.builtinDir ?? defaultBuiltinDir(), origin: "builtin" },
-    { dir: join(options.configDir, "extensions"), origin: "config" },
+    { dir: join(configDir, "extensions"), origin: "config" },
   ];
   if (workspace !== undefined) {
     sources.push({ dir: join(workspace, ".pisces", "extensions"), origin: "workspace" });
@@ -600,6 +608,7 @@ export async function listExtensions(options: ListExtensionsOptions): Promise<Ex
         : await readConfigLayer(options.configPath, "global")
       : await readWorkspaceConfig(options.configDir, options.workspace, options.configPath);
   const discoveryOptions: ExtensionsOptions = { configDir: options.configDir };
+  if (options.configPath !== undefined) discoveryOptions.configPath = options.configPath;
   if (options.builtinDir !== undefined) discoveryOptions.builtinDir = options.builtinDir;
 
   const discovery = await discoverExtensions(discoveryOptions, options.workspace, config);
