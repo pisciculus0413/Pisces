@@ -2,8 +2,10 @@ import { connect, type Socket } from "node:net";
 import {
   createNdjsonDecoder,
   encodeFrame,
+  type JsonValue,
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
+  type ProtocolEvent,
 } from "@pisces/protocol";
 
 /**
@@ -11,9 +13,10 @@ import {
  *
  * The daemon speaks NDJSON over a Unix socket and requires `protocol.hello`
  * before any other method. This client performs that handshake once, then
- * routes responses to waiters by request id. Every failure is reported as a
- * `ClientError` with a fixed code and message, so no raw socket or parser
- * error ever reaches the terminal.
+ * routes responses to waiters by request id and daemon-pushed `{event, data}`
+ * frames to registered listeners. Every failure is reported as a `ClientError`
+ * with a fixed code and message, so no raw socket or parser error ever reaches
+ * the terminal.
  */
 
 /** Default budget for connecting and for each individual request. */
@@ -47,8 +50,17 @@ export class ClientError extends Error {
   }
 }
 
+export type EventListener = (event: ProtocolEvent) => void;
+
 export interface Client {
   request(method: string, params?: unknown, options?: RequestOptions): Promise<unknown>;
+  /**
+   * Registers a listener for daemon-pushed event frames. Returns an unsubscribe
+   * function that removes only this listener and is safe to call repeatedly.
+   * A throwing listener is caught and ignored, so it can neither stop the other
+   * listeners nor break the connection.
+   */
+  onEvent(listener: EventListener): () => void;
   close(): void;
 }
 
@@ -122,6 +134,18 @@ function createClient(socket: Socket, timeoutMs: number): Client {
   let nextId = 0;
   let closed = false;
   const waiters = new Map<string, Waiter>();
+  const listeners = new Set<EventListener>();
+
+  /** A listener failure stays local: the rest of the set and the client live on. */
+  const deliver = (event: ProtocolEvent): void => {
+    for (const listener of [...listeners]) {
+      try {
+        listener(event);
+      } catch {
+        // Listener errors are deliberately ignored.
+      }
+    }
+  };
 
   const failAll = (error: ClientError): void => {
     for (const [id, waiter] of waiters) {
@@ -134,6 +158,7 @@ function createClient(socket: Socket, timeoutMs: number): Client {
   const close = (): void => {
     if (closed) return;
     closed = true;
+    listeners.clear();
     failAll(new ClientError("client.closed", CLOSED_MESSAGE));
     socket.removeAllListeners();
     socket.on("error", () => {});
@@ -144,6 +169,7 @@ function createClient(socket: Socket, timeoutMs: number): Client {
   const protocolFailure = (): void => {
     if (closed) return;
     closed = true;
+    listeners.clear();
     failAll(new ClientError("client.protocol", PROTOCOL_MESSAGE));
     socket.removeAllListeners();
     socket.on("error", () => {});
@@ -159,7 +185,16 @@ function createClient(socket: Socket, timeoutMs: number): Client {
       protocolFailure();
       return;
     }
-    if (!isRecord(value) || typeof value.id !== "string") {
+    if (!isRecord(value)) {
+      protocolFailure();
+      return;
+    }
+    if (typeof value.id !== "string") {
+      if (typeof value.event === "string" && isRecord(value.data)) {
+        // `JSON.parse` only yields JSON values, so the cast is sound.
+        deliver({ event: value.event, data: value.data as JsonValue });
+        return;
+      }
       protocolFailure();
       return;
     }
@@ -228,6 +263,12 @@ function createClient(socket: Socket, timeoutMs: number): Client {
           close();
         }
       });
+    },
+    onEvent(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
     close() {
       close();

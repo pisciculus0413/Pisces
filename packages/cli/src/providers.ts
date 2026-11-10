@@ -1,5 +1,5 @@
 import type { ModelInfo, ProviderInfo } from "@pisces/daemon";
-import { type Client, ClientError, connectClient, UNREACHABLE_MESSAGE } from "./client.js";
+import { ClientError, connectClient, UNREACHABLE_MESSAGE } from "./client.js";
 import { type CommandIo, processIo } from "./commands.js";
 import { loadConfig } from "./config.js";
 import { socketPathFor } from "./lifecycle.js";
@@ -142,7 +142,7 @@ async function withClient(
   const dataDir = await resolveDataDir(options, io);
   if (dataDir === undefined) return 2;
 
-  let client: Client;
+  let client: ProvidersClient;
   try {
     client = await deps.connect(socketPathFor(dataDir));
   } catch {

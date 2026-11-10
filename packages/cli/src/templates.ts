@@ -1,11 +1,5 @@
 import type { TemplateInfo, TemplatePreview } from "@pisces/core";
-import {
-  type Client,
-  ClientError,
-  connectClient,
-  type RequestOptions,
-  UNREACHABLE_MESSAGE,
-} from "./client.js";
+import { ClientError, connectClient, type RequestOptions, UNREACHABLE_MESSAGE } from "./client.js";
 import { type CommandIo, processIo } from "./commands.js";
 import { loadConfig } from "./config.js";
 import { socketPathFor } from "./lifecycle.js";
@@ -109,13 +103,13 @@ async function resolveDataDir(
 async function withClient(
   options: TemplatesOptions,
   deps: TemplatesDeps,
-  run: (client: Client, io: CommandIo) => Promise<number>,
+  run: (client: TemplatesClient, io: CommandIo) => Promise<number>,
 ): Promise<number> {
   const io = options.io ?? processIo;
   const dataDir = await resolveDataDir(options, io);
   if (dataDir === undefined) return 2;
 
-  let client: Client;
+  let client: TemplatesClient;
   try {
     client = await deps.connect(socketPathFor(dataDir));
   } catch {

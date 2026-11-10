@@ -322,3 +322,119 @@ test("an incompatible hello rejects the connection", async () => {
   expect(error).toMatchObject({ code: "protocol.version_mismatch" });
   await daemon.close();
 });
+
+/** Pushes one event frame, then answers the request as a barrier. */
+function eventThenReply(event: string, data: unknown): Handler {
+  return autoHello((frame, reply) => {
+    reply({ event, data });
+    reply({ id: frame.id, result: {} });
+  });
+}
+
+test("delivers event frames to every listener and unsubscribes only one", async () => {
+  const daemon = await fakeDaemon(eventThenReply("turn.delta", { text: "a" }));
+  const client = await connectClient(daemon.path);
+  try {
+    const first: unknown[] = [];
+    const second: unknown[] = [];
+    const unsubscribe = client.onEvent((event) => first.push(event));
+    client.onEvent((event) => second.push(event));
+
+    await client.request("turn.start", {});
+    expect(first).toEqual([{ event: "turn.delta", data: { text: "a" } }]);
+    expect(second).toEqual([{ event: "turn.delta", data: { text: "a" } }]);
+
+    unsubscribe();
+    unsubscribe();
+    await client.request("turn.start", {});
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(2);
+  } finally {
+    client.close();
+    await daemon.close();
+  }
+});
+
+test("a response frame resolves its waiter without reaching listeners", async () => {
+  const daemon = await fakeDaemon(
+    autoHello((frame, reply) => {
+      reply({ id: frame.id, result: { ok: true } });
+    }),
+  );
+  const client = await connectClient(daemon.path);
+  try {
+    const listener = vi.fn();
+    client.onEvent(listener);
+    await expect(client.request("template.list", {})).resolves.toEqual({ ok: true });
+    expect(listener).not.toHaveBeenCalled();
+  } finally {
+    client.close();
+    await daemon.close();
+  }
+});
+
+test.each([
+  { result: {} },
+  { event: 7, data: { text: "x" } },
+  { event: "turn.delta", data: [1, 2] },
+  { event: "turn.delta" },
+])("a frame that is neither a response nor an event closes the connection", async (frame) => {
+  const daemon = await fakeDaemon(
+    autoHello((_frame, reply) => {
+      reply(frame);
+      reply({ event: "turn.delta", data: { text: "late" } });
+    }),
+  );
+  const client = await connectClient(daemon.path);
+  try {
+    const listener = vi.fn();
+    client.onEvent(listener);
+    const error = await client.request("turn.start", {}).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ClientError);
+    expect(error).toMatchObject({
+      code: "client.protocol",
+      message: "Invalid response from daemon",
+    });
+    await expect(client.request("turn.start", {})).rejects.toMatchObject({
+      code: "client.closed",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(listener).not.toHaveBeenCalled();
+  } finally {
+    client.close();
+    await daemon.close();
+  }
+});
+
+test("close clears listeners so later frames are not delivered", async () => {
+  const daemon = await fakeDaemon(autoHello(() => {}));
+  const client = await connectClient(daemon.path);
+  const listener = vi.fn();
+  client.onEvent(listener);
+  client.close();
+
+  const serverSide = daemon.sockets[0];
+  expect(serverSide).toBeDefined();
+  serverSide?.write(`${JSON.stringify({ event: "turn.delta", data: { text: "late" } })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(listener).not.toHaveBeenCalled();
+  await daemon.close();
+});
+
+test("a throwing listener does not stop the others or break the client", async () => {
+  const daemon = await fakeDaemon(eventThenReply("turn.delta", { text: "a" }));
+  const client = await connectClient(daemon.path);
+  try {
+    const received: unknown[] = [];
+    client.onEvent(() => {
+      throw new Error("listener boom");
+    });
+    client.onEvent((event) => received.push(event));
+
+    await expect(client.request("turn.start", {})).resolves.toEqual({});
+    expect(received).toEqual([{ event: "turn.delta", data: { text: "a" } }]);
+  } finally {
+    client.close();
+    await daemon.close();
+  }
+});
