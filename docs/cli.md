@@ -9,8 +9,8 @@ daemon 侧的安全边界见 `docs/daemon-linux.md`。
 ## 1. 支持范围
 
 - 仅 Linux x64；Node.js `>=22.19.0`，ESM。
-- 命令：`start`、`status`、`stop`。没有 `run`、`sessions`、`client`、`models`、`providers check`、
-  `config`、`auth`、`extensions`、`templates`（见 §8）。
+- 命令：`start`、`status`、`stop`，以及 `templates list|preview|apply`（模板细节见 `docs/templates.md`）。
+  没有 `run`、`sessions`、`client`、`models`、`providers check`、`config`、`auth`、`extensions`（见 §8）。
 - 本地只在 Node 26.13.0 x64 上验证。CI 配置了 Node 22.19.0 / 24 / 26 x64，但本阶段未 push，
   远端矩阵结果**未验证**。
 - macOS 与 Windows 不是当前实现；daemon 在绑定 socket 前以 `daemon.unsupported_platform` 失败，
@@ -82,6 +82,7 @@ OpenAI 兼容示例：
 | `models[].contextWindow` / `maxOutput` | 是 | 正整数 |
 | `models[].modalities` | 是 | 非空，元素为 `text`、`image`、`audio` |
 | `defaults` | 否 | `{ "provider": ..., "model": ... }`，必须指向已声明的组合 |
+| `templatesDir` | 否 | 模板目录；绝对路径（支持 `~/`），`start` 作为第三个 argv 传给 daemon 子进程 |
 
 - 未知键、类型错误、重复 `id`、相对 `dataDir` 均视为不合法，退出 2。
 - CLI 只暴露一种方言 `openai-chat`；`baseUrl` 必须能提供 OpenAI Chat Completions 兼容接口。
@@ -238,12 +239,11 @@ $ echo $?
 ## 8. 本阶段未交付
 
 - `run`（交互/`--print`/`--json`）、`sessions list|export|cancel`、`client list|start`、
-  `models list`、`providers check`、`config list|get|set|unset`、`auth`、`extensions list`、
-  `templates list|preview|apply`。
-- 配置文件中的扩展配置、默认工作区、会话级设置；CLI 配置只接受 `dataDir`、`providers`（及可选的
-  `defaults`），其中 `defaults` 只被传给 daemon 作为协议会话的默认 provider/model，CLI 自身没有命令
-  读取它。
-- 凭据文件、密钥校验（`auth`）、扩展安装/更新、模板创建。
+  `models list`、`providers check`、`config list|get|set|unset`、`auth`、`extensions list`。
+- 配置文件中的扩展配置、默认工作区、会话级设置；CLI 配置只接受 `dataDir`、`providers`、可选的
+  `defaults` 与 `templatesDir`，其中 `defaults` 只被传给 daemon 作为协议会话的默认 provider/model，
+  CLI 自身没有命令读取它。模板命令已交付，见 `docs/templates.md`。
+- 凭据文件、密钥校验（`auth`）、扩展安装/更新。
 - macOS 与 Windows：仅 Linux x64 已实现并验证。
 - 多用户共享 dataDir、非本地（网络）socket、systemd 等进程管理器集成。
 
@@ -283,3 +283,7 @@ node packages/daemon/native/build.mjs
 pnpm exec tsc -b tsconfig.build.json
 pnpm exec vitest run packages/cli/test/cli-lifecycle.test.ts
 ```
+
+模板命令的真实进程验收在同目录的 `packages/cli/test/templates-e2e.test.ts`（构建后的 CLI 启动真实
+daemon，覆盖 `list`/`preview`/`apply`、无 `--confirm` 退出 2、`daemon.unreachable` 退出 1），
+细节见 `docs/templates.md` §11。

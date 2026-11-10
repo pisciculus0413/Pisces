@@ -695,7 +695,9 @@ stop
 
 `Template` 负责模板类型与初始化计划的定义；`TemplateStore` 负责模板存储。
 
-初始化流程：用户选择模板 → 解析并展示将要创建的目录、文件与将执行的脚本 → 用户确认 → 服务层 `WorkspaceAccess` 创建目录与文件，`ExecHost` 执行初始化脚本（如有）。
+初始化流程：用户选择模板 → 解析并展示将要创建的目录、文件、冲突与将执行的脚本（含 argv 与超时） → 用户确认 → 服务层 `WorkspaceAccess` 创建目录与文件，`ExecHost` 执行初始化脚本（如有） → 读取提示词文件并记录项目 → 创建临时会话。
+
+预览无副作用；应用必须显式确认（`confirmed: true`），已存在文件默认为冲突，需 `overwrite` 才覆盖。脚本失败不写项目记录、不创建会话；已创建文件不回滚。初始化脚本以 daemon 用户身份运行，不是沙箱；项目记录追加到 `<dataDir>/projects.json`。CLI 入口为 `pisces templates list|preview|apply`，见 `docs/templates.md`。
 
 模板只引用可用的扩展条目与配置，不内嵌凭据。
 
@@ -703,14 +705,15 @@ stop
 @startuml
 start
 :用户选择模板;
-:解析并展示目录、文件与脚本;
+:解析并展示目录、文件、冲突与脚本\n（含 argv 与超时）;
 :用户确认;
 :WorkspaceAccess 创建目录与文件;
 if (有初始化脚本?) then (是)
   :ExecHost 执行脚本;
 else (否)
 endif
-:创建会话;
+:读取提示词文件并记录项目;
+:创建临时会话;
 stop
 @enduml
 ```
@@ -789,8 +792,8 @@ interface Event<E = JsonValue> {
 | 消息队列 | `queue.clear` | `{ sessionId }` | `{ ids }` |
 | 可用条目 | `entries.snapshot` | `{ sessionId }` | `{ entries: EntrySnapshot[], selection, effective }` |
 | 模板 | `template.list` | `{}` | `{ templates }` |
-| 模板 | `template.preview` | `{ templateId, workspace }` | `{ directories, files, initScript }` |
-| 模板 | `template.apply` | `{ templateId, workspace, confirmed: true }` | `{ projectId, sessionId }` |
+| 模板 | `template.preview` | `{ templateId, workspace }` | `TemplatePreview`（目录、文件、冲突、脚本含 `timeoutMs`） |
+| 模板 | `template.apply` | `{ templateId, workspace, confirmed: true, overwrite? }` | `{ projectId, sessionId }` |
 | 客户端 | `client.list` | `{}` | `{ clients }` |
 | 客户端 | `client.start` | `{ id }` | `{ pid }` |
 
@@ -1162,28 +1165,38 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
 - 扩展的安装、更新与移除由 npm、git 完成，不在本软件生命周期内。
 - `run` 交互中按 Ctrl-C 等同 `sessions cancel <id>`。
 
-实现状态（本阶段）：CLI 已实现 `--help`、`--version` 与 `start`/`status`/`stop`。`start` 以 detached
+实现状态（本阶段）：CLI 已实现 `--help`、`--version`、`start`/`status`/`stop` 与
+`templates list`/`preview`/`apply`。`start` 以 detached
 子进程启动 daemon，写入 pid 记录与日志，只有子进程存活、pid 记录仍指向它、且本 dataDir 的 socket
 完成 `protocol.hello` 握手后才报告成功（总预算 10 s，轮询 50 ms）；`status` 结合进程存活、socket
 探测与 pid 记录给出 `running`/`stopped`/`stale`/`unresponsive`/`unmanaged`，`--json` 输出同名
 `state`；`stop` 仅在记录中的 pid 存活且同一 socket 应答后发送 `SIGTERM`，最多等待 10 s，陈旧记录与
-PID 复用防护见 §8.1。其余命令（`run`、`sessions`、`client`、`models`、`providers check`、
-`config`、`auth`、`extensions`、`templates`）仍为目标设计，**未实现**。CLI 仅支持 Linux x64，
+PID 复用防护见 §8.1。模板命令经单个短连接调用 `template.*`，`apply` 必须显式 `--confirm`，
+详见 `docs/templates.md`。其余命令（`run`、`sessions`、`client`、`models`、`providers check`、
+`config`、`auth`、`extensions`）仍为目标设计，**未实现**。CLI 仅支持 Linux x64，
 只暴露 `openai-chat` 方言；配置、凭据与恢复步骤见 `docs/cli.md`。
 
 ### 6.9 模板接口
 
+协议只传输展示与预览形态：
+
 ```ts
-interface Template {
+interface TemplateInfo {
   id: string;
   name: string;
   description?: string;
-  config?: JsonValue;
-  directories?: string[];
-  files?: { path: string; content: string }[];
-  initScript?: { command: string; args: string[] };
+}
+
+interface TemplatePreview {
+  directories: string[];
+  files: { path: string; content: string }[];
+  conflicts: string[];
+  initScript?: { command: string; args: string[]; timeoutMs: number };
 }
 ```
+
+完整 `Template`（含 `config`：`provider`/`model`/`extensions`/`systemPromptFile`）只存在于 daemon
+的模板加载模块，不导出到协议。
 
 ```ts
 interface ProjectRef {
@@ -1195,6 +1208,13 @@ interface ProjectRef {
 ```
 
 `TemplateStore` 读取并校验模板，并记录由模板衍生的项目；用户确认后，`WorkspaceAccess` 创建目录与文件，`ExecHost` 执行 `initScript`（如有）；模板的配置作为新会话的初始值；模板创建的文件作为工作区内容，需要进入请求体的提示词按 §5.2 的队列与确认流程处理。
+
+实现状态：`template.list` 返回 `{ templates }`；`template.preview` 返回 `TemplatePreview` 且无副作用；
+`template.apply` 要求 `confirmed: true`，冲突需 `overwrite`，预检失败不写盘，成功后追加 `ProjectRef` 并
+返回 `{ projectId, sessionId }`，会话首次 `turn.start` 才落盘；`session.create` 的 `templateId` 只解
+析模板配置作为默认值，不写盘、不执行脚本。宿主通过 `startDaemon({ templates: { configDir } })` 装配，
+未装配时 `template.*` 仍为 `protocol.unknown_method`。错误码、脚本与路径规则、CLI 与已知限制见
+`docs/templates.md`。
 
 ## 7 数据设计
 
