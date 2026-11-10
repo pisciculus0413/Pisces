@@ -26,6 +26,7 @@ import {
   productionProvidersDeps,
   providerList,
 } from "./providers.js";
+import { sessionExport } from "./session-export.js";
 import { productionSessionsDeps, type SessionsDeps, sessionsList } from "./sessions.js";
 import {
   productionTemplatesDeps,
@@ -55,7 +56,7 @@ export const USAGE = [
   "  templates  list, preview or apply a template",
   "  config     list, get, set or unset configuration values",
   "  extensions list discovered extensions without loading them",
-  "  sessions   list persisted sessions",
+  "  sessions   list, export or cancel sessions",
   "  provider   list providers known to the daemon",
   "  models     list models of every provider",
   "",
@@ -63,6 +64,7 @@ export const USAGE = [
   "  --config <path>     configuration file (default: <config home>/pisces/config.json)",
   "  --data-dir <path>   override the configured data directory",
   "  --provider <id>     only list models of this provider (models list)",
+  "  --node <id>         export only this node's branch (sessions export)",
   "  --scope <scope>     config scope: global (default) or workspace",
   "  --workspace <dir>   workspace directory (config workspace scope, extensions list)",
   "  --json              machine-readable output (status, templates, config, extensions, sessions,",
@@ -83,7 +85,7 @@ type ConfigSub = (typeof CONFIG_SUBS)[number];
 const EXTENSIONS_SUBS = ["list"] as const;
 type ExtensionsSub = (typeof EXTENSIONS_SUBS)[number];
 
-const SESSIONS_SUBS = ["list"] as const;
+const SESSIONS_SUBS = ["list", "export", "cancel"] as const;
 type SessionsSub = (typeof SESSIONS_SUBS)[number];
 
 const PROVIDER_SUBS = ["list"] as const;
@@ -126,13 +128,16 @@ interface ConfigCommon {
   json: boolean;
 }
 
-interface SessionsParsed {
+interface SessionsCommon {
   command: "sessions";
-  sub: "list";
   configPath?: string;
   dataDir?: string;
-  json: boolean;
 }
+
+type SessionsParsed =
+  | (SessionsCommon & { sub: "list"; json: boolean })
+  | (SessionsCommon & { sub: "export"; sessionId: string; nodeId?: string })
+  | (SessionsCommon & { sub: "cancel"; sessionId: string });
 
 type ConfigParsed =
   | (ConfigCommon & { sub: "list" })
@@ -407,7 +412,12 @@ function parseExtensions(
   return parsed;
 }
 
-/** `sessions <list>`; `undefined` is always a usage error. */
+/**
+ * `sessions <list|export|cancel>`; `undefined` is always a usage error.
+ *
+ * `--json` belongs to `list` only, `--node` to `export` only, and `export` and
+ * `cancel` take exactly one positional session id.
+ */
 function parseSessions(argv: readonly string[]): SessionsParsed | "help" | "version" | undefined {
   const sub = argv[1];
   if (sub === "--help") return "help";
@@ -416,35 +426,49 @@ function parseSessions(argv: readonly string[]): SessionsParsed | "help" | "vers
 
   let configPath: string | undefined;
   let dataDir: string | undefined;
+  let nodeId: string | undefined;
   let json = false;
+  const positionals: string[] = [];
 
   for (let index = 2; index < argv.length; index += 1) {
     const argument = argv[index];
+    if (argument === undefined) return undefined;
     if (argument === "--help") return "help";
     if (argument === "--version") return "version";
     if (argument === "--json") {
+      if (sub !== "list") return undefined;
       json = true;
       continue;
     }
-    if (argument === "--config" || argument === "--data-dir") {
+    if (argument === "--config" || argument === "--data-dir" || argument === "--node") {
+      // `--node` only exists for `export`; anywhere else it is unknown.
+      if (argument === "--node" && sub !== "export") return undefined;
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("-")) return undefined;
       if (argument === "--config") configPath = value;
-      else dataDir = value;
+      else if (argument === "--data-dir") dataDir = value;
+      else nodeId = value;
       index += 1;
       continue;
     }
-    // `list` takes no positionals.
-    return undefined;
+    // Unknown flags and leftover positionals are both usage errors.
+    if (argument.startsWith("-") || sub === "list") return undefined;
+    positionals.push(argument);
   }
 
-  return {
+  const common: SessionsCommon = {
     command: "sessions",
-    sub,
-    json,
     ...(configPath !== undefined ? { configPath } : {}),
     ...(dataDir !== undefined ? { dataDir } : {}),
   };
+  if (sub === "list") return { ...common, sub, json };
+
+  const [sessionId] = positionals;
+  if (positionals.length !== 1 || sessionId === undefined) return undefined;
+  if (sub === "export") {
+    return { ...common, sub, sessionId, ...(nodeId !== undefined ? { nodeId } : {}) };
+  }
+  return { ...common, sub, sessionId };
 }
 
 /** `provider list` and `models list`; `undefined` is always a usage error. */
@@ -548,15 +572,28 @@ export async function runCli(
   }
 
   if (parsed.command === "sessions") {
-    return await sessionsList(
-      {
-        configPath: parsed.configPath ?? defaultConfigPath(process.env),
-        io,
-        json: parsed.json,
-        ...(parsed.dataDir !== undefined ? { dataDir: parsed.dataDir } : {}),
-      },
-      sessionDeps,
-    );
+    const options = {
+      configPath: parsed.configPath ?? defaultConfigPath(process.env),
+      io,
+      ...(parsed.dataDir !== undefined ? { dataDir: parsed.dataDir } : {}),
+    };
+    switch (parsed.sub) {
+      case "list":
+        return await sessionsList({ ...options, json: parsed.json }, sessionDeps);
+      case "export":
+        return await sessionExport(
+          {
+            ...options,
+            sessionId: parsed.sessionId,
+            ...(parsed.nodeId !== undefined ? { nodeId: parsed.nodeId } : {}),
+          },
+          sessionDeps,
+        );
+      default:
+        // `cancel` dispatches once its command lands; until then it is a usage error.
+        io.err(USAGE);
+        return 2;
+    }
   }
 
   if (parsed.command === "provider" || parsed.command === "models") {

@@ -1,23 +1,17 @@
 import type { SessionId, SessionMeta } from "@pisces/core";
-import {
-  type Client,
-  ClientError,
-  connectClient,
-  type RequestOptions,
-  UNREACHABLE_MESSAGE,
-} from "./client.js";
+import { ClientError, connectClient, type RequestOptions, UNREACHABLE_MESSAGE } from "./client.js";
 import { type CommandIo, processIo } from "./commands.js";
 import { loadConfig } from "./config.js";
 import { socketPathFor } from "./lifecycle.js";
 
 /**
- * The `sessions` subcommands: currently `list` only.
+ * The `sessions` subcommands share one short-lived connection.
  *
- * The command resolves the data directory exactly like the lifecycle commands,
- * opens one short-lived protocol connection, sends `session.list` and closes.
- * Ordering is a client concern: persisted sessions are sorted newest first for
- * human output, while `--json` prints the daemon result unchanged. Session
- * files are never read directly.
+ * The helper resolves the data directory exactly like the lifecycle commands,
+ * opens a connection, runs the subcommand and always closes the connection.
+ * Configuration, connection and protocol failures map onto the fixed CLI exit
+ * codes here so every subcommand reports them identically. Session files are
+ * never read directly.
  */
 
 const CONFIG_MESSAGE = "Invalid configuration";
@@ -37,10 +31,13 @@ export const productionSessionsDeps: SessionsDeps = {
   connect: (socketPath, timeoutMs) => connectClient(socketPath, timeoutMs),
 };
 
-export interface SessionsListOptions {
+export interface SessionsOptions {
   configPath: string;
   dataDir?: string;
   io?: CommandIo;
+}
+
+export interface SessionsListOptions extends SessionsOptions {
   json?: boolean;
 }
 
@@ -86,9 +83,15 @@ function newestFirst(sessions: readonly SessionMeta[]): SessionMeta[] {
   });
 }
 
-export async function sessionsList(
-  options: SessionsListOptions,
-  deps: SessionsDeps = productionSessionsDeps,
+/**
+ * Runs `run` on one connected client and maps every failure onto the fixed
+ * messages. `run` returning a code keeps it; a thrown `ClientError` passes its
+ * code and message through; anything else becomes `client.protocol`.
+ */
+export async function withSessionsClient(
+  options: SessionsOptions,
+  deps: SessionsDeps,
+  run: (client: SessionsClient, io: CommandIo) => Promise<number>,
 ): Promise<number> {
   const io = options.io ?? processIo;
   let dataDir: string;
@@ -100,7 +103,7 @@ export async function sessionsList(
     return 2;
   }
 
-  let client: Client;
+  let client: SessionsClient;
   try {
     client = await deps.connect(socketPathFor(dataDir));
   } catch {
@@ -109,6 +112,25 @@ export async function sessionsList(
   }
 
   try {
+    return await run(client, io);
+  } catch (error) {
+    if (error instanceof ClientError) {
+      io.err(`error: ${error.code}: ${error.message}`);
+    } else {
+      io.err(`error: client.protocol: ${PROTOCOL_MESSAGE}`);
+    }
+    return 1;
+  } finally {
+    client.close();
+  }
+}
+
+/** Newest-first human output; `--json` prints the daemon result unchanged. */
+export async function sessionsList(
+  options: SessionsListOptions,
+  deps: SessionsDeps = productionSessionsDeps,
+): Promise<number> {
+  return await withSessionsClient(options, deps, async (client, io) => {
     const result = await client.request("session.list", {});
     if (options.json === true) {
       io.out(JSON.stringify(result));
@@ -120,14 +142,5 @@ export async function sessionsList(
       );
     }
     return 0;
-  } catch (error) {
-    if (error instanceof ClientError) {
-      io.err(`error: ${error.code}: ${error.message}`);
-    } else {
-      io.err(`error: client.protocol: ${PROTOCOL_MESSAGE}`);
-    }
-    return 1;
-  } finally {
-    client.close();
-  }
+  });
 }
