@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MAX_FRAME_BYTES, PROTOCOL_VERSION } from "@pisces/protocol";
 import { afterEach, expect, test, vi } from "vitest";
-import { CLIENT_TIMEOUT_MS, ClientError, connectClient } from "../src/client.js";
+import {
+  CLIENT_TIMEOUT_MS,
+  ClientError,
+  connectClient,
+  type EventListener,
+} from "../src/client.js";
 
 const roots: string[] = [];
 
@@ -353,6 +358,49 @@ test("delivers event frames to every listener and unsubscribes only one", async 
     client.close();
     await daemon.close();
   }
+});
+
+test("the same function registered twice unsubscribes one registration only", async () => {
+  const daemon = await fakeDaemon(eventThenReply("turn.delta", { text: "a" }));
+  const client = await connectClient(daemon.path);
+  try {
+    const received: unknown[] = [];
+    const listener: EventListener = (event) => received.push(event);
+    const unsubscribeFirst = client.onEvent(listener);
+    client.onEvent(listener);
+
+    await client.request("turn.start", {});
+    expect(received).toEqual([
+      { event: "turn.delta", data: { text: "a" } },
+      { event: "turn.delta", data: { text: "a" } },
+    ]);
+
+    unsubscribeFirst();
+    unsubscribeFirst();
+    await client.request("turn.start", {});
+    expect(received).toEqual([
+      { event: "turn.delta", data: { text: "a" } },
+      { event: "turn.delta", data: { text: "a" } },
+      { event: "turn.delta", data: { text: "a" } },
+    ]);
+  } finally {
+    client.close();
+    await daemon.close();
+  }
+});
+
+test("onEvent on a closed client is inert and returns a no-op unsubscribe", async () => {
+  const daemon = await fakeDaemon(autoHello(() => {}));
+  const client = await connectClient(daemon.path);
+  client.close();
+
+  const listener = vi.fn();
+  const unsubscribe = client.onEvent(listener);
+  expect(typeof unsubscribe).toBe("function");
+  expect(unsubscribe()).toBeUndefined();
+  expect(unsubscribe()).toBeUndefined();
+  expect(listener).not.toHaveBeenCalled();
+  await daemon.close();
 });
 
 test("a response frame resolves its waiter without reaching listeners", async () => {

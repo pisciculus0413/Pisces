@@ -55,10 +55,17 @@ export type EventListener = (event: ProtocolEvent) => void;
 export interface Client {
   request(method: string, params?: unknown, options?: RequestOptions): Promise<unknown>;
   /**
-   * Registers a listener for daemon-pushed event frames. Returns an unsubscribe
-   * function that removes only this listener and is safe to call repeatedly.
-   * A throwing listener is caught and ignored, so it can neither stop the other
-   * listeners nor break the connection.
+   * Registers a listener for daemon-pushed event frames. Each call is an
+   * independent registration, so the same function registered twice is invoked
+   * twice per event. Returns an unsubscribe function that removes only its own
+   * registration and is safe to call repeatedly. A throwing listener is caught
+   * and ignored, so it can neither stop the other listeners nor break the
+   * connection; likewise, a listener that closes the client does not stop
+   * delivery to the listeners remaining for the event being dispatched.
+   *
+   * Events are not buffered: frames that arrive before registration are dropped,
+   * and on an already-closed client this returns a no-op unsubscribe without
+   * retaining the listener.
    */
   onEvent(listener: EventListener): () => void;
   close(): void;
@@ -134,11 +141,14 @@ function createClient(socket: Socket, timeoutMs: number): Client {
   let nextId = 0;
   let closed = false;
   const waiters = new Map<string, Waiter>();
-  const listeners = new Set<EventListener>();
+  // Keyed by registration token so registering the same function twice yields
+  // two independent registrations (a Set would collapse them).
+  const listeners = new Map<number, EventListener>();
+  let nextListenerToken = 0;
 
-  /** A listener failure stays local: the rest of the set and the client live on. */
+  /** A listener failure stays local: the rest of the registrations and the client live on. */
   const deliver = (event: ProtocolEvent): void => {
-    for (const listener of [...listeners]) {
+    for (const listener of [...listeners.values()]) {
       try {
         listener(event);
       } catch {
@@ -265,9 +275,12 @@ function createClient(socket: Socket, timeoutMs: number): Client {
       });
     },
     onEvent(listener) {
-      listeners.add(listener);
+      if (closed) return () => {};
+      nextListenerToken += 1;
+      const token = nextListenerToken;
+      listeners.set(token, listener);
       return () => {
-        listeners.delete(listener);
+        listeners.delete(token);
       };
     },
     close() {
