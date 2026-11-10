@@ -67,8 +67,8 @@ export const USAGE = [
   "  --node <id>         export only this node's branch (sessions export)",
   "  --scope <scope>     config scope: global (default) or workspace",
   "  --workspace <dir>   workspace directory (config workspace scope, extensions list)",
-  "  --json              machine-readable output (status, templates, config, extensions, sessions,",
-  "                      provider, models)",
+  "  --json              machine-readable output (status, templates, config, extensions,",
+  "                      sessions list, provider, models)",
   "  --help              show this help",
   "  --version           print the version",
 ].join("\n");
@@ -444,7 +444,7 @@ function parseSessions(argv: readonly string[]): SessionsParsed | "help" | "vers
       // `--node` only exists for `export`; anywhere else it is unknown.
       if (argument === "--node" && sub !== "export") return undefined;
       const value = argv[index + 1];
-      if (value === undefined || value.startsWith("-")) return undefined;
+      if (value === undefined || value === "" || value.startsWith("-")) return undefined;
       if (argument === "--config") configPath = value;
       else if (argument === "--data-dir") dataDir = value;
       else nodeId = value;

@@ -143,8 +143,8 @@ test("export prints every page as jsonl and follows nextCursor", async () => {
 
   expect(code).toBe(0);
   expect(client.calls).toEqual([
-    { method: "session.read", params: { sessionId: "s1" } },
-    { method: "session.read", params: { sessionId: "s1", cursor: "b" } },
+    { method: "session.read", params: { sessionId: "s1", limit: 262_144 } },
+    { method: "session.read", params: { sessionId: "s1", limit: 262_144, cursor: "b" } },
   ]);
   expect(rec.out).toEqual([JSON.stringify(a), JSON.stringify(b), JSON.stringify(c)]);
   expect(rec.out.map((line) => JSON.parse(line))).toEqual([a, b, c]);
@@ -170,10 +170,45 @@ test("--node is forwarded as nodeId on every page", async () => {
 
   expect(code).toBe(0);
   expect(client.calls).toEqual([
-    { method: "session.read", params: { sessionId: "s1", nodeId: "n1" } },
-    { method: "session.read", params: { sessionId: "s1", nodeId: "n1", cursor: "b" } },
+    { method: "session.read", params: { sessionId: "s1", nodeId: "n1", limit: 262_144 } },
+    {
+      method: "session.read",
+      params: { sessionId: "s1", nodeId: "n1", limit: 262_144, cursor: "b" },
+    },
   ]);
   expect(rec.out).toEqual([JSON.stringify(a), JSON.stringify(b)]);
+});
+
+test("every page requests the byte limit while forwarding nodeId and cursor", async () => {
+  const pages = [node("a", "a"), node("b", "a"), node("c", "b")];
+  const client = fakeClient((_method, params) => {
+    const { cursor } = params as { cursor?: string };
+    if (cursor === undefined) return { records: [pages[0]], nextCursor: "a" };
+    if (cursor === "a") return { records: [pages[1]], nextCursor: "b" };
+    return { records: [pages[2]] };
+  });
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await sessionExport(
+    { configPath, io: rec.io, sessionId: "s1", nodeId: "n1" },
+    client.deps,
+  );
+
+  expect(code).toBe(0);
+  expect(client.calls).toEqual([
+    { method: "session.read", params: { sessionId: "s1", nodeId: "n1", limit: 262_144 } },
+    {
+      method: "session.read",
+      params: { sessionId: "s1", nodeId: "n1", limit: 262_144, cursor: "a" },
+    },
+    {
+      method: "session.read",
+      params: { sessionId: "s1", nodeId: "n1", limit: 262_144, cursor: "b" },
+    },
+  ]);
+  expect(rec.out).toEqual(pages.map((page) => JSON.stringify(page)));
+  expect(client.closed).toBe(true);
 });
 
 test("an empty first page prints nothing and exits 0", async () => {
@@ -306,7 +341,9 @@ test("runCli routes sessions export", async () => {
 
   expect(code).toBe(0);
   expect(rec.out).toEqual([JSON.stringify(a)]);
-  expect(client.calls).toEqual([{ method: "session.read", params: { sessionId: "s1" } }]);
+  expect(client.calls).toEqual([
+    { method: "session.read", params: { sessionId: "s1", limit: 262_144 } },
+  ]);
 });
 
 test("runCli routes sessions export with --node and --data-dir", async () => {
@@ -327,8 +364,32 @@ test("runCli routes sessions export with --node and --data-dir", async () => {
   expect(code).toBe(0);
   expect(client.socketPath).toBe(join(dataDir, "run", "pisces.sock"));
   expect(client.calls).toEqual([
-    { method: "session.read", params: { sessionId: "s1", nodeId: "n1" } },
+    { method: "session.read", params: { sessionId: "s1", nodeId: "n1", limit: 262_144 } },
   ]);
+});
+
+test("runCli rejects empty sessions option values as usage errors", async () => {
+  const cases = [
+    ["sessions", "export", "s1", "--node", ""],
+    ["sessions", "export", "s1", "--config", ""],
+    ["sessions", "list", "--data-dir", ""],
+  ];
+  let connects = 0;
+  const deps: SessionsDeps = {
+    async connect(): Promise<SessionsClient> {
+      connects += 1;
+      throw new Error("must not connect");
+    },
+  };
+
+  for (const argv of cases) {
+    const rec = recorder();
+    const code = await runCli(argv, rec.io, undefined, undefined, deps);
+    expect(code, argv.join(" ")).toBe(2);
+    expect(rec.err.join("\n"), argv.join(" ")).toContain("usage:");
+    expect(rec.out, argv.join(" ")).toEqual([]);
+  }
+  expect(connects).toBe(0);
 });
 
 test("runCli rejects sessions export and cancel usage errors without connecting", async () => {

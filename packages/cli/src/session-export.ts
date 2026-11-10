@@ -10,9 +10,16 @@ import { productionSessionsDeps, type SessionsDeps, withSessionsClient } from ".
  * leaks. Pagination follows `nextCursor` until it is absent; a cursor that
  * repeats means the daemon is looping, which is reported as a protocol error
  * instead of retrying forever.
+ *
+ * Every request asks for a bounded page (`PAGE_LIMIT` serialized bytes), so a
+ * large tree is spread over several responses instead of blowing the 4 MiB
+ * response budget with `protocol.frame_too_large`.
  */
 
 const PROTOCOL_MESSAGE = "Invalid response from daemon";
+
+/** Serialized-byte page budget sent as `session.read` `limit` on every request. */
+const PAGE_LIMIT = 262_144;
 
 export interface SessionExportOptions {
   configPath: string;
@@ -68,8 +75,8 @@ export async function sessionExport(
   return await withSessionsClient(options, deps, async (client, io) => {
     const base =
       options.nodeId === undefined
-        ? { sessionId: options.sessionId }
-        : { sessionId: options.sessionId, nodeId: options.nodeId };
+        ? { sessionId: options.sessionId, limit: PAGE_LIMIT }
+        : { sessionId: options.sessionId, nodeId: options.nodeId, limit: PAGE_LIMIT };
     const seen = new Set<string>();
     let cursor: string | undefined;
 
