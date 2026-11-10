@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import type { CommandIo } from "../src/commands.js";
 import { loadConfig } from "../src/config.js";
 import {
@@ -24,6 +24,7 @@ const NO_WORKSPACE_MESSAGE = "No workspace directory";
 const roots: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   delete process.env[KEY_ENV];
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -216,6 +217,55 @@ test("set rejects a dangling defaults reference while providers exist", async ()
   expect(
     await configSet({ configPath, io: io.io, path: "defaults.model", value: '"missing"' }, deps),
   ).toBe(2);
+  expect(await readFile(configPath, "utf8")).toBe(before);
+});
+
+test("set and unset accept the tilde paths that loadConfig expands", async () => {
+  const { root, configPath, io, deps } = await fixture();
+  const home = join(root, "home");
+  vi.stubEnv("HOME", home);
+  await writeConfig(configPath, fullConfig({ dataDir: "~/state", templatesDir: "~/templates" }));
+
+  // The loader already accepts the raw draft, so every edit must accept it too.
+  const loaded = await loadConfig(configPath);
+  expect(loaded.dataDir).toBe(join(home, "state"));
+  expect(loaded.templatesDir).toBe(join(home, "templates"));
+
+  expect(
+    await configSet(
+      { configPath, io: io.io, path: "providers.0.models.0.maxOutput", value: "8192" },
+      deps,
+    ),
+  ).toBe(0);
+  expect(io.err).toEqual([]);
+  // The written file keeps the raw `~`, exactly as hand-written.
+  const written = JSON.parse(await readFile(configPath, "utf8")) as Record<string, unknown>;
+  expect(written.dataDir).toBe("~/state");
+  expect(written.templatesDir).toBe("~/templates");
+
+  expect(await configUnset({ configPath, io: io.io, path: "templatesDir" }, deps)).toBe(0);
+  const afterUnset = JSON.parse(await readFile(configPath, "utf8")) as Record<string, unknown>;
+  expect(afterUnset.templatesDir).toBeUndefined();
+  expect(afterUnset.dataDir).toBe("~/state");
+});
+
+test("set still rejects a relative dataDir and a tilde path without HOME", async () => {
+  const { configPath, io, deps } = await fixture();
+  await writeConfig(configPath, fullConfig());
+  const before = await readFile(configPath, "utf8");
+
+  expect(
+    await configSet({ configPath, io: io.io, path: "dataDir", value: '"relative/state"' }, deps),
+  ).toBe(2);
+  expect(io.err).toEqual([`error: config.invalid: ${INVALID_MESSAGE}`]);
+  expect(await readFile(configPath, "utf8")).toBe(before);
+
+  io.err.length = 0;
+  vi.stubEnv("HOME", "");
+  expect(
+    await configSet({ configPath, io: io.io, path: "templatesDir", value: '"~/tpl"' }, deps),
+  ).toBe(2);
+  expect(io.err).toEqual([`error: config.invalid: ${INVALID_MESSAGE}`]);
   expect(await readFile(configPath, "utf8")).toBe(before);
 });
 

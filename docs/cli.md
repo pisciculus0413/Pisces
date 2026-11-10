@@ -224,12 +224,15 @@ $ echo $?
 ```
 
 退出码：成功 0；`config.key_not_found` 为 1；`config.invalid`、`config.unknown_key`、
-`config.no_workspace` 与用法错误为 2。错误只输出固定文案，不回显配置值。
+`config.no_workspace`、`storage.io`（写入失败）与用法错误为 2。错误只输出固定文案，不回显配置值。
+
+`dataDir` 与 `templatesDir` 允许以 `~` 或 `~/...` 开头：草稿校验会像加载器一样展开为 `$HOME`
+后再判断是否绝对路径，但写入文件时保留原样的 `~`（`HOME` 缺失时按 `config.invalid` 失败）。
 
 ### `extensions list`
 
 ```bash
-pisces extensions list [--workspace <dir>] [--json]
+pisces extensions list [--config <path>] [--workspace <dir>] [--json]
 ```
 
 - 来源：内置 `extensions/builtin`、`<configDir>/extensions/`、`<workspace>/.pisces/extensions/`
@@ -241,7 +244,8 @@ pisces extensions list [--workspace <dir>] [--json]
 - 每行 `name type origin`，`origin` 为 `builtin`、`config` 或 `workspace`；`--json` 输出
   `{ "entries": [{ "name", "type", "origin", "description?" }] }`。
 - 发现 issue 时只向 stderr 打印 `extensions.invalid: <source>`，不改变退出码。
-- 空结果打印 `no extensions`，退出 0。`entryConfig` 无效使发现失败时，整条命令退出 2，不输出半份列表。
+- 空结果：人类模式打印 `no extensions`；`--json` 输出 `{"entries":[]}`；两者都退出 0。
+  `entryConfig` 无效使发现失败时，整条命令退出 2，不输出半份列表。
 
 ```console
 $ pisces extensions list --workspace /home/me/project
@@ -253,7 +257,7 @@ workspace-pkg#helper        skill workspace
 ### `sessions list`
 
 ```bash
-pisces sessions list [--data-dir <dir>] [--json]
+pisces sessions list [--config <path>] [--data-dir <dir>] [--json]
 ```
 
 - 打开一个短连接调用 `session.list`；只列出已落盘会话，临时会话不出现。
@@ -346,6 +350,16 @@ $ pisces sessions list --json
 - **`config.invalid`**：`start`/`status`/`stop` 都需要可读配置；修复配置文件后重试。
 - **`config.unknown_key` / `config.no_workspace`**：`config` 的目标层出现不允许的键，或
   `--scope workspace` 没有可用目录；命令退出 2，不写任何文件。
+- **未知键的码取决于命令**：同一个不允许的顶层键，`config list|get|set|unset` 报
+  `config.unknown_key`，而 `start`/`status`/`stop`/`templates`/`extensions list`/`sessions list`
+  等生命周期与读取命令统一报 `config.invalid`（加载器只映射固定码）。看到 `config.invalid` 时，
+  先用 `config list` 看原始内容，再对照 §3 的键白名单排查。
+- **`config unset` 在删除后重新校验整份草稿**：文件里有多个未知键（或残留的悬空 `defaults`）时，
+  一次 `unset` 只能去掉一个，剩下的仍让命令以 `config.invalid`/`config.unknown_key` 失败；
+  这种文件请手工编辑（或逐次用 `unset` 配合其他修复），不要指望一条命令清干净。
+- **`config set` 的写入顺序**：草稿校验要求 `defaults` 必须指向已存在的 `provider` 与 `model`，所以
+  新文件先写 `dataDir`、再写 `providers`，最后写 `defaults`；若已有 `defaults` 而要先换掉
+  `providers`，先 `config unset defaults`，否则改 `providers` 的那一步会因悬空引用被拒。
 - **`config.key_not_found`**：`config get`/`unset` 的路径不存在；退出 1，文件不变。
 - **`daemon.unreachable`**：`sessions list` 无法连接由 dataDir 推导的 socket；先 `pisces status`，
   必要时 `start`。`sessions list` 只经协议读取，不直接读会话文件。

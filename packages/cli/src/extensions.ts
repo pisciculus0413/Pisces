@@ -65,12 +65,12 @@ export async function extensionsList(options: ExtensionsListOptions): Promise<nu
   try {
     const listing = await listExtensions(request);
     for (const issue of listing.issues) io.err(`extensions.invalid: ${issue.source}`);
-    if (listing.entries.length === 0) {
-      io.out("no extensions");
-      return 0;
-    }
     if (options.json === true) {
       io.out(JSON.stringify({ entries: listing.entries }));
+      return 0;
+    }
+    if (listing.entries.length === 0) {
+      io.out("no extensions");
       return 0;
     }
     for (const row of humanRows(listing.entries)) io.out(row);

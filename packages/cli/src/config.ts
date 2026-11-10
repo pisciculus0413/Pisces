@@ -261,8 +261,9 @@ export function validateGlobalDraft(value: unknown): void {
   for (const key of Object.keys(value)) {
     if (!(CONFIG_KEYS as readonly string[]).includes(key)) unknownKey();
   }
-  if (value.dataDir !== undefined) parseDataDir(value.dataDir);
-  if (value.templatesDir !== undefined) parseDataDir(value.templatesDir);
+  // `~` is expanded exactly as the loader does, but the file keeps the raw value.
+  if (value.dataDir !== undefined) parseDataDir(expandHome(value.dataDir, process.env));
+  if (value.templatesDir !== undefined) parseDataDir(expandHome(value.templatesDir, process.env));
   if (value.providers !== undefined) {
     const providers = parseProviders(value.providers);
     if (value.defaults !== undefined) parseDefaults(value.defaults, providers);

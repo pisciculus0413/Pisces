@@ -321,6 +321,20 @@ test("prints no extensions and exits 0 when nothing is discovered", async () => 
   expect(fx.io.err).toEqual([]);
 });
 
+test("prints an empty JSON object and exits 0 when nothing is discovered with --json", async () => {
+  const fx = await fixture();
+  const code = await extensionsList({
+    configPath: fx.configPath,
+    builtinDir: fx.builtinDir,
+    json: true,
+    io: fx.io.io,
+  });
+  expect(code).toBe(0);
+  expect(fx.io.out).toHaveLength(1);
+  expect(JSON.parse(fx.io.out[0] ?? "")).toEqual({ entries: [] });
+  expect(fx.io.err).toEqual([]);
+});
+
 // ---------------------------------------------------------------------------
 // failures and issues
 // ---------------------------------------------------------------------------
