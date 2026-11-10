@@ -19,6 +19,11 @@ const PROTOCOL_MESSAGE = "Invalid response from daemon";
 const SESSION_NOT_FOUND_MESSAGE = "Session does not exist";
 const DEFAULT_PROMPT_MESSAGE = "Default system prompt applies only to new sessions";
 
+/** Same shape the daemon accepts for `session.read` and the other session methods. */
+const SESSION_ID = /^[A-Za-z0-9_-]+$/;
+/** `package#name` with both parts non-empty and exactly one separator. */
+const ENTRY_NAME = /^[^#]+#[^#]+$/;
+
 export interface RunOptions {
   configPath: string;
   dataDir?: string;
@@ -66,8 +71,12 @@ interface EndedTurn {
   error?: { code: string; message: string };
 }
 
+/** The wait after `turn.start` ends either with the turn or with the client. */
+type WaitOutcome = { type: "ended"; turn: EndedTurn } | { type: "closed"; error: ClientError };
+
 interface Cleanup {
   listener?: () => void;
+  close?: () => void;
   interrupt?: () => void;
 }
 
@@ -116,6 +125,41 @@ function parseSelection(value: unknown): string[] {
   return value.selection as string[];
 }
 
+/**
+ * Replays the toggle declarations still waiting in the queue.
+ *
+ * `entries.snapshot` only exposes the committed branch selection, so a fresh
+ * session whose configuration defaults are still queued looks empty. Each
+ * unconfirmed `control`/`declaration` entry with one text block that parses to
+ * `{toggle: string[]}` is applied in queue order; malformed entries are skipped
+ * rather than failing the whole snapshot, matching the daemon's replay filter.
+ */
+function parsePendingToggles(value: unknown): string[][] {
+  if (!isRecord(value) || !Array.isArray(value.records) || !Array.isArray(value.queue)) {
+    invalidResponse();
+  }
+  const toggles: string[][] = [];
+  for (const entry of value.queue) {
+    if (!isRecord(entry)) invalidResponse();
+    if (entry.confirmedAt !== undefined) continue;
+    if (entry.kind !== "control" || entry.role !== "declaration") continue;
+    const content = entry.content;
+    if (!Array.isArray(content) || content.length !== 1) continue;
+    const block = content[0];
+    if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") continue;
+    let payload: unknown;
+    try {
+      payload = JSON.parse(block.text);
+    } catch {
+      continue;
+    }
+    if (!isRecord(payload) || !Array.isArray(payload.toggle)) continue;
+    if (!payload.toggle.every((name: unknown) => typeof name === "string")) continue;
+    toggles.push(payload.toggle as string[]);
+  }
+  return toggles;
+}
+
 function parseSubscribe(value: unknown): void {
   if (!isRecord(value) || !isName(value.sessionId)) invalidResponse();
 }
@@ -144,6 +188,7 @@ function parseTurnStart(value: unknown): { turnId: string; mode: "new" | "steer"
 /** Selector, output and toggle-combination conflicts rejected before any side effect. */
 function invalidUsage(options: RunOptions): boolean {
   if (options.prompt.trim() === "") return true;
+  if (options.sessionId !== undefined && !SESSION_ID.test(options.sessionId)) return true;
   const selectors =
     Number(options.newSession) +
     Number(options.continueSession) +
@@ -155,7 +200,7 @@ function invalidUsage(options: RunOptions): boolean {
 
   const names = new Set<string>();
   for (const name of [...options.enable, ...options.disable]) {
-    if (name.length === 0 || names.has(name)) return true;
+    if (!ENTRY_NAME.test(name) || names.has(name)) return true;
     names.add(name);
   }
   return false;
@@ -205,6 +250,7 @@ export async function runCommand(
     return 1;
   } finally {
     cleanup.listener?.();
+    cleanup.close?.();
     cleanup.interrupt?.();
     client.close();
   }
@@ -224,9 +270,9 @@ async function execute(
   let interrupted = false;
   let cancelSent = false;
   let text = "";
-  let settleEnded: ((value: EndedTurn) => void) | undefined;
-  const ended = new Promise<EndedTurn>((resolve) => {
-    settleEnded = resolve;
+  let settleOutcome: ((value: WaitOutcome) => void) | undefined;
+  const outcome = new Promise<WaitOutcome>((resolve) => {
+    settleOutcome = resolve;
   });
   const stream = !options.print && !options.json;
   const write = io.write ?? ((value: string) => io.out(value));
@@ -256,7 +302,7 @@ async function execute(
           : { code: "internal.error", message: "Turn failed" };
     }
     ending = { sessionId, turnId: startedTurnId, reason, ...(error ? { error } : {}) };
-    settleEnded?.(ending);
+    settleOutcome?.({ type: "ended", turn: ending });
   };
 
   cleanup.listener = client.onEvent((event) => {
@@ -267,6 +313,11 @@ async function execute(
       return;
     }
     processEvent(event);
+  });
+  // A daemon that dies mid-turn rejects only in-flight requests; without this
+  // subscription the wait for `turn.ended` would never settle.
+  cleanup.close = client.onClose((error) => {
+    settleOutcome?.({ type: "closed", error });
   });
 
   const cancel = (): void => {
@@ -329,6 +380,17 @@ async function execute(
     const selected = new Set(
       parseSelection(await client.request("entries.snapshot", { sessionId })),
     );
+    // Unconfirmed declarations are not part of `snapshot.selection`; replay them
+    // in queue order (present removes, absent adds) before diffing so a fresh
+    // configured session with queued defaults is not toggled by mistake.
+    for (const pending of parsePendingToggles(
+      await client.request("session.read", { sessionId, limit: 1 }),
+    )) {
+      for (const name of pending) {
+        if (selected.has(name)) selected.delete(name);
+        else selected.add(name);
+      }
+    }
     const toggle = [
       ...options.enable.filter((name) => !selected.has(name)),
       ...options.disable.filter((name) => selected.has(name)),
@@ -365,16 +427,21 @@ async function execute(
   for (const event of pending) processEvent(event);
   if (interrupted) cancel();
 
-  const result = await ended;
+  const result = await outcome;
+  if (result.type === "closed") {
+    io.err(`error: ${result.error.code}: ${result.error.message}`);
+    return 1;
+  }
+  const turn = result.turn;
 
   if (options.json) {
     io.out(
       JSON.stringify({
-        sessionId: result.sessionId,
-        turnId: result.turnId,
-        reason: result.reason,
+        sessionId: turn.sessionId,
+        turnId: turn.turnId,
+        reason: turn.reason,
         text,
-        ...(result.error === undefined ? {} : { error: result.error }),
+        ...(turn.error === undefined ? {} : { error: turn.error }),
       }),
     );
   } else if (options.print) {
@@ -386,11 +453,11 @@ async function execute(
     io.write("\n");
   }
 
-  if (result.reason === "failed") {
-    if (!options.json && result.error !== undefined) {
-      io.err(`error: ${result.error.code}: ${result.error.message}`);
+  if (turn.reason === "failed") {
+    if (!options.json && turn.error !== undefined) {
+      io.err(`error: ${turn.error.code}: ${turn.error.message}`);
     }
     return 1;
   }
-  return result.reason === "cancelled" ? 130 : 0;
+  return turn.reason === "cancelled" ? 130 : 0;
 }

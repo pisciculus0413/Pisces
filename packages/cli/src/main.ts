@@ -553,6 +553,9 @@ function parseProviders(
   return { command, ...common, ...(provider !== undefined ? { provider } : {}) };
 }
 
+const RUN_SESSION_ID = /^[A-Za-z0-9_-]+$/;
+const RUN_ENTRY_NAME = /^[^#]+#[^#]+$/;
+
 /** `run [prompt]`; the positional prompt may appear before or after any flag. */
 function parseRun(argv: readonly string[]): RunParsed | "help" | "version" | undefined {
   let configPath: string | undefined;
@@ -634,12 +637,13 @@ function parseRun(argv: readonly string[]): RunParsed | "help" | "version" | und
     Number(newSession) + Number(continueSession) + (sessionId === undefined ? 0 : 1);
   if (selectors > 1) return undefined;
   if (create && sessionId === undefined) return undefined;
+  if (sessionId !== undefined && !RUN_SESSION_ID.test(sessionId)) return undefined;
   if (print && json) return undefined;
   if (systemPrompt !== undefined && useDefaultSystemPrompt) return undefined;
 
   const names = new Set<string>();
   for (const name of [...enable, ...disable]) {
-    if (names.has(name)) return undefined;
+    if (!RUN_ENTRY_NAME.test(name) || names.has(name)) return undefined;
     names.add(name);
   }
 

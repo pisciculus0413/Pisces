@@ -486,3 +486,105 @@ test("a throwing listener does not stop the others or break the client", async (
     await daemon.close();
   }
 });
+
+test("onClose notifies every live registration once on explicit close", async () => {
+  const daemon = await fakeDaemon(autoHello(() => {}));
+  const client = await connectClient(daemon.path);
+  const first = vi.fn();
+  const second = vi.fn();
+  const removed = vi.fn();
+  client.onClose(first);
+  client.onClose(second);
+  const unsubscribe = client.onClose(removed);
+  unsubscribe();
+  unsubscribe();
+
+  client.close();
+  expect(first).toHaveBeenCalledTimes(1);
+  expect(second).toHaveBeenCalledTimes(1);
+  expect(first).toHaveBeenCalledWith(
+    expect.objectContaining({ code: "client.closed", message: "Client is closed" }),
+  );
+  expect(removed).not.toHaveBeenCalled();
+
+  client.close();
+  expect(first).toHaveBeenCalledTimes(1);
+  expect(second).toHaveBeenCalledTimes(1);
+  await daemon.close();
+});
+
+test("the same close listener registered twice is notified twice", async () => {
+  const daemon = await fakeDaemon(autoHello(() => {}));
+  const client = await connectClient(daemon.path);
+  const listener = vi.fn();
+  client.onClose(listener);
+  client.onClose(listener);
+
+  client.close();
+  expect(listener).toHaveBeenCalledTimes(2);
+  await daemon.close();
+});
+
+test("onClose after the client is closed invokes immediately and returns a no-op", async () => {
+  const daemon = await fakeDaemon(autoHello(() => {}));
+  const client = await connectClient(daemon.path);
+  client.close();
+
+  const listener = vi.fn();
+  const unsubscribe = client.onClose(listener);
+  expect(listener).toHaveBeenCalledTimes(1);
+  expect(listener).toHaveBeenCalledWith(
+    expect.objectContaining({ code: "client.closed", message: "Client is closed" }),
+  );
+  expect(unsubscribe()).toBeUndefined();
+  expect(unsubscribe()).toBeUndefined();
+  expect(listener).toHaveBeenCalledTimes(1);
+  await daemon.close();
+});
+
+test("a throwing close listener does not stop the others", async () => {
+  const daemon = await fakeDaemon(autoHello(() => {}));
+  const client = await connectClient(daemon.path);
+  client.onClose(() => {
+    throw new Error("close listener boom");
+  });
+  const received: ClientError[] = [];
+  client.onClose((error) => received.push(error));
+
+  expect(() => client.close()).not.toThrow();
+  expect(received).toHaveLength(1);
+  await daemon.close();
+});
+
+test("onClose reports client.closed when the socket closes", async () => {
+  const daemon = await fakeDaemon(autoHello(() => {}));
+  const client = await connectClient(daemon.path);
+  const errors: ClientError[] = [];
+  client.onClose((error) => errors.push(error));
+
+  daemon.sockets[0]?.destroy();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toMatchObject({ code: "client.closed", message: "Client is closed" });
+  await daemon.close();
+});
+
+test("onClose reports client.protocol on a malformed frame", async () => {
+  const daemon = await fakeDaemon(
+    autoHello((_frame, _reply, socket) => {
+      socket.write("not json\n");
+    }),
+  );
+  const client = await connectClient(daemon.path);
+  const errors: ClientError[] = [];
+  client.onClose((error) => errors.push(error));
+
+  await client.request("template.list", {}).catch(() => {});
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toMatchObject({
+    code: "client.protocol",
+    message: "Invalid response from daemon",
+  });
+  await daemon.close();
+});

@@ -6,10 +6,12 @@ import { afterEach, expect, test } from "vitest";
 import {
   type Client,
   ClientError,
+  type CloseListener,
   type EventListener,
   UNREACHABLE_MESSAGE,
 } from "../src/client.js";
 import type { CommandIo } from "../src/commands.js";
+import { socketPathFor } from "../src/lifecycle.js";
 import { runCli } from "../src/main.js";
 import { type RunDeps, type RunOptions, runCommand } from "../src/run.js";
 
@@ -93,26 +95,38 @@ interface FakeClient {
   calls: Call[];
   log: string[];
   closed: boolean;
+  paths: string[];
   deps: RunDeps;
   setResponder(responder: Responder): void;
   emit(event: ProtocolEvent): void;
   interrupt(): void;
+  closeWith(code: string, message: string): void;
   listenerCount(): number;
 }
 
 function fakeClient(responder: Responder): FakeClient {
   const listeners = new Map<number, EventListener>();
+  const closeListeners = new Map<number, CloseListener>();
   const interruptHandlers = new Set<() => void>();
   let nextListener = 0;
+  let nextCloseListener = 0;
   let current = responder;
+
+  const notifyClose = (error: ClientError): void => {
+    const pending = [...closeListeners.values()];
+    closeListeners.clear();
+    for (const listener of pending) listener(error);
+  };
 
   const state: FakeClient = {
     calls: [],
     log: [],
     closed: false,
+    paths: [],
     deps: {
-      async connect(): Promise<Client> {
+      async connect(socketPath: string): Promise<Client> {
         state.log.push("connect");
+        state.paths.push(socketPath);
         return {
           async request(method: string, params?: unknown): Promise<unknown> {
             state.calls.push({ method, params });
@@ -129,10 +143,21 @@ function fakeClient(responder: Responder): FakeClient {
               listeners.delete(token);
             };
           },
+          onClose(listener: CloseListener): () => void {
+            state.log.push("close:register");
+            nextCloseListener += 1;
+            const token = nextCloseListener;
+            closeListeners.set(token, listener);
+            return () => {
+              state.log.push("close:unsubscribe");
+              closeListeners.delete(token);
+            };
+          },
           close(): void {
             state.closed = true;
             state.log.push("close");
             listeners.clear();
+            notifyClose(new ClientError("client.closed", "Client is closed"));
           },
         };
       },
@@ -153,6 +178,12 @@ function fakeClient(responder: Responder): FakeClient {
     },
     interrupt() {
       for (const handler of [...interruptHandlers]) handler();
+    },
+    closeWith(code, message) {
+      state.closed = true;
+      state.log.push("close");
+      listeners.clear();
+      notifyClose(new ClientError(code, message));
     },
     listenerCount() {
       return listeners.size;
@@ -653,6 +684,8 @@ test("--enable/--disable sends one toggle declaration in the same batch as the p
     if (method === "session.create") return META;
     if (method === "entries.snapshot")
       return { entries: [], selection: ["a#x", "b#y"], effective: [] };
+    if (method === "session.read")
+      return { meta: META, seq: 0, records: [], queue: [], selection: [] };
     if (method === "session.subscribe") return { sessionId: "s1" };
     if (method === "queue.enqueue") return { ids: ["q1", "q2"] };
     if (method === "turn.start") return startAndEmit(client, [endedEvent("completed")]);
@@ -696,6 +729,8 @@ test("no toggle declaration is sent when the selection would not change", async 
   const client = fakeClient((method) => {
     if (method === "session.create") return META;
     if (method === "entries.snapshot") return { entries: [], selection: ["a#x"], effective: [] };
+    if (method === "session.read")
+      return { meta: META, seq: 0, records: [], queue: [], selection: [] };
     if (method === "session.subscribe") return { sessionId: "s1" };
     if (method === "queue.enqueue") return { ids: ["q1"] };
     if (method === "turn.start") return startAndEmit(client, [endedEvent("completed")]);
@@ -728,6 +763,117 @@ test("no toggle declaration is sent when the selection would not change", async 
       },
     ],
   });
+});
+
+const PROMPT_ENTRY = {
+  kind: "agent",
+  role: "user",
+  source: "run",
+  content: [{ type: "text", text: "hello" }],
+};
+
+const controlEntry = (toggle: string[]): unknown => ({
+  kind: "control",
+  role: "declaration",
+  source: "run",
+  content: [{ type: "text", text: JSON.stringify({ toggle }) }],
+});
+
+/** One unconfirmed declaration as the daemon's context snapshot reports it. */
+const pendingDeclaration = (toggle: string[]): unknown => ({
+  id: "q-pending",
+  kind: "control",
+  role: "declaration",
+  source: "config",
+  content: [{ type: "text", text: JSON.stringify({ toggle }) }],
+  createdAt: "2026-11-01T00:00:00.000Z",
+});
+
+async function toggleEntries(
+  selection: string[],
+  queue: unknown[],
+  enable: string[],
+  disable: string[],
+): Promise<{ entries: unknown[]; client: FakeClient; code: number }> {
+  const client = fakeClient((method) => {
+    switch (method) {
+      case "session.create":
+        return META;
+      case "entries.snapshot":
+        return { entries: [], selection };
+      case "session.read":
+        return { meta: META, seq: 0, records: [], queue, selection };
+      case "session.subscribe":
+        return { sessionId: "s1" };
+      case "queue.enqueue":
+        return { ids: ["q1", "q2"] };
+      case "turn.start":
+        return startAndEmit(client, [endedEvent("completed")]);
+      default:
+        throw new Error(`unexpected method ${method}`);
+    }
+  });
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await runCommand(
+    runOptions(configPath, { io: rec.io, enable, disable, print: true }),
+    client.deps,
+  );
+  const enqueue = client.calls.find((call) => call.method === "queue.enqueue");
+  if (enqueue === undefined) throw new Error("queue.enqueue was not sent");
+  return { entries: (enqueue.params as { entries: unknown[] }).entries, client, code };
+}
+
+test("a pending declaration is replayed before diffing the requested toggles", async () => {
+  const queue = [pendingDeclaration(["a#x"])];
+
+  const enablingPending = await toggleEntries([], queue, ["a#x"], []);
+  expect(enablingPending.code).toBe(0);
+  expect(enablingPending.entries).toEqual([PROMPT_ENTRY]);
+  expect(enablingPending.client.calls.filter((call) => call.method === "session.read")).toEqual([
+    { method: "session.read", params: { sessionId: "s1", limit: 1 } },
+  ]);
+  const methods = enablingPending.client.calls.map((call) => call.method);
+  expect(methods.indexOf("entries.snapshot")).toBeLessThan(methods.indexOf("session.read"));
+  expect(methods.indexOf("session.read")).toBeLessThan(methods.indexOf("session.subscribe"));
+
+  expect((await toggleEntries([], queue, [], ["a#x"])).entries).toEqual([
+    controlEntry(["a#x"]),
+    PROMPT_ENTRY,
+  ]);
+  expect((await toggleEntries([], queue, ["b#y"], [])).entries).toEqual([
+    controlEntry(["b#y"]),
+    PROMPT_ENTRY,
+  ]);
+});
+
+test("a pending declaration that disables a committed selection is replayed", async () => {
+  const queue = [pendingDeclaration(["a#x"])];
+
+  expect((await toggleEntries(["a#x"], queue, ["a#x"], [])).entries).toEqual([
+    controlEntry(["a#x"]),
+    PROMPT_ENTRY,
+  ]);
+  expect((await toggleEntries(["a#x"], queue, [], ["a#x"])).entries).toEqual([PROMPT_ENTRY]);
+});
+
+test("pending toggles replay in queue order and skip committed declarations", async () => {
+  const queue = [
+    pendingDeclaration(["a#x"]),
+    { ...(pendingDeclaration(["b#y"]) as Record<string, unknown>), confirmedAt: "2026-11-02" },
+    pendingDeclaration(["a#x", "c#z"]),
+  ];
+
+  // a#x: on, off, on; b#y stays off because its declaration is confirmed.
+  expect((await toggleEntries([], queue, ["a#x", "b#y"], [])).entries).toEqual([
+    controlEntry(["a#x", "b#y"]),
+    PROMPT_ENTRY,
+  ]);
+  expect((await toggleEntries([], queue, [], ["c#z"])).entries).toEqual([
+    controlEntry(["c#z"]),
+    PROMPT_ENTRY,
+  ]);
 });
 
 test("duplicate extension names are a usage error before connecting", async () => {
@@ -811,6 +957,36 @@ test("an interrupt cancels once, waits for the ended turn and exits 130", async 
   expect(rec.err).toEqual([]);
 });
 
+test("an interrupt before the turn id is known cancels once after turn.start responds", async () => {
+  const client = fakeClient((method) => {
+    if (method === "session.create") return META;
+    if (method === "session.subscribe") return { sessionId: "s1" };
+    if (method === "queue.enqueue") return { ids: ["q1"] };
+    if (method === "turn.start") {
+      // The signal arrives while the start request is still in flight.
+      client.interrupt();
+      return { turnId: "t1", mode: "new" };
+    }
+    if (method === "turn.cancel") {
+      queueMicrotask(() => client.emit(endedEvent("cancelled")));
+      return { cancelled: true };
+    }
+    throw new Error(`unexpected method ${method}`);
+  });
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await runCommand(runOptions(configPath, { io: rec.io, print: true }), client.deps);
+
+  expect(code).toBe(130);
+  expect(client.calls.filter((call) => call.method === "turn.cancel")).toEqual([
+    { method: "turn.cancel", params: { turnId: "t1" } },
+  ]);
+  expect(client.log.indexOf("request:turn.cancel")).toBeGreaterThan(
+    client.log.indexOf("request:turn.start"),
+  );
+});
+
 test("a config failure exits 2 without connecting", async () => {
   const { root } = await fixture();
   const counter = { connects: 0 };
@@ -857,6 +1033,11 @@ test("a protocol error passes through its safe code and message", async () => {
   expect(code).toBe(1);
   expect(rec.err).toEqual(["error: protocol.invalid_request: Invalid request parameters"]);
   expect(client.closed).toBe(true);
+  // Every registration is removed on the error path, not only on success.
+  expect(client.log).toContain("event:unsubscribe");
+  expect(client.log).toContain("close:unsubscribe");
+  expect(client.log).toContain("interrupt:unregister");
+  expect(client.listenerCount()).toBe(0);
 });
 
 test("a malformed session result is rejected as client.protocol", async () => {
@@ -868,6 +1049,75 @@ test("a malformed session result is rejected as client.protocol", async () => {
 
   expect(code).toBe(1);
   expect(rec.err).toEqual(["error: client.protocol: Invalid response from daemon"]);
+});
+
+test("a malformed queue snapshot on the toggle path is rejected as client.protocol", async () => {
+  const client = fakeClient((method) => {
+    if (method === "session.create") return META;
+    if (method === "entries.snapshot") return { entries: [], selection: [] };
+    if (method === "session.read") return { meta: META, seq: 0, records: [] };
+    throw new Error(`unexpected method ${method}`);
+  });
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await runCommand(
+    runOptions(configPath, { io: rec.io, enable: ["a#x"], print: true }),
+    client.deps,
+  );
+
+  expect(code).toBe(1);
+  expect(rec.err).toEqual(["error: client.protocol: Invalid response from daemon"]);
+});
+
+test("a daemon close mid-turn exits 1 with client.closed instead of hanging", async () => {
+  const client = fakeClient((method) => {
+    if (method === "session.create") return META;
+    if (method === "session.subscribe") return { sessionId: "s1" };
+    if (method === "queue.enqueue") return { ids: ["q1"] };
+    if (method === "turn.start") {
+      setTimeout(() => {
+        client.closeWith("client.closed", "Client is closed");
+        // Any later event must not settle the wait after the connection died.
+        client.emit(endedEvent("completed"));
+      }, 0);
+      return { turnId: "t1", mode: "new" };
+    }
+    throw new Error(`unexpected method ${method}`);
+  });
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await runCommand(runOptions(configPath, { io: rec.io, print: true }), client.deps);
+
+  expect(code).toBe(1);
+  expect(rec.err).toEqual(["error: client.closed: Client is closed"]);
+  expect(rec.out).toEqual([]);
+  expect(rec.writes).toEqual([]);
+  expect(client.log).toContain("event:unsubscribe");
+  expect(client.log).toContain("close:unsubscribe");
+  expect(client.log).toContain("interrupt:unregister");
+});
+
+test("a malformed frame mid-turn exits 1 with client.protocol", async () => {
+  const client = fakeClient((method) => {
+    if (method === "session.create") return META;
+    if (method === "session.subscribe") return { sessionId: "s1" };
+    if (method === "queue.enqueue") return { ids: ["q1"] };
+    if (method === "turn.start") {
+      setTimeout(() => client.closeWith("client.protocol", "Invalid response from daemon"), 0);
+      return { turnId: "t1", mode: "new" };
+    }
+    throw new Error(`unexpected method ${method}`);
+  });
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await runCommand(runOptions(configPath, { io: rec.io, json: true }), client.deps);
+
+  expect(code).toBe(1);
+  expect(rec.err).toEqual(["error: client.protocol: Invalid response from daemon"]);
+  expect(rec.out).toEqual([]);
 });
 
 test("default output falls back to io.out when io.write is absent", async () => {
@@ -919,6 +1169,11 @@ test("runCli rejects run usage errors without connecting", async () => {
     ["run", "hello", "--model"],
     ["run", "hello", "--model", ""],
     ["run", "hello", "--enable", "a#x", "--disable", "a#x"],
+    ["run", "hello", "--session", "bad id"],
+    ["run", "hello", "--session", "bad/id"],
+    ["run", "hello", "--enable", "nopackage#"],
+    ["run", "hello", "--enable", "#noname"],
+    ["run", "hello", "--disable", "a#b#c"],
   ];
   const counter = { connects: 0 };
   const deps = unreachableDeps(counter);
@@ -931,4 +1186,81 @@ test("runCli rejects run usage errors without connecting", async () => {
     expect(rec.out).toEqual([]);
   }
   expect(counter.connects).toBe(0);
+});
+
+test("run accumulates --enable/--disable and keeps the last value of each value flag", async () => {
+  const client = fakeClient((method) => {
+    switch (method) {
+      case "session.read":
+        return { meta: META, seq: 0, records: [], queue: [], selection: [] };
+      case "session.configure":
+        return META;
+      case "entries.snapshot":
+        return { entries: [], selection: [] };
+      case "session.subscribe":
+        return { sessionId: "s1" };
+      case "queue.enqueue":
+        return { ids: ["q1", "q2"] };
+      case "turn.start":
+        return startAndEmit(client, [endedEvent("completed")]);
+      default:
+        throw new Error(`unexpected method ${method}`);
+    }
+  });
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await runCli(
+    [
+      "run",
+      "--enable",
+      "a#x",
+      "--disable",
+      "b#y",
+      "--enable",
+      "c#z",
+      "--session",
+      "s1",
+      "--session",
+      "s2",
+      "--model",
+      "m1",
+      "--model",
+      "m2",
+      "--data-dir",
+      "/first",
+      "--data-dir",
+      "/second",
+      "--system-prompt",
+      "one",
+      "--system-prompt",
+      "two",
+      "hello",
+      "--print",
+      "--config",
+      configPath,
+    ],
+    rec.io,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    client.deps,
+  );
+
+  expect(code).toBe(0);
+  expect(client.paths).toEqual([socketPathFor("/second")]);
+  expect(client.calls.slice(0, 2)).toEqual([
+    { method: "session.read", params: { sessionId: "s2" } },
+    { method: "session.configure", params: { sessionId: "s1", model: "m2", systemPrompt: "two" } },
+  ]);
+  expect(client.calls.filter((call) => call.method === "session.read")).toEqual([
+    { method: "session.read", params: { sessionId: "s2" } },
+    { method: "session.read", params: { sessionId: "s1", limit: 1 } },
+  ]);
+  const enqueue = client.calls.find((call) => call.method === "queue.enqueue");
+  expect(enqueue?.params).toEqual({
+    sessionId: "s1",
+    entries: [controlEntry(["a#x", "c#z"]), PROMPT_ENTRY],
+  });
 });

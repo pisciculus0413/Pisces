@@ -52,6 +52,9 @@ export class ClientError extends Error {
 
 export type EventListener = (event: ProtocolEvent) => void;
 
+/** Invoked once when the connection reaches a terminal failure state. */
+export type CloseListener = (error: ClientError) => void;
+
 export interface Client {
   request(method: string, params?: unknown, options?: RequestOptions): Promise<unknown>;
   /**
@@ -68,6 +71,20 @@ export interface Client {
    * retaining the listener.
    */
   onEvent(listener: EventListener): () => void;
+  /**
+   * Registers a listener for the connection's terminal failure, invoked exactly
+   * once with `client.closed` (explicit close or socket close) or
+   * `client.protocol` (unparseable or invalid frame). Each call is an
+   * independent registration; the unsubscribe function is safe to call
+   * repeatedly.
+   *
+   * Registrations are notified synchronously and then cleared, so a listener
+   * that registers another listener during notification gets an immediate
+   * call with the same error. Registering after the failure also invokes the
+   * listener immediately (with the terminal error) and returns a no-op
+   * unsubscribe. A throwing listener is caught and ignored.
+   */
+  onClose(listener: CloseListener): () => void;
   close(): void;
 }
 
@@ -145,6 +162,11 @@ function createClient(socket: Socket, timeoutMs: number): Client {
   // two independent registrations (a Set would collapse them).
   const listeners = new Map<number, EventListener>();
   let nextListenerToken = 0;
+  // Close listeners use the same token keying so a function registered twice
+  // yields two independent registrations.
+  const closeListeners = new Map<number, CloseListener>();
+  let nextCloseToken = 0;
+  let terminal: ClientError | undefined;
 
   /** A listener failure stays local: the rest of the registrations and the client live on. */
   const deliver = (event: ProtocolEvent): void => {
@@ -165,25 +187,34 @@ function createClient(socket: Socket, timeoutMs: number): Client {
     }
   };
 
-  const close = (): void => {
+  /** One terminal transition: fail waiters, drop listeners, notify close listeners once. */
+  const terminate = (error: ClientError): void => {
     if (closed) return;
     closed = true;
+    terminal = error;
     listeners.clear();
-    failAll(new ClientError("client.closed", CLOSED_MESSAGE));
+    const pendingClose = [...closeListeners.values()];
+    closeListeners.clear();
+    failAll(error);
     socket.removeAllListeners();
     socket.on("error", () => {});
     socket.destroy();
+    for (const listener of pendingClose) {
+      try {
+        listener(error);
+      } catch {
+        // Listener errors are deliberately ignored.
+      }
+    }
+  };
+
+  const close = (): void => {
+    terminate(new ClientError("client.closed", CLOSED_MESSAGE));
   };
 
   /** A frame the client cannot understand ends the connection; the daemon is unusable. */
   const protocolFailure = (): void => {
-    if (closed) return;
-    closed = true;
-    listeners.clear();
-    failAll(new ClientError("client.protocol", PROTOCOL_MESSAGE));
-    socket.removeAllListeners();
-    socket.on("error", () => {});
-    socket.destroy();
+    terminate(new ClientError("client.protocol", PROTOCOL_MESSAGE));
   };
 
   const handleLine = (line: Uint8Array): void => {
@@ -281,6 +312,22 @@ function createClient(socket: Socket, timeoutMs: number): Client {
       listeners.set(token, listener);
       return () => {
         listeners.delete(token);
+      };
+    },
+    onClose(listener) {
+      if (terminal !== undefined) {
+        try {
+          listener(terminal);
+        } catch {
+          // Listener errors are deliberately ignored.
+        }
+        return () => {};
+      }
+      nextCloseToken += 1;
+      const token = nextCloseToken;
+      closeListeners.set(token, listener);
+      return () => {
+        closeListeners.delete(token);
       };
     },
     close() {
