@@ -807,7 +807,7 @@ interface Event<E = JsonValue> {
 | `selection.updated` | 声明选择状态变化 |
 | `client.launched` | 客户端进程启动 |
 
-`SessionMeta` 是会话元数据，字段见 §6.5。服务层在 `session.create` 创建临时 `SessionMeta`，首次落盘前不写盘，也不出现在 `session.list`；`session.list` 只返回已落盘的 `SessionMeta`。`session.create` 未提供 `workspace` 时读取全局配置中的 `defaultWorkspace`；两者都没有时返回 `session.workspace_required`，路径不存在、不是目录或不可写时返回 `session.invalid_workspace`。`defaultWorkspace` 只来自全局配置；工作区配置 `.pisces/config.json` 需要先确定工作区才能读取，因此不参与默认工作区解析，也不提供该键。默认工作区必须是绝对路径，不自动创建。`provider`/`model` 必须成对提供，或成对省略并取配置中的 `defaultProvider`/`defaultModel`；仍无法解析时返回 `session.model_required`，显式值或默认组合不在 `provider.list` 中返回 `session.invalid_model`。`SessionMeta` 不含活动分支信息；默认活动分支为最新节点所在分支，由于会话记录只追加式写入，最新节点总能在会话记录末尾找到。运行状态不属于会话元数据：`turn.list` 返回当前活跃 turn，会话出现在其中即为热会话，否则为冷会话；`session.read` 返回 `meta`（临时或已落盘）、记录、待装配队列与选择状态，客户端按 `sessionId` 与 `turn.list` 合并，`session.read` 的 `meta` 为 `SessionMeta`。`session.configure` 的 `model`、`provider` 经校验后通过 `SessionRepository.updateMeta` 持久化，临时会话仅更新内存 meta；活跃 turn 使用启动时的模型与供应商，运行期间不允许 `session.configure`。`systemPrompt` 只更新 `source="instruction"` 的队列条目，没有则新增；不写 meta，不修改会话记录。若该会话存在活跃 turn，`session.configure` 返回 `turn.active`，不修改队列、meta 或记录；所有配置修改均须等待 turn 结束。扩展选择不在该方法中修改。模型能力（如上下文窗口）由 `provider.list` 的 `ModelInfo` 提供，不写入会话元数据。
+`SessionMeta` 是会话元数据，字段见 §6.5。服务层在 `session.create` 创建临时 `SessionMeta`，首次落盘前不写盘，也不出现在 `session.list`；`session.list` 只返回已落盘的 `SessionMeta`。`session.create` 未提供 `workspace` 时读取全局配置中的 `defaultWorkspace`；两者都没有时返回 `session.workspace_required`，路径不存在、不是目录或不可写时返回 `session.invalid_workspace`。`defaultWorkspace` 只来自全局配置；工作区配置 `.pisces/config.json` 需要先确定工作区才能读取，因此不参与默认工作区解析，也不提供该键。默认工作区必须是绝对路径，不自动创建。`provider`/`model` 必须成对提供，或成对省略并取配置中的 `defaults.provider`/`defaults.model`；仍无法解析时返回 `session.model_required`，显式值或默认组合不在 `provider.list` 中返回 `session.invalid_model`。`SessionMeta` 不含活动分支信息；默认活动分支为最新节点所在分支，由于会话记录只追加式写入，最新节点总能在会话记录末尾找到。运行状态不属于会话元数据：`turn.list` 返回当前活跃 turn，会话出现在其中即为热会话，否则为冷会话；`session.read` 返回 `meta`（临时或已落盘）、记录、待装配队列与选择状态，客户端按 `sessionId` 与 `turn.list` 合并，`session.read` 的 `meta` 为 `SessionMeta`。`session.configure` 的 `model`、`provider` 经校验后通过 `SessionRepository.updateMeta` 持久化，临时会话仅更新内存 meta；活跃 turn 使用启动时的模型与供应商，运行期间不允许 `session.configure`。`systemPrompt` 只更新 `source="instruction"` 的队列条目，没有则新增；不写 meta，不修改会话记录。若该会话存在活跃 turn，`session.configure` 返回 `turn.active`，不修改队列、meta 或记录；所有配置修改均须等待 turn 结束。扩展选择不在该方法中修改。模型能力（如上下文窗口）由 `provider.list` 的 `ModelInfo` 提供，不写入会话元数据。
 
 `session.read` 的 `SessionMeta`、`SessionNode` 定义在 §6.5，`QueueEntry` 定义见本节；协议按相同字段序列化。
 
@@ -1165,15 +1165,21 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
 - 扩展的安装、更新与移除由 npm、git 完成，不在本软件生命周期内。
 - `run` 交互中按 Ctrl-C 等同 `sessions cancel <id>`。
 
-实现状态（本阶段）：CLI 已实现 `--help`、`--version`、`start`/`status`/`stop` 与
-`templates list`/`preview`/`apply`。`start` 以 detached
+实现状态（本阶段）：CLI 已实现 `--help`、`--version`、`start`/`status`/`stop`、
+`templates list`/`preview`/`apply`、`config list|get|set|unset`、`extensions list` 与
+`sessions list`。`start` 以 detached
 子进程启动 daemon，写入 pid 记录与日志，只有子进程存活、pid 记录仍指向它、且本 dataDir 的 socket
 完成 `protocol.hello` 握手后才报告成功（总预算 10 s，轮询 50 ms）；`status` 结合进程存活、socket
 探测与 pid 记录给出 `running`/`stopped`/`stale`/`unresponsive`/`unmanaged`，`--json` 输出同名
 `state`；`stop` 仅在记录中的 pid 存活且同一 socket 应答后发送 `SIGTERM`，最多等待 10 s，陈旧记录与
 PID 复用防护见 §8.1。模板命令经单个短连接调用 `template.*`，`apply` 必须显式 `--confirm`，
-详见 `docs/templates.md`。其余命令（`run`、`sessions`、`client`、`models`、`providers check`、
-`config`、`auth`、`extensions`）仍为目标设计，**未实现**。CLI 仅支持 Linux x64，
+详见 `docs/templates.md`。`config` 直接读写全局与工作区配置层，`extensions list` 只做本地发现
+且不加载代码，`sessions list` 经协议 `session.list` 列出已落盘会话。其余命令（`run`、
+`sessions export|cancel`、`client`、`models`、`providers check`、`auth`）仍为目标设计，
+**未实现**。全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir`
+与扩展组 `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 共存，两个加载器互不拒绝；
+默认 provider/model 只使用 `defaults`（旧 `defaultProvider`/`defaultModel` 已移除），CLI
+接受但不校验、不使用扩展键。CLI 仅支持 Linux x64，
 只暴露 `openai-chat` 方言；配置、凭据与恢复步骤见 `docs/cli.md`。
 
 ### 6.9 模板接口
@@ -1236,7 +1242,7 @@ interface ProjectRef {
 
 | 位置 | 内容 |
 |---|---|
-| 软件配置目录 | `config.json`（扩展、默认 provider/model 与默认工作区配置）、`credentials`（由 `CredentialStore` 管理）、`templates/`、`extensions/` |
+| 软件配置目录 | 统一 `config.json`（CLI 键 `dataDir`/`providers`/`defaults`/`templatesDir` 与扩展键 `defaults`/`defaultWorkspace`/`extensions`/`entryConfig`）、`credentials`（由 `CredentialStore` 管理）、`templates/`、`extensions/` |
 | 数据目录 | `projects.json`（模板衍生项目）、`sessions/<sessionId>/meta.json`（会话元数据）、`sessions/<sessionId>/events.jsonl`（`SessionNode` 记录）、`sessions/<sessionId>/active-turn.json`（未完成 turn 的运行时标记） |
 | 工作区 | `.pisces/config.json`（工作区级扩展配置；不提供 `defaultWorkspace`）、扩展目录 |
 

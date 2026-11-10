@@ -1,7 +1,8 @@
 # CLI：本地 daemon 生命周期
 
 本文件描述当前已实现、并已被真实进程验收（真实 `dist/main.js`、真实后台 daemon、真实 Unix socket
-握手）覆盖的 CLI 子集：`start`、`status`、`stop`，以及配置文件、凭据来源、退出码、文件位置与失败恢复。
+握手）覆盖的 CLI 子集：`start`、`status`、`stop`、`templates`、`config`、`extensions list` 与
+`sessions list`，以及配置文件、凭据来源、退出码、文件位置与失败恢复。
 **未交付**的命令与平台在 §8 明确列出。权威契约见
 `docs/2 Detailed Design Specification/2 Detailed Design Specification.md` §7.1、§7.2、§7.5、§8.6，
 daemon 侧的安全边界见 `docs/daemon-linux.md`。
@@ -9,8 +10,10 @@ daemon 侧的安全边界见 `docs/daemon-linux.md`。
 ## 1. 支持范围
 
 - 仅 Linux x64；Node.js `>=22.19.0`，ESM。
-- 命令：`start`、`status`、`stop`，以及 `templates list|preview|apply`（模板细节见 `docs/templates.md`）。
-  没有 `run`、`sessions`、`client`、`models`、`providers check`、`config`、`auth`、`extensions`（见 §8）。
+- 命令：`start`、`status`、`stop`、`templates list|preview|apply`、`config list|get|set|unset`、
+  `extensions list`、`sessions list`（模板细节见 `docs/templates.md`，扩展配置见
+  `docs/extensions.md`）。没有 `run`、`sessions export|cancel`、`client`、`models`、
+  `providers check`、`auth`（见 §8）。
 - 本地只在 Node 26.13.0 x64 上验证。CI 配置了 Node 22.19.0 / 24 / 26 x64，但本阶段未 push，
   远端矩阵结果**未验证**。
 - macOS 与 Windows 不是当前实现；daemon 在绑定 socket 前以 `daemon.unsupported_platform` 失败，
@@ -83,6 +86,16 @@ OpenAI 兼容示例：
 | `models[].modalities` | 是 | 非空，元素为 `text`、`image`、`audio` |
 | `defaults` | 否 | `{ "provider": ..., "model": ... }`，必须指向已声明的组合 |
 | `templatesDir` | 否 | 模板目录；绝对路径（支持 `~/`），`start` 作为第三个 argv 传给 daemon 子进程 |
+
+- `defaults` 是 CLI 与扩展层共用的唯一默认 provider/model 键；旧的 `defaultProvider`/`defaultModel`
+  已移除（pre-release 变更，无迁移）：出现时按未知键退出 2。
+- 全局文件还允许扩展组的 `defaultWorkspace`、`extensions`、`entryConfig`。CLI 生命周期命令**接受
+  但不校验、不使用**扩展键；daemon 的扩展加载器忽略 CLI 键。`config` 命令同时按两侧规则校验，
+  因此它写出的全局文件对两个加载器都合法。
+- 工作区 `<workspace>/.pisces/config.json` 只允许 `defaults`、`extensions`、`entryConfig`；出现
+  `dataDir`、`providers`、`templatesDir` 或 `defaultWorkspace` 按未知键处理。
+- 工作区 `defaults` 在全局文件可读且含 `providers` 时也校验其指向；全局文件缺失时只校验格式。
+- 扩展键的语义见 `docs/extensions.md`。
 
 - 未知键、类型错误、重复 `id`、相对 `dataDir` 均视为不合法，退出 2。
 - CLI 只暴露一种方言 `openai-chat`；`baseUrl` 必须能提供 OpenAI Chat Completions 兼容接口。
@@ -171,23 +184,109 @@ $ echo $?
 写的 `socketPath` 与推导路径不一致时，按未知属主处理（退出 1，不发信号，保留文件）。已停止时重复
 `stop` 是幂等的，退出 0。
 
+### `config list|get|set|unset`
+
+```bash
+pisces config list  [--scope global|workspace] [--workspace <dir>] [--json]
+pisces config get   <path> [--scope ...] [--workspace <dir>] [--json]
+pisces config set   <path> <json-value> [--scope ...] [--workspace <dir>]
+pisces config unset <path> [--scope ...] [--workspace <dir>]
+```
+
+- 默认 `--scope global`，读写 `--config` 指定的全局文件；`--scope workspace` 读写
+  `<workspace>/.pisces/config.json`。工作区取 `--workspace`，缺省为当前目录，且必须是已存在的目录。
+- `--config` 被所有 `config` 子命令接受；扩展目录取 `dirname(configPath)/extensions`。
+- 路径语法：点号分段；数组用数字段（`providers.0.models.1.maxOutput`）；键含 `.` 时用 JSON 引号段
+  （`entryConfig."@scope/pkg#tool".timeout`）。空段、`__proto__`、`constructor`、`prototype` 一律拒绝。
+- `list` 输出目标层原始 JSON；文件缺失视为 `{}`。人类模式按键排序并缩进，`--json` 原样输出。
+- `get` 按路径取值；不存在时 `config.key_not_found`，退出 1。
+- `set` 的取值按 JSON 解析（字符串必须带引号）；对象父级缺失时创建空对象，数组只接受已有索引或
+  `-`（追加）。`unset` 删除路径。写入前都按当前 scope 校验草稿；失败不修改文件。
+- 写入使用 `tmp` + `rename`，文件模式 `0600`，缺失的父目录以 `0700` 创建；拒绝符号链接目标。
+
+示例：
+
+```console
+$ pisces config set dataDir '"/home/me/.local/state/pisces"'
+$ pisces config set providers '<providers-json>'
+$ pisces config set defaults '{"provider":"openai","model":"gpt-5"}'
+$ pisces config get defaults.model
+gpt-5
+$ pisces config get defaults.provider --json
+"openai"
+$ pisces config unset defaults
+$ pisces config get defaults
+error: config.key_not_found: Configuration key not found
+$ echo $?
+1
+```
+
+退出码：成功 0；`config.key_not_found` 为 1；`config.invalid`、`config.unknown_key`、
+`config.no_workspace` 与用法错误为 2。错误只输出固定文案，不回显配置值。
+
+### `extensions list`
+
+```bash
+pisces extensions list [--workspace <dir>] [--json]
+```
+
+- 来源：内置 `extensions/builtin`、`<configDir>/extensions/`、`<workspace>/.pisces/extensions/`
+  （只有给出 `--workspace` 才含第三项）。`<configDir>` 是 `dirname(--config 或默认 configPath)`；
+  扩展配置层固定读取 `<configDir>/config.json`，`--config` 的其它文件名只用于定位该目录。
+- 只读清单、sidecar 与技能正文；**不导入**工具/包装器/上下文代码，不读取凭据。
+- 每行 `name type origin`，`origin` 为 `builtin`、`config` 或 `workspace`；`--json` 输出
+  `{ "entries": [{ "name", "type", "origin", "description?" }] }`。
+- 发现 issue 时只向 stderr 打印 `extensions.invalid: <source>`，不改变退出码。
+- 空结果打印 `no extensions`，退出 0。`entryConfig` 无效使发现失败时，整条命令退出 2，不输出半份列表。
+
+```console
+$ pisces extensions list --workspace /home/me/project
+@pisces/builtin-shell#shell tool  builtin Runs a shell command in the workspace...
+config-pkg#c                tool  config
+workspace-pkg#helper        skill workspace
+```
+
+### `sessions list`
+
+```bash
+pisces sessions list [--data-dir <dir>] [--json]
+```
+
+- 打开一个短连接调用 `session.list`；只列出已落盘会话，临时会话不出现。
+- 人类模式按 `createdAt` 降序，每行 `id provider/model workspace createdAt`；`--json` 输出 daemon
+  原始结果。
+- `--data-dir` 与生命周期命令同义，覆盖配置里的 `dataDir`。
+- 配置不合法退出 2；daemon 未运行或握手失败输出 `error: daemon.unreachable: Daemon is not reachable`，
+  退出 1。
+
+```console
+$ pisces sessions list
+s-1 openai/gpt-5 /home/me/project 2026-01-02T03:04:05.000Z
+$ pisces sessions list --json
+{"sessions":[{"id":"s-1","provider":"openai","model":"gpt-5","workspace":"/home/me/project","createdAt":"2026-01-02T03:04:05.000Z","schemaVersion":1}]}
+```
+
 | 命令 | 退出码 |
 |---|---|
 | 全部命令成功 | 0 |
+| `config get|unset` 未命中（`config.key_not_found`）、`sessions list` 连接失败 | 1 |
 | 已在运行 / 未知属主 / 启动失败 / 停止超时 / socket 无属主 / pid 记录写入或清除失败 | 1 |
-| 用法错误、配置不合法、缺少密钥、数据目录不可用 | 2 |
+| 用法错误、配置不合法、配置键未知、工作区不可用、缺少密钥、数据目录不可用 | 2 |
 
 选项：
 
 | 选项 | 说明 |
 |---|---|
-| `--config <path>` | 配置文件路径 |
-| `--data-dir <path>` | 覆盖 `dataDir` |
-| `--json` | 机器可读输出，仅 `status` 接受 |
+| `--config <path>` | 配置文件路径（所有命令接受） |
+| `--data-dir <path>` | 覆盖 `dataDir`（生命周期、`templates`、`sessions list`） |
+| `--scope <global\|workspace>` | `config` 的目标层，默认 `global` |
+| `--workspace <dir>` | 工作区目录（`config --scope workspace`、`extensions list`） |
+| `--json` | 机器可读输出：`status`、`templates`、`config list/get`、`extensions list`、`sessions list` |
 | `--help` / `--version` | 帮助/版本；可在第一个参数位置或任一命令参数位置使用（`wat --help` 仍是用法错误） |
 
-未知命令（包括本阶段未实现的 `run`、`sessions` 等）打印 usage 并以 2 退出；`--config`、
-`--data-dir` 缺少取值、其取值以 `-` 开头，或 `--json` 用于 `status` 以外命令时，同样按用法错误处理。
+未知命令（包括本阶段未实现的 `run` 等）打印 usage 并以 2 退出；`--config`、`--data-dir`、
+`--workspace`、`--scope` 缺少取值或其取值以 `-` 开头、`--json` 用于不支持的子命令、以及
+`--workspace` 与 `--scope global` 同用时，同样按用法错误处理。
 
 ## 6. 文件位置
 
@@ -198,7 +297,8 @@ $ echo $?
 | `<dataDir>/run/pisces.sock` | 本地 Unix socket | `0600` |
 | `<dataDir>/run/pisces.lock` | daemon 单实例锁 | `0600` |
 | `<dataDir>/sessions/` | 会话记录（由 daemon 维护） | 目录 |
-| `<configDir>/pisces/config.json` | 本文件所述的配置 | 用户自定 |
+| `<configDir>/pisces/config.json` | 本文件所述的全局配置（统一 schema） | 用户自定；`config set` 写入时 `0600` |
+| `<workspace>/.pisces/config.json` | 工作区配置（只允许扩展子集） | `config set` 写入时 `0600` |
 
 - **只有 `start` 会创建并校验 `dataDir` 策略**：路径必须是绝对路径（`--data-dir` 相对路径直接
   以 `daemon.insecure_directory` 退出 2）、存在或可创建、属于当前有效 uid、且不带 group/world
@@ -235,15 +335,18 @@ $ echo $?
 - **`daemon.unmanaged`**（socket 应答、无 pid 记录）：`stop` 退出 1 且不发送信号；该 daemon 不是本
   CLI 启动的，需人工确认后用 `kill` 停止。
 - **`config.invalid`**：`start`/`status`/`stop` 都需要可读配置；修复配置文件后重试。
+- **`config.unknown_key` / `config.no_workspace`**：`config` 的目标层出现不允许的键，或
+  `--scope workspace` 没有可用目录；命令退出 2，不写任何文件。
+- **`config.key_not_found`**：`config get`/`unset` 的路径不存在；退出 1，文件不变。
+- **`daemon.unreachable`**：`sessions list` 无法连接由 dataDir 推导的 socket；先 `pisces status`，
+  必要时 `start`。`sessions list` 只经协议读取，不直接读会话文件。
 
 ## 8. 本阶段未交付
 
-- `run`（交互/`--print`/`--json`）、`sessions list|export|cancel`、`client list|start`、
-  `models list`、`providers check`、`config list|get|set|unset`、`auth`、`extensions list`。
-- 配置文件中的扩展配置、默认工作区、会话级设置；CLI 配置只接受 `dataDir`、`providers`、可选的
-  `defaults` 与 `templatesDir`，其中 `defaults` 只被传给 daemon 作为协议会话的默认 provider/model，
-  CLI 自身没有命令读取它。模板命令已交付，见 `docs/templates.md`。
-- 凭据文件、密钥校验（`auth`）、扩展安装/更新。
+- `run`（交互/`--print`/`--json`）、`sessions export|cancel`、`client list|start`、`models list`、
+  `providers check`、`auth`。
+- 配置文件中的扩展配置对 CLI 生命周期命令只是“接受并忽略”；CLI 尚不装配扩展，也没有交互式配置
+  编辑器、配置迁移工具、凭据文件或扩展安装/更新。
 - macOS 与 Windows：仅 Linux x64 已实现并验证。
 - 多用户共享 dataDir、非本地（网络）socket、systemd 等进程管理器集成。
 
@@ -287,3 +390,17 @@ pnpm exec vitest run packages/cli/test/cli-lifecycle.test.ts
 模板命令的真实进程验收在同目录的 `packages/cli/test/templates-e2e.test.ts`（构建后的 CLI 启动真实
 daemon，覆盖 `list`/`preview`/`apply`、无 `--confirm` 退出 2、`daemon.unreachable` 退出 1），
 细节见 `docs/templates.md` §11。
+
+`packages/cli/test/config-extensions-sessions-e2e.test.ts` 用同一构建产物与真实 daemon 验收本阶段
+三组命令：`config set` 逐键生成统一全局文件后 `start`/`status` 成功；真实 `session.create` 使用
+`defaults`，临时会话不在 `sessions list`，`turn.start` 落盘后出现且字段正确，`--json` 可解析；
+`config unset defaults` 后重启仍可 `start`，但真实 `session.create` 返回 `session.model_required`；
+`extensions list` 对真实内置/全局/工作区目录输出三种 origin 且不执行工具代码，坏 `entryConfig`
+退出 2；daemon 停止后 `sessions list` 退出 1 且为 `daemon.unreachable`。`packages/daemon/test/
+sessions-list-socket.test.ts` 另在真实 socket 上验收 `session.list` 的临时/已落盘语义与统一配置。
+运行方式：
+
+```bash
+pnpm exec vitest run packages/cli/test/config-extensions-sessions-e2e.test.ts \
+  packages/daemon/test/sessions-list-socket.test.ts
+```

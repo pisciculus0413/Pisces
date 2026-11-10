@@ -113,19 +113,20 @@ demo/
 | 全局 | `<configDir>/config.json` | 可含全部配置键 |
 | 工作区 | `<workspace>/.pisces/config.json` | `defaultWorkspace` 在此层非法 |
 
-- 允许键：`defaultWorkspace`、`defaultProvider`、`defaultModel`、`extensions`、`entryConfig`。
+- 允许键：`defaults`、`defaultWorkspace`、`extensions`、`entryConfig`；全局层还允许并忽略 CLI 键
+  `dataDir`、`providers`、`templatesDir`（由 CLI 校验，扩展层不读取）。
 - 未知键 → `config.unknown_key`；类型或组合非法 → `config.invalid`。
 - `defaultWorkspace` 只允许出现在全局层且必须是绝对路径；它只在 `session.create` 省略
   `workspace` 时使用。
-- `defaultProvider` 与 `defaultModel` 必须成对出现；`session.create` 也接受显式成对值。
+- `defaults` 是唯一的默认 provider/model 键，必须成对出现；旧的 `defaultProvider`/`defaultModel`
+  已移除（pre-release 变更，无迁移），出现时按未知键处理。`session.create` 也接受显式成对值。
 - `extensions` 是默认选择（`package#name` 数组）；`session.create.extensions` 显式给出时
   **替换**默认值，给出空数组即禁用全部默认。
 - `entryConfig` 的键必须是当前清点中存在的 `wrapper` 条目，否则 `config.invalid`。
 
 ```json
 {
-  "defaultProvider": "openai",
-  "defaultModel": "gpt-5",
+  "defaults": { "provider": "openai", "model": "gpt-5" },
   "extensions": ["demo#run", "demo#audit"],
   "entryConfig": { "demo#audit": { "tag": "workspace" } }
 }
@@ -205,7 +206,8 @@ demo/
 | `session.read` | 返回 `meta/records/queue/selection/seq`；`selection` 只含已持久化声明 |
 | `provider.list`、`turn.list`、`turn.cancel`、`session.subscribe`、`session.unsubscribe` | 沿用既有契约，未因扩展改变 |
 
-未路由（仍返回 `protocol.unknown_method`）：`session.list`、`template.*`、`client.*`。
+未路由（仍返回 `protocol.unknown_method`）：`client.*`。`session.list` 与 `template.*` 已路由，
+分别是已落盘会话枚举与模板操作（未装配 `TemplateStore` 时 `template.*` 仍返回未知方法）。
 
 ## 6. 执行时机与失败隔离
 
@@ -389,8 +391,7 @@ export default async function resolve({ workspace }: ContextSourceContext) {
 
 ```json
 {
-  "defaultProvider": "openai",
-  "defaultModel": "gpt-5",
+  "defaults": { "provider": "openai", "model": "gpt-5" },
   "extensions": ["demo#run", "demo#audit"],
   "entryConfig": { "demo#audit": { "tag": "workspace" } }
 }
@@ -429,14 +430,15 @@ await host.stop();
 - **providers 扩展装配**：清单中的 `providers` 只产生 `extensions.unsupported_contribution`，
   不注册供应商；provider 仍由宿主通过 `ProviderManagement` 注入。
 - **clients 扩展与 `client.*` 路由**：未装配，未路由。
-- **CLI**：没有 `extensions list/install/enable`、`run`、`config` 等命令；安装与更新由 npm/git
-  完成，配置由用户直接编辑 JSON。
+- **CLI**：已实现 `extensions list` 与 `config list|get|set|unset`；仍没有
+  `extensions install/enable`、`run` 等命令，安装与更新由 npm/git 完成。
 - **沙箱**：扩展代码与工具以 daemon 用户权限运行，没有进程/文件系统隔离。
 - **热重载**：已有会话的绑定不重建、已装载模块不重载；进程存活期间新建会话仍会重新发现并冻结新定义，而仍存活的已固化会话只显示 `stale`。改变扩展后不需要重启进程，但已有会话不会自动刷新。
 - **依赖树锁定**：只哈希条目文件本身（`definitionHash`）与合并后的包装器配置
   （`configHash`），不哈希被导入的依赖；修改扩展的依赖不会让旧定义变 stale。
 - **技能/上下文历史清理**：已写入的历史正文只按选择过滤，不会被删除或重新固化为新版本。
-- **`session.list`** 未路由；旧会话只能由已知 `sessionId` 读取。
+- **`sessions export/cancel`**：`session.list` 已路由，但 CLI 只交付 `sessions list`；导出与取消仍
+  未实现。
 
 ## 11. 验证状态
 

@@ -418,7 +418,7 @@ interface HelloResult {
 | `client.list` | `{}` | `{ clients: ClientRegistration[] }` |
 | `client.start` | `{ id }` | `{ pid: number }` |
 
-- 当前阶段实际路由的 `Gateway` 方法为 `session.create`、`session.read`、`session.configure`、`queue.enqueue`、`queue.edit`、`queue.remove`、`queue.clear`、`entries.snapshot`、`template.list`、`template.preview`、`template.apply`、`turn.start`、`turn.cancel`、`turn.list`、`provider.list`，以及仅在请求带连接上下文时路由的 `session.subscribe`/`session.unsubscribe`；`protocol.hello` 由连接分发器处理，不进入 `Gateway`。`template.*` 仅在宿主装配了 `TemplateStore`（`startDaemon({ templates })`）时路由，未装配时返回 `protocol.unknown_method`。不带连接上下文调用 `session.subscribe`/`session.unsubscribe` 仍返回 `protocol.unknown_method`。本表其余方法（`session.list`、`client.*`）为目标设计，尚未接入路由；当前调用返回 `protocol.unknown_method`。
+- 当前阶段实际路由的 `Gateway` 方法为 `session.create`、`session.list`、`session.read`、`session.configure`、`queue.enqueue`、`queue.edit`、`queue.remove`、`queue.clear`、`entries.snapshot`、`template.list`、`template.preview`、`template.apply`、`turn.start`、`turn.cancel`、`turn.list`、`provider.list`，以及仅在请求带连接上下文时路由的 `session.subscribe`/`session.unsubscribe`；`protocol.hello` 由连接分发器处理，不进入 `Gateway`。`template.*` 仅在宿主装配了 `TemplateStore`（`startDaemon({ templates })`）时路由，未装配时返回 `protocol.unknown_method`。不带连接上下文调用 `session.subscribe`/`session.unsubscribe` 仍返回 `protocol.unknown_method`。本表其余方法（`client.*`）为目标设计，尚未接入路由；当前调用返回 `protocol.unknown_method`。
 - 方法分派只查自有属性：未识别的方法名（包括 `constructor`、`toString`、`__proto__`、`valueOf` 等原型属性名）一律返回 `protocol.unknown_method`，不会落回任何处理函数。
 
 ### 3.4 会话方法
@@ -445,15 +445,13 @@ interface CreateSessionParams {
 - `extensions` 生成一条 `kind=control`、`role=declaration` 的队列条目，`toggle` 为所选名称；所选为空时不生成。
 - 目录驱动模式（`startDaemon({ extensions })`）下，daemon 在入队时用冻结清点为每个 toggle 名称附加完整定义快照（all-toggle snapshots：打开与关闭都携带；仅有内容证据且关闭名称的例外不附加新类型快照），客户端只提交 `toggle`。非空列表在创建临时会话与运行时之前整体校验：未知名称、内联 definitions 或类型变化冲突以 `queue.invalid_control` 拒绝，重复名称以 `queue.duplicate_name` 拒绝；失败不创建会话、不写队列。无扩展模式（手动注入）仍拒绝任何有效的 `extensions`（`queue.invalid_control`），空列表不生成声明条目。`templateId` 的语义见下条。
 - `workspace` 显式提供时直接使用；省略时读取全局配置中的 `defaultWorkspace`。两者都没有返回 `session.workspace_required`；路径不存在、不是目录或不可写返回 `session.invalid_workspace`。默认工作区必须是绝对路径，不自动创建；不读取 daemon 工作目录。工作区配置 `.pisces/config.json` 不参与默认工作区解析。
-- `provider`/`model` 只能成对出现：两者均省略时取配置中的 `defaultProvider`/`defaultModel`；只提供一个，或默认值不完整，返回 `session.model_required`；显式组合或默认组合不在 `provider.list` 中，返回 `session.invalid_model`。
+- `provider`/`model` 只能成对出现：两者均省略时取配置中的 `defaults.provider`/`defaults.model`；只提供一个，或默认值不完整，返回 `session.model_required`；显式组合或默认组合不在 `provider.list` 中，返回 `session.invalid_model`。
 - `templateId` 只用于解析模板级初始配置，作为显式字段之下的默认值（`provider`/`model`/`extensions`/`systemPromptFile`）；显式 `systemPrompt` 存在时抑制模板提示词。模板提示词以 `source="template"` 入队。不创建目录、不写文件、不执行脚本；工作区初始化只能经 `template.preview`/`template.apply`。宿主未装配 `TemplateStore` 时返回 `protocol.invalid_request`；未知模板 `template.not_found`；提示词文件不可读 `template.invalid`。
 - 返回临时 `SessionMeta`，客户端通过 `session.read` 取得队列。
 
 #### 3.4.2 `session.list`
 
-- 当前阶段 `session.list` 尚未路由；会话枚举属于后续阶段的目标设计，当前调用返回 `protocol.unknown_method`。
-
-- 只返回已落盘会话的 `SessionMeta`。
+- 无参数；只返回已落盘会话的 `SessionMeta`。
 - 临时会话不出现。
 - 返回顺序不构成协议契约；客户端自行按 `createdAt` 排序。
 
@@ -1485,7 +1483,7 @@ interface SessionRuntime {
 #### 5.3.2 方法路由
 
 - `session.create`：校验 provider/model、workspace 与 extensions；目录驱动模式下先冻结绑定，把 `systemPrompt` 与一条已富化定义快照的声明入队；显式 `extensions: []` 不生成声明；非空列表的非法名称/内联定义/类型变化按 `queue.invalid_control`，重复名称按 `queue.duplicate_name` 整体拒绝且不创建运行时。无扩展模式沿用旧行为（非空 `extensions` 一律 `queue.invalid_control`）。带 `templateId` 时先解析模板默认值（未装配 `TemplateStore` 返回 `protocol.invalid_request`）；显式字段优先，解析只读、不写盘。通过后在会话锁内创建运行时，将提示词物化为队列条目（模板提示词 `source="template"`），返回临时 `SessionMeta`。
-- `session.list`：只查 `SessionStore`；不经过运行时。当前阶段未路由（目标设计）。
+- `session.list`：无参数，只查 `SessionStore.list()`；不经过运行时，不包含临时会话；顺序不构成契约。
 - `session.read`：在会话锁内读取 `meta`、`records`、`queue`、`selection` 与 `seq`；无 `nodeId` 按字节预算分页读全树，有 `nodeId` 读分支；临时会话没有节点。`selection` 由 `Context.selectionFor` 计算，只含已持久化记录；`queue`/`selection` 仅首屏返回。
 - `session.configure`：先检查活跃 turn，存在则整体返回 `turn.active`，不修改队列/meta；无活跃 turn 时校验后先写 `SessionStore.updateMeta`，成功后调用 `Context.updateMeta`；`systemPrompt` 只更新或新增 `source="instruction"` 队列条目。
 - `session.subscribe` / `session.unsubscribe`：仅在请求带连接上下文时路由；不带连接上下文时按未知方法返回 `protocol.unknown_method`。订阅集合按连接保存；校验会话（含临时会话）与安装订阅在同一会话锁内完成，重复订阅幂等；退订不发事件，断开清理。事件推送与 `detach` 不中止活跃 turn，也不影响其他连接。
@@ -1672,14 +1670,14 @@ interface Inventory {
 #### 5.5.3 配置
 
 - 配置来源优先级：工作区 `.pisces/config.json` > 软件配置目录 > 内置默认。
-- 默认 `provider`/`model` 从配置读取，供 `session.create` 使用；工作区配置可覆盖软件配置。
+- 默认 provider/model 从 `defaults` 读取，供 `session.create` 使用；工作区配置可覆盖软件配置。`defaults` 必须成对出现；旧的 `defaultProvider`/`defaultModel` 已移除。
 - `defaultWorkspace` 只来自全局配置，供 `session.create` 在省略 `workspace` 时使用；工作区配置需要先确定工作区才能读取，因此不提供 `defaultWorkspace`，也不参与默认工作区解析；若出现按未知配置键处理。
 - `defaultWorkspace` 必须是绝对路径；`config` 只校验格式，存在性与可写性在 `session.create` 时检查。
 - `config` CLI 只影响此后创建的会话；不修改既有会话的 `SessionMeta`。
 - 新会话的默认扩展选择来自配置；`session.create.extensions` 显式列表替换默认选择。
 - `entryConfig` 的键必须是当前清点中存在的 `wrapper` 条目，否则 `config.invalid`；它的合并顺序为 sidecar `config.defaults` < 用户覆盖（深合并），schema 校验合并结果：无用户覆盖时不合法只丢弃该包装器（`extensions.invalid`），有用户覆盖时不合法使整个 `prepare` 以 `config.invalid` 失败。
 - 合并后配置的 `configHash`（SHA-256 + 键排序 JSON）在声明被确认时随定义冻结；声明与快照不包含配置正文。
-- 配置键不存在或类型错误返回 `config.invalid` / `config.unknown_key`。
+- 全局配置与 CLI 共用统一 schema：扩展解析器接受并跳过 CLI 键 `dataDir`/`providers`/`templatesDir`；工作区层拒绝这些键。配置键不存在或类型错误返回 `config.invalid` / `config.unknown_key`。
 - 扩展代码不直接访问配置文件；由 `Extensions` 读取并注入。
 
 #### 5.5.4 装载
@@ -1833,7 +1831,7 @@ interface ClientRegistry {
 
 ### 6.1 新建会话与首次落盘
 
-本阶段已路由的路径如下；`session.list` 和 `client.*` 仍是未来目标方法（§3.3），不能作为现有客户端流程；模板路径见 §6.6。
+本阶段已路由的路径如下；`client.*` 仍是未来目标方法（§3.3），不能作为现有客户端流程；模板路径见 §6.6。
 
 1. 客户端调用 `session.create`，显式提供绝对、存在且可写的 `workspace`，或由目录驱动模式/手动 `defaults` 补全。可选的 `systemPrompt` 是字符串数组。带 `templateId` 时解析模板配置作为未显式提供字段的默认值（只读，不写盘）；宿主未装配 `TemplateStore` 时返回 `protocol.invalid_request`。目录驱动模式下：`extensions` 省略时取配置默认值，`[]` 禁用全部默认，显式列表替换默认；非空列表在创建临时会话前整体校验并富化定义快照。无扩展的手动模式下，显式或默认 `extensions` 非空即返回 `queue.invalid_control`，不创建临时会话。
 2. `Gateway` 校验后在内存中创建临时 `SessionMeta`、`Context` 与队列；`systemPrompt` 的每个元素转成 `kind=agent`、`role=system`、`source="create"` 的队列条目。非空 `extensions` 另外生成一条带完整定义快照的未确认 `role=declaration` 条目（all-toggle）。
@@ -1842,7 +1840,7 @@ interface ClientRegistry {
 5. `Context.assemble` 装配已确认的队列消息；若最终没有可见 agent 消息，turn 以 `turn.ended.error` 报 `turn.empty`，不落盘。
 6. 首次持久化调用 `Sessions.create(meta, nodes)`；`SessionStore` 写入 `meta.json` 与 `events.jsonl`。提交成功后 `Gateway` 补写 `active-turn.json` 标记，**然后**才可发起供应商请求；补写失败以 `storage.io` 终止 turn，已提交节点不回滚。
 7. `Context` 出队并更新选择；已订阅连接收到 `session.updated`（事件不重放）；之后 assistant 回复、工具结果由 `AgentLoopDriver` 使用 `Sessions.append` 追加。
-8. 首次提交后会话已落盘，后续可由 `session.read` 按 id 读取；`session.list` 本阶段仍未路由，不能用于查找会话。
+8. 首次提交后会话已落盘，后续可由 `session.read` 按 id 读取，也可由 `session.list` 枚举。
 
 失败边界：
 
@@ -1953,36 +1951,41 @@ interface ClientRegistry {
 
 ### 7.1 CLI 与协议边界
 
-实现状态：本阶段已实现 `start`、`status`、`stop` 与 `templates list`/`preview`/`apply`。生命周期命令经
+实现状态：本阶段已实现 `start`、`status`、`stop`、`templates list`/`preview`/`apply`、
+`config list|get|set|unset`、`extensions list` 与 `sessions list`。生命周期命令经
 pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.hello` 探测完成，使用协议做就绪/归属探测；
-模板命令经一个短连接调用 `template.*`（详见 `docs/templates.md`）。表中其余命令为目标设计，**未实现**；
-`--help`、`--version` 已实现。
+模板命令与 `sessions list` 经短连接调用 `template.*` / `session.list`（详见 `docs/templates.md`）；
+`config` 直接读写本地配置层，`extensions list` 只做本地发现且不加载扩展代码。表中其余命令为目标设计，
+**未实现**；`--help`、`--version` 已实现。
 
 | 命令 | 路径 |
 |---|---|
 | `start` / `stop` / `status` | 本地 daemon 生命周期（已实现） |
 | `run` | 经协议创建/读取会话、入队、`turn.start` |
-| `sessions list` | 经协议 `session.list` |
+| `sessions list` | 经协议 `session.list`（已实现） |
 | `sessions export` | 经协议读取分支并输出 JSONL |
 | `sessions cancel` | 先解析活跃 turn，再 `turn.cancel` |
 | `client list/start` | 经协议 `client.list` / `client.start` |
 | `templates list/preview/apply` | 经协议模板方法（已实现） |
 | `provider.list` / `models list` | 经协议只读查询 |
 | `providers check` | 仅 CLI，直接检查本地凭据与配置 |
-| `extensions list` | 仅 CLI，读取扩展目录 |
+| `extensions list` | 仅 CLI，读取扩展目录（已实现） |
 | `auth` | 仅 CLI，校验凭据 |
-| `config list/get/set/unset` | 仅 CLI，直接读写本地配置 |
+| `config list/get/set/unset` | 仅 CLI，直接读写本地配置（已实现） |
 
 - 管理命令不经 daemon 协议；daemon 在使用时读取配置。
 - `config` 只影响此后创建的会话，不改写既有会话。
 - CLI 不直接访问 `events.jsonl`；会话读取与导出经协议/服务层。
-- 已实现的配置加载器接受 `dataDir`、`providers`、`defaults` 与可选的 `templatesDir`；未知键一律
-  `config.invalid`，provider 方言固定为 `openai-chat`。
+- 全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir` 与扩展组
+  `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 共存；CLI 加载器接受但忽略扩展键，
+  扩展解析器忽略 CLI 键。默认 provider/model 只使用 `defaults`；旧 `defaultProvider`/`defaultModel`
+  按未知键拒绝。provider 方言固定为 `openai-chat`。
 
 ### 7.2 `run`
 
-本阶段 `run` **未实现**（同样未实现 `sessions`、`client`、`models`、`providers check`、`config`、
-`auth`、`extensions`）；模板命令见 §7.1 与 `docs/templates.md`；以下为目标设计，不是当前行为。
+本阶段 `run` **未实现**（同样未实现 `sessions export|cancel`、`client`、`models`、`providers check`、
+`auth`）；`sessions list`、`config`、`extensions list` 与模板命令见 §7.1 与 `docs/templates.md` /
+`docs/cli.md`；以下为目标设计，不是当前行为。
 
 - `--new`：创建新会话。
 - `--continue`：继续最近会话。
