@@ -872,7 +872,7 @@ type ExecuteProvider = (
 ) => AsyncIterable<string>;
 ```
 
-适配器只做方言编解码；`RequestToolDeclaration` 仅含 `name/description/parameters`，适配器在边界把 `name` 编码为 `wireName`。`AgentLoopDriver` 调用服务层注入的 `ExecuteProvider`，由服务层 `ProviderHost` 执行 HTTP、凭据、超时、重试与传输分帧。`ProviderHost` 以 `ProviderDescriptor.baseUrl` 与 `WireRequest.path` 组合请求地址，注入凭据与 `headers`。HTTP 与传输错误由服务层映射为错误事件，供应商错误体由适配器解析。首个内置方言为 OpenAI-compatible Chat Completions（`openai-chat`）：不支持图像/音频输出，`wireName` 上限为 64 个 ASCII 字符；所有 system 消息按顺序发送，不重新发送已存储的 reasoning，默认请求 `stream_options.include_usage=true`，并兼容响应中的 `reasoning_content`/`reasoning` 文本增量。
+适配器只做方言编解码；`RequestToolDeclaration` 仅含 `name/description/parameters`，适配器在边界把 `name` 编码为 `wireName`。`AgentLoopDriver` 调用服务层注入的 `ExecuteProvider`，由服务层 `ProviderHost` 执行 HTTP、凭据、超时、重试与传输分帧。`ProviderHost` 以 `ProviderDescriptor.baseUrl` 与 `WireRequest.path` 组合请求地址，注入凭据与 `headers`。HTTP 与传输错误由服务层映射为错误事件，供应商错误体由适配器解析。首个内置方言为 OpenAI-compatible Chat Completions（`openai-chat`）：不支持图像/音频输出，`wireName` 上限为 64 个 ASCII 字符（标准形 `t_` + UTF-16LE 码元的 base64url；超限的纯 ASCII 名称改用 `u_` + ASCII 字节的 base64url 紧凑形，解码两种都接受，仍超限的非 ASCII 名称报错）；所有 system 消息按顺序发送，不重新发送已存储的 reasoning，默认请求 `stream_options.include_usage=true`，并兼容响应中的 `reasoning_content`/`reasoning` 文本增量。
 
 供应商描述符由 `ProviderManagement` 定义，从软件配置目录发现或由扩展声明：
 
@@ -1196,8 +1196,8 @@ PID 复用防护见 §8.1。模板命令经单个短连接调用 `template.*`，
 `provider.not_found` 退出 1。其余命令（`client`、`providers check`、`auth`）仍为目标设计，
 **未实现**。交互式 `run` 循环也未实现，但非交互 `run` 已按上述语义交付。全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir`
 与扩展组 `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 共存，两个加载器互不拒绝；
-默认 provider/model 只使用 `defaults`（旧 `defaultProvider`/`defaultModel` 已移除）。CLI 的 `start`
-只把 `--config` 的绝对路径作为 `extensions: { configPath }` 注入；daemon 在每次 `session.create`
+默认 provider/model 只使用 `defaults`（旧 `defaultProvider`/`defaultModel` 已移除）。CLI 的 `start` 只把命令行给出的 `--config` 路径原样交给 daemon 子进程，由子进程解析为绝对路径并作为
+`extensions: { configPath }` 注入；daemon 在每次 `session.create`
 读取配置与扫描目录，因此 `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 的修改对之后新建的
 会话立即生效，无需重启；`providers` 与 `templatesDir` 仍是启动绑定。CLI 仅支持 Linux x64，
 只暴露 `openai-chat` 方言；配置、凭据与恢复步骤见 `docs/cli.md`。
@@ -1288,8 +1288,8 @@ interface ProjectRef {
 
 - 本阶段 daemon 仅支持 Linux x64 与 Node.js >= 22.19.0；macOS 与 Windows（命名管道）仍为目标设计，未实现，非 Linux 平台在绑定前以 `daemon.unsupported_platform` 失败。
 - daemon 以用户级单实例运行：启动时对 `<dataDir>/run/pisces.lock` 取 `flock` 并绑定 `<dataDir>/run/pisces.sock`（权限 `0600`）；锁已被占用时以 `daemon.lock_busy` 退出，且不删除存活实例的 socket。
-- 本阶段已提供 CLI `start`/`status`/`stop`（见 `docs/cli.md`）；`start` 把 `--config` 的绝对路径作为
-  `extensions: { configPath }` 传给 daemon，扩展配置层与目录由 daemon 在 `session.create` 时读取与
+- 本阶段已提供 CLI `start`/`status`/`stop`（见 `docs/cli.md`）；`start` 把命令行给出的 `--config` 路径
+  原样交给 daemon 子进程，由子进程解析为绝对路径并作为 `extensions: { configPath }` 传给扩展装配，扩展配置层与目录由 daemon 在 `session.create` 时读取与
   扫描（目录驱动模式）。嵌入程序调用 `startDaemon({ dataDir, providers, providerHost, ... })` 启动，
   返回的 `DaemonHost` 提供 `socketPath`、`initializationIssues`、`recoveryIssues`、`status()` 与
   `stop()`。CLI 的 pid 记录、日志、socket/lock 文件与退出码约定见 DDS §7.5；`client`、

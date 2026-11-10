@@ -226,6 +226,9 @@ demo/
 - 工具失败以错误结果回填（`tool.failed`/`tool.denied`/`tool.wrapper_invalid`），不终止 turn；
   上下文来源失败让本次装配失败（线上为安全 turn 失败），不写半截批次。
 - 一个包、条目或模块的失败只影响自身，不阻断 daemon 启动或其它健康条目。
+- 工作区属于信任边界：在工作区运行 CLI 的 `run` 会装配该工作区的 `.pisces/extensions/` 并遵循
+  `.pisces/config.json` 的 `extensions`；这些仓内 `.ts` 工具代码在模型调用时以 daemon 用户权限执行，
+  没有沙箱或审批提示。只在你信任的工作区运行，或先清空工作区的扩展选择与目录。
 
 ### 6.1 内置 shell（`@pisces/builtin-shell#shell`）
 

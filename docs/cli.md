@@ -643,6 +643,9 @@ $ pisces models list --json
 
 - **没有沙箱**：daemon 以当前用户权限运行，工具（含内置 shell 工具）与扩展在 daemon 进程内执行；
   `start` 不提供隔离、权限降级或审批机制。
+- **工作区扩展是代码**：在工作区运行 `pisces run` 会装配该工作区的 `.pisces/extensions/` 并遵循
+  `.pisces/config.json` 的 `extensions`；仓库自带的 `.ts` 工具代码在模型调用时以 daemon 用户权限执行。
+  没有沙箱也没有审批提示：只在你信任的工作区运行，或先清空该工作区的扩展选择与目录。
 - **密钥信任**：密钥从 `start` 的环境变量进入 daemon 进程环境。同一用户的其他进程可通过
   `/proc/<pid>/environ` 读取它（能否读取取决于内核与 `/proc` 挂载策略）；安全边界是同一 uid，不是
   密钥本身。

@@ -48,6 +48,19 @@ test("encodes long ASCII names compactly so they fit provider limits", () => {
   );
 });
 
+test("decodes every padded input byte instead of masking the final quantum", () => {
+  // Regression: the decoder used to drop bits from the last base64 character.
+  expect(decodeWireName("t_d1FAAOVdIwAzAA")).toBe("具@工#3");
+});
+
+test("compact encoding round-trips an ASCII entry and refuses non-ASCII", () => {
+  const ascii = "pkg#echo" as EntryName;
+  const compact = encodeCompactWireName(ascii);
+  expect(compact).toBeDefined();
+  expect(decodeCompactWireName(compact as string)).toBe(ascii);
+  expect(encodeCompactWireName("pkg#工具" as EntryName)).toBeUndefined();
+});
+
 test("compact encoding refuses non-ASCII and malformed values", () => {
   expect(encodeCompactWireName("pkg#工具" as EntryName)).toBeUndefined();
   expect(encodeCompactWireName("pkg#🙂" as EntryName)).toBeUndefined();

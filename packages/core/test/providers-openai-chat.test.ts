@@ -656,3 +656,38 @@ test("fits long ASCII entry names with a compact reversible wire name", async ()
     call: { id: "call_1", name: shell, arguments: { command: "printf tool-ok" } },
   });
 });
+
+test("rejects ASCII tool names that stay over the limit even in compact form", async () => {
+  const { createOpenAiChatAdapter } = await import("../src/index.js");
+  const adapter = createOpenAiChatAdapter();
+  // 80 ASCII bytes encode to 109 compact characters, still above the 64 limit.
+  const longName = `pkg#${"a".repeat(80)}` as EntryName;
+  expect(encodeWireName(longName).length).toBeGreaterThan(64);
+  expect(() =>
+    adapter.buildRequest({
+      model: "m",
+      messages: [message("user", text("go"))],
+      tools: [{ name: longName, description: "too long", parameters: { type: "object" } }],
+    }),
+  ).toThrowError(
+    expect.objectContaining({
+      code: "provider.invalid_response",
+      message: "Tool name exceeds provider limit",
+    }),
+  );
+});
+
+test("accepts a builtin-shell-length name with the compact u_ wire name", async () => {
+  const { createOpenAiChatAdapter } = await import("../src/index.js");
+  const adapter = createOpenAiChatAdapter();
+  const shell = "@pisces/builtin-shell#shell" as EntryName;
+  const wire = adapter.buildRequest({
+    model: "m",
+    messages: [message("user", text("go"))],
+    tools: [{ name: shell, description: "shell", parameters: { type: "object" } }],
+  });
+  const toolName = (JSON.parse(wire.body) as { tools: { function: { name: string } }[] }).tools[0]
+    ?.function.name as string;
+  expect(toolName).toMatch(/^u_[A-Za-z0-9_-]+$/);
+  expect(toolName.length).toBeLessThanOrEqual(64);
+});

@@ -1231,7 +1231,7 @@ interface Tools {
 - 包装器以惰性工厂注册；`invoke` 首次使用时加载并缓存 promise，不在装配锁内转译。
 - 包装器被选中后只在工具调用时参与包装，不作为可调用工具。
 - 工具声明通过 `LlmRequest.tools` 提供给适配器；序列化字段为 `wireName/description/parameters`，`execute` 留在本地。
-- `wireName` 是 `EntryName` 的确定性编码，只存在于 `WireRequest`/`parseChunk` 边界；解码由 adapter 完成，记录中的 `ToolCall.name` 始终是 `EntryName`。
+- `wireName` 是 `EntryName` 的确定性编码，只存在于 `WireRequest`/`parseChunk` 边界；解码由 adapter 完成，记录中的 `ToolCall.name` 始终是 `EntryName`。标准形为 `t_` + UTF-16LE 码元的 base64url；标准形超过适配器 `maxToolNameLength` 时纯 ASCII 名称改用 `u_` + ASCII 字节的 base64url 紧凑形，解码先试 `t_` 再试 `u_`，仍超限的非 ASCII 名称报错。注册冲突检测与存储的 `ToolCall.name` 均基于 `EntryName`，wire 形只存在于适配器边界。
 - 注册时检测两个不同 EntryName 编码到同一 wireName，冲突条目不可用并返回 `tools.wire_name_conflict`。
 
 #### 4.3.3 调用流水线
@@ -1741,7 +1741,7 @@ interface ProviderHostOptions {
 - `ExecuteProvider` 绑定到 provider；`AgentLoopDriver` 只接收注入的函数，不读配置。
 - `CredentialStore` 以 `ProviderDescriptor.auth.credentialRef` 为键返回 `{type,value,expiresAt?}`；API key 与 OAuth access token 均以 Bearer 注入，OAuth 缺失或过期时按需刷新。`ready` 不触发刷新。
 - 请求体为 `WireRequest.body`，每次重试保持一致。headers 以大小写不敏感语义合并：描述符 headers 先应用，适配器 headers 覆盖，`authorization` 最后由 Host 写入且不能被覆盖。URL 必须保留 `baseUrl` 路径前缀并拒绝跨 origin、反斜杠及原始/递归百分号编码的点段。
-- 首个内置方言为 `openai-chat`，不支持图像/音频输出。请求路径默认 `/chat/completions`，`wireName` 上限为 64 个 ASCII 字符，所有 system 消息按顺序发送，已存储 reasoning 不重新发送，`stream_options.include_usage=true` 为默认值。
+- 首个内置方言为 `openai-chat`，不支持图像/音频输出。请求路径默认 `/chat/completions`，`wireName` 上限为 64 个 ASCII 字符（标准形 `t_` + UTF-16LE 的 base64url，超限的纯 ASCII 名称回退到 `u_` + ASCII 字节的 base64url，解码两者都接受），所有 system 消息按顺序发送，已存储 reasoning 不重新发送，`stream_options.include_usage=true` 为默认值。
 - 响应使用流式读取；媒体类型按大小写不敏感解析，`text/event-stream`（包括 `charset` 参数）的 `data:` 载荷作为字符串块交给 `LLMAdapter.parseChunk`；非 SSE 响应按单块处理。
 - 每次尝试默认超时 60 秒；429 与 5xx 最多总计 3 次尝试，默认确定性退避 250ms、500ms；4xx（除 429）不重试；中止不重试；成功响应开始后不重试。
 - 凭据缺失、类型不匹配、刷新失败、网络、fetch 与响应体读取错误映射为 `provider.transport`；尝试超时映射为 `provider.timeout`；HTTP 非 2xx 状态、无效 URL/headers 与响应解析错误映射为 `provider.invalid_response`。
