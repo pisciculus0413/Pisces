@@ -286,12 +286,13 @@ pisces provider list [--config <path>] [--data-dir <dir>] [--json]
 - 只读：打开一个短连接调用 `provider.list`，数据来自 daemon；本地配置里的 provider 定义不参与
   该输出（配置文件只用于解析 `dataDir`）。
 - 列出 daemon 已知的**全部** provider，不按 `ready` 过滤：`ready` 只表示该 provider 的凭据当前
-  可用。人类模式每行 `id  ready|unready  models=<n>`，顺序为 daemon 返回顺序（按 `id` 字典序）。
+  可用。人类模式每行 `id  ready|unready  models=<n>`，顺序为 daemon 返回顺序，CLI 不另行排序。
 - 模型清单为空的 provider 同样列出（`models=0`），daemon 对其恒返回 `ready=false`。
   该状态只可能来自以编程方式装配的 daemon（协议允许空模型清单）：CLI 配置要求每个 provider 的模型
   非空，所以由 `pisces start` 起的 daemon 不会出现 `models=0`。
-- `--json` 输出 daemon 原始结果 `{ "providers": [{ "id", "ready", "models": [...] }] }`；
-  `pricing` 只可能出现在这里的 `models[]` 里（若 daemon 提供了定价）。
+- `--json` 输出 daemon 原始结果 `{ "providers": [{ "id", "ready", "models": [...] }] }`：
+  原样转发、不做结构校验（与 `models list --json` 不同，后者会校验并展平）。`pricing` 只可能出现在
+  这里的 `models[]` 里（若 daemon 提供了定价）。
 - 不输出 `dialect`、`baseUrl`、`headers` 或任何凭据值。
 - 配置不合法退出 2；daemon 未运行或握手失败输出
   `error: daemon.unreachable: Daemon is not reachable`，退出 1。

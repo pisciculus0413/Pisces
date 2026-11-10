@@ -10,7 +10,8 @@ import { socketPathFor } from "./lifecycle.js";
  * Both resolve the data directory exactly like the lifecycle commands, open
  * one short-lived protocol connection, send `provider.list` and close. No local
  * provider definition is read and no credential, header, base URL or pricing
- * value reaches human output; `pricing` is only part of `models --json`.
+ * value reaches human output; `pricing` appears only in JSON output (`provider
+ * list --json` raw echo and `models list --json`), never in human output.
  * Provider definitions are the daemon's view, so `ready` and the model list
  * are never computed here.
  */
