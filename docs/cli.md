@@ -2,8 +2,8 @@
 
 本文件描述当前已实现、并已被真实 socket 与真实进程验收（真实 `dist/main.js`、真实后台 daemon、
 真实 Unix socket 握手）覆盖的 CLI 子集：`start`、`status`、`stop`、`templates`、`config`、
-`extensions list`、`sessions list`、`provider list` 与 `models list`，以及配置文件、凭据来源、
-退出码、文件位置与失败恢复。
+`extensions list`、`sessions list|export|cancel`、`provider list` 与 `models list`，以及配置文件、
+凭据来源、退出码、文件位置与失败恢复。
 **未交付**的命令与平台在 §8 明确列出。权威契约见
 `docs/2 Detailed Design Specification/2 Detailed Design Specification.md` §7.1、§7.2、§7.5、§8.6，
 daemon 侧的安全边界见 `docs/daemon-linux.md`。
@@ -12,9 +12,9 @@ daemon 侧的安全边界见 `docs/daemon-linux.md`。
 
 - 仅 Linux x64；Node.js `>=22.19.0`，ESM。
 - 命令：`start`、`status`、`stop`、`templates list|preview|apply`、`config list|get|set|unset`、
-  `extensions list`、`sessions list`、`provider list`、`models list`（模板细节见 `docs/templates.md`，
-  扩展配置见 `docs/extensions.md`）。没有 `run`、`sessions export|cancel`、`client`、
-  `providers check`、`auth`（见 §8）。
+  `extensions list`、`sessions list|export|cancel`、`provider list`、`models list`（模板细节见
+  `docs/templates.md`，扩展配置见 `docs/extensions.md`）。没有 `run`、`client`、`providers check`、
+  `auth`（见 §8）。
 - 本地只在 Node 26.13.0 x64 上验证。CI 配置了 Node 22.19.0 / 24 / 26 x64，但本阶段未 push，
   远端矩阵结果**未验证**。
 - macOS 与 Windows 不是当前实现；daemon 在绑定 socket 前以 `daemon.unsupported_platform` 失败，
@@ -277,6 +277,59 @@ $ pisces sessions list --json
 {"sessions":[{"id":"s-1","provider":"openai","model":"gpt-5","workspace":"/home/me/project","createdAt":"2026-01-02T03:04:05.000Z","schemaVersion":1}]}
 ```
 
+### `sessions export`
+
+```bash
+pisces sessions export <session-id> [--node <node-id>] [--config <path>] [--data-dir <dir>]
+```
+
+- 只经协议：打开一个短连接调用 `session.read`，按响应的 `nextCursor` 自动分页直到末页；不直接读
+  `events.jsonl` 或任何会话文件。
+- 每行输出一个 `SessionNode` 的 JSON，**不额外包装**、不裁剪字段（可选字段如 `synthetic` 原样
+  保留）；不输出队列、选择状态或 `meta`。整份输出可逐行 `JSON.parse`，行数即节点数。
+- 无 `--node`：导出整棵会话树，顺序为 `session.read` 的追加顺序。`--node <node-id>`：只导出从根到
+  该节点的线性分支（祖先链）；节点必须在同一会话内。
+- 只写 stdout；没有节点时 stdout 为空、退出 0。不提供 `--output`，需要文件时用 shell 重定向。
+- `--node` 仅本命令接受；`--json` 不适用于本命令。两者用错时均按用法错误退出 2。
+- 未知会话由协议返回 `session.not_found`，未知节点返回 `session.node_not_found`，两者及分页/记录
+  响应不合法（`client.protocol`）都退出 1；配置不合法退出 2；daemon 未运行或握手失败输出
+  `error: daemon.unreachable: Daemon is not reachable`，退出 1。失败时不打印半行。
+
+```console
+$ pisces sessions export s-1
+{"id":"n-1","parentId":"n-1","kind":"agent","role":"user",...}
+{"id":"n-2","parentId":"n-1","kind":"agent","role":"assistant",...}
+$ pisces sessions export s-1 --node n-2
+{"id":"n-1","parentId":"n-1","kind":"agent","role":"user",...}
+{"id":"n-2","parentId":"n-1","kind":"agent","role":"assistant",...}
+```
+
+### `sessions cancel`
+
+```bash
+pisces sessions cancel <session-id> [--config <path>] [--data-dir <dir>]
+```
+
+- 先 `turn.list`，只选择 `sessionId` 与参数相等的活跃 turn（保持 daemon 顺序），再逐个
+  `turn.cancel { turnId }`。
+- 成功时每个 turn 打印一行 `cancelled <turnId>`，退出 0。取消中止供应商流；已产生的节点仍写入
+  会话。
+- 没有匹配的活跃 turn（包括刚取消过）时打印 `no active turn`，退出 0（幂等）；此时不调用
+  `turn.cancel`。
+- 任一 `turn.cancel` 返回 `{cancelled:false}`（竞态或收尾中）时向 stderr 打印
+  `error: turn.cancel_failed: Cancel request was not accepted`，退出 1；此前已成功取消的 turn 仍保留
+  其 `cancelled` 行。`turn.cancel_failed` 由 CLI 本地产生。
+- 配置不合法退出 2；daemon 未运行或握手失败输出
+  `error: daemon.unreachable: Daemon is not reachable`，退出 1；`turn.list`/`turn.cancel` 响应不合法
+  时输出 `error: client.protocol: Invalid response from daemon`，退出 1。
+
+```console
+$ pisces sessions cancel s-1
+cancelled t-1
+$ pisces sessions cancel s-1
+no active turn
+```
+
 ### `provider list`
 
 ```bash
@@ -342,7 +395,7 @@ $ pisces models list --json
 | 命令 | 退出码 |
 |---|---|
 | 全部命令成功 | 0 |
-| `config get` / `config unset` 未命中（`config.key_not_found`）、`sessions list` / `provider list` / `models list` 连接失败、`models list --provider` 未知 id（`provider.not_found`） | 1 |
+| `config get` / `config unset` 未命中（`config.key_not_found`）；`sessions list|export|cancel` / `provider list` / `models list` 连接失败（`daemon.unreachable`）或协议响应不合法（`client.protocol`）；`sessions export` 的 `session.not_found` / `session.node_not_found`；`sessions cancel` 被拒绝（`turn.cancel_failed`）；`models list --provider` 未知 id（`provider.not_found`） | 1 |
 | 已在运行 / 未知属主 / 启动失败 / 停止超时 / socket 无属主 / pid 记录写入或清除失败 | 1 |
 | 用法错误、配置不合法、配置键未知、工作区不可用、缺少密钥、数据目录不可用 | 2 |
 
@@ -351,7 +404,8 @@ $ pisces models list --json
 | 选项 | 说明 |
 |---|---|
 | `--config <path>` | 配置文件路径（所有命令接受） |
-| `--data-dir <path>` | 覆盖 `dataDir`（生命周期、`templates`、`sessions list`、`provider list`、`models list`） |
+| `--data-dir <path>` | 覆盖 `dataDir`（生命周期、`templates`、`sessions list|export|cancel`、`provider list`、`models list`） |
+| `--node <id>` | 只导出该节点的分支（仅 `sessions export`） |
 | `--provider <id>` | 只列出该 provider 的模型（仅 `models list`） |
 | `--scope <global\|workspace>` | `config` 的目标层，默认 `global` |
 | `--workspace <dir>` | 工作区目录（`config --scope workspace`、`extensions list`） |
@@ -359,9 +413,10 @@ $ pisces models list --json
 | `--help` / `--version` | 帮助/版本；可在第一个参数位置或任一命令参数位置使用（`wat --help` 仍是用法错误） |
 
 未知命令（包括本阶段未实现的 `run` 等）打印 usage 并以 2 退出；`--config`、`--data-dir`、
-`--provider`、`--workspace`、`--scope` 缺少取值或其取值以 `-` 开头、`--json` 用于不支持的子命令、
-`--provider` 用于 `provider list`（只有 `models list` 接受它）、以及 `--workspace` 与
-`--scope global` 同用时，同样按用法错误处理。
+`--node`、`--provider`、`--workspace`、`--scope` 缺少取值或其取值以 `-` 开头、`--json` 用于不支持的
+子命令（含 `sessions export|cancel`）、`--node` 用于非 `sessions export`、`--provider` 用于
+`provider list`（只有 `models list` 接受它）、以及 `--workspace` 与 `--scope global` 同用时，同样
+按用法错误处理。
 
 ## 6. 文件位置
 
@@ -412,8 +467,8 @@ $ pisces models list --json
   按上面 `unknown_owner` 的步骤人工处置。
 - **`daemon.unmanaged`**（socket 应答、无 pid 记录）：`stop` 退出 1 且不发送信号；该 daemon 不是本
   CLI 启动的，需人工确认后用 `kill` 停止。
-- **`config.invalid`**：`start`/`status`/`stop` 以及 `sessions list`、`provider list`、`models list`
-  都需要可读配置（用于解析 `dataDir`）；修复配置文件后重试。
+- **`config.invalid`**：`start`/`status`/`stop` 以及 `sessions list|export|cancel`、`provider list`、
+  `models list` 都需要可读配置（用于解析 `dataDir`）；修复配置文件后重试。
 - **`config.unknown_key` / `config.no_workspace`**：`config` 的目标层出现不允许的键，或
   `--scope workspace` 没有可用目录；命令退出 2，不写任何文件。
 - **未知键的码取决于命令**：同一个不允许的顶层键，`config list|get|set|unset` 报
@@ -429,14 +484,16 @@ $ pisces models list --json
 - **`config.key_not_found`**：`config get`/`unset` 的路径不存在；退出 1，文件不变。
 - **`provider.not_found`**：`models list --provider <id>` 的 id 不在 daemon 的 provider 清单里。该码
   由 CLI 本地产生（协议没有对应错误码），退出 1，stdout 为空；先用 `provider list` 确认可用 id。
-- **`daemon.unreachable`**：`sessions list`、`provider list`、`models list` 无法连接由 dataDir 推导的
-  socket；先 `pisces status`，必要时 `start`。这些命令只经协议读取，不直接读会话文件或本地 provider
-  定义。
+- **`turn.cancel_failed`**：`sessions cancel` 的 `turn.cancel` 未被 daemon 接受（`{cancelled:false}`，
+  通常是列出与取消之间 turn 已收尾的竞态）。该码由 CLI 本地产生，退出 1；重试一次通常得到
+  `no active turn`（退出 0）。
+- **`daemon.unreachable`**：`sessions list|export|cancel`、`provider list`、`models list` 无法连接由
+  dataDir 推导的 socket；先 `pisces status`，必要时 `start`。这些命令只经协议读取，不直接读会话文件
+  或本地 provider 定义。
 
 ## 8. 本阶段未交付
 
-- `run`（交互/`--print`/`--json`）、`sessions export|cancel`、`client list|start`、`providers check`、
-  `auth`。
+- `run`（交互/`--print`/`--json`）、`client list|start`、`providers check`、`auth`。
 - 配置文件中的扩展配置对 CLI 生命周期命令只是“接受并忽略”；CLI 尚不装配扩展，也没有交互式配置
   编辑器、配置迁移工具、凭据文件或扩展安装/更新。
 - macOS 与 Windows：仅 Linux x64 已实现并验证。
@@ -505,4 +562,16 @@ daemon 停止后两者退出 1；并用构建后的 CLI 对 `pisces start` 起�
 
 ```bash
 pnpm exec vitest run packages/cli/test/providers-e2e.test.ts
+```
+
+`packages/cli/test/sessions-export-cancel-e2e.test.ts` 在进程内真实 daemon（原生 transport、真实
+Unix socket、真实 `SessionStore`）上验收 `sessions export` 与 `sessions cancel`：正常 provider 提交
+节点后，全树导出逐行 `JSON.parse` 与 `session.read` 记录深度相等，`--node` 只导出祖先链且为全树
+子集；挂起 provider 让 turn 保持 `running`，真实 CLI 取消后输出 `cancelled <turnId>`、轮询
+`turn.list` 直到该 turn 消失，再次取消得到 `no active turn`；daemon 停止后两命令均退出 1
+（`daemon.unreachable`）。构建后的 `dist/main.js` 子进程另对同一 daemon 导出真实会话，并在空闲
+会话上得到 `no active turn`（退出 0）。本地在 Node 26.13.0 x64 上通过；远端 CI 未运行。运行方式：
+
+```bash
+pnpm exec vitest run packages/cli/test/sessions-export-cancel-e2e.test.ts
 ```

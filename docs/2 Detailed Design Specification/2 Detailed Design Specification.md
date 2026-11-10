@@ -1961,10 +1961,15 @@ interface ClientRegistry {
 ### 7.1 CLI 与协议边界
 
 实现状态：本阶段已实现 `start`、`status`、`stop`、`templates list`/`preview`/`apply`、
-`config list|get|set|unset`、`extensions list`、`sessions list`、`provider list` 与 `models list`。
-生命周期命令经
+`config list|get|set|unset`、`extensions list`、`sessions list|export|cancel`、`provider list` 与
+`models list`。生命周期命令经
 pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.hello` 探测完成，使用协议做就绪/归属探测；
-模板命令与 `sessions list` 经短连接调用 `template.*` / `session.list`（详见 `docs/templates.md`）；
+模板命令、`sessions` 命令经短连接调用 `template.*` / `session.list` / `session.read` /
+`turn.list` / `turn.cancel`（详见 `docs/templates.md`、`docs/cli.md`）；`sessions export` 按
+`nextCursor` 分页输出 JSONL（每行一个 `SessionNode`，不包装），默认整棵树、`--node <id>` 只输出根到该
+节点的祖先链；`sessions cancel` 用 `turn.list` 按 `sessionId` 选择活跃 turn 后逐个 `turn.cancel`，无活跃
+turn 时输出 `no active turn` 并退出 0，`{cancelled:false}` 映射为 CLI 本地的
+`turn.cancel_failed`（退出 1）。
 `config` 直接读写本地配置层，`extensions list` 只做本地发现且不加载扩展代码。`provider list` 与
 `models list` 经短连接调用 `provider.list`，不读本地 provider 定义、不碰凭据：前者输出
 `id  ready|unready  models=<n>`；后者把模型展平为 `provider/model`（provider 按 `id` 字典序，
@@ -1976,8 +1981,8 @@ pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.
 | `start` / `stop` / `status` | 本地 daemon 生命周期（已实现） |
 | `run` | 经协议创建/读取会话、入队、`turn.start` |
 | `sessions list` | 经协议 `session.list`（已实现） |
-| `sessions export` | 经协议读取分支并输出 JSONL |
-| `sessions cancel` | 先解析活跃 turn，再 `turn.cancel` |
+| `sessions export` | 经协议 `session.read` 输出 JSONL（已实现） |
+| `sessions cancel` | 先解析活跃 turn，再 `turn.cancel`（已实现） |
 | `client list/start` | 经协议 `client.list` / `client.start` |
 | `templates list/preview/apply` | 经协议模板方法（已实现） |
 | `provider list` / `models list` | 经协议只读查询（已实现） |
@@ -1996,9 +2001,9 @@ pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.
 
 ### 7.2 `run`
 
-本阶段 `run` **未实现**（同样未实现 `sessions export|cancel`、`client`、`providers check`、
-`auth`）；`sessions list`、`provider list`、`models list`、`config`、`extensions list` 与模板命令见
-§7.1 与 `docs/templates.md` / `docs/cli.md`；以下为目标设计，不是当前行为。
+本阶段 `run` **未实现**（同样未实现 `client`、`providers check`、
+`auth`）；`sessions list|export|cancel`、`provider list`、`models list`、`config`、`extensions list`
+与模板命令见 §7.1 与 `docs/templates.md` / `docs/cli.md`；以下为目标设计，不是当前行为。
 
 - `--new`：创建新会话。
 - `--continue`：继续最近会话。
@@ -2028,9 +2033,11 @@ pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.
 
 ### 7.4 导出
 
-- `sessions export <id>` 输出 JSONL：首行为 `SessionMeta`，其后为默认活动分支节点，从根到当前。
-- 只导出默认分支，不导出其他分支、队列、临时状态或凭据。
-- 导出可能包含敏感内容；是否导出由用户决定。
+- `sessions export <id>` 输出 JSONL：每行一个 `SessionNode`（不额外包装、不裁剪字段）；默认导出
+  整棵会话树，顺序为 `session.read` 的追加顺序。`--node <id>` 只导出从根到该节点的线性祖先链。
+- 不导出队列、选择状态、`meta` 或临时状态；只写 stdout，不提供 `--output`。
+- 会话不存在为 `session.not_found`，节点不存在为 `session.node_not_found`；导出可能包含敏感内容，
+  是否导出由用户决定。
 - 导出不修改会话记录，不改变活动分支。
 
 ### 7.5 失败与恢复约定
