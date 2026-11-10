@@ -26,6 +26,7 @@ import {
   productionProvidersDeps,
   providerList,
 } from "./providers.js";
+import { sessionCancel } from "./session-cancel.js";
 import { sessionExport } from "./session-export.js";
 import { productionSessionsDeps, type SessionsDeps, sessionsList } from "./sessions.js";
 import {
@@ -590,9 +591,7 @@ export async function runCli(
           sessionDeps,
         );
       default:
-        // `cancel` dispatches once its command lands; until then it is a usage error.
-        io.err(USAGE);
-        return 2;
+        return await sessionCancel({ ...options, sessionId: parsed.sessionId }, sessionDeps);
     }
   }
 
