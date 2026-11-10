@@ -1961,7 +1961,7 @@ interface ClientRegistry {
 ### 7.1 CLI 与协议边界
 
 实现状态：本阶段已实现 `start`、`status`、`stop`、`templates list`/`preview`/`apply`、
-`config list|get|set|unset`、`extensions list`、`sessions list|export|cancel`、`provider list` 与
+`config list|get|set|unset`、`extensions list`、`sessions list|export|cancel`、`run`、`provider list` 与
 `models list`。生命周期命令经
 pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.hello` 探测完成，使用协议做就绪/归属探测；
 模板命令、`sessions` 命令经短连接调用 `template.*` / `session.list` / `session.read` /
@@ -1969,7 +1969,9 @@ pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.
 `nextCursor` 分页输出 JSONL（每行一个 `SessionNode`，不包装），默认整棵树、`--node <id>` 只输出根到该
 节点的祖先链；`sessions cancel` 用 `turn.list` 按 `sessionId` 选择活跃 turn 后逐个 `turn.cancel`，无活跃
 turn 时输出 `no active turn` 并退出 0，`{cancelled:false}` 映射为 CLI 本地的
-`turn.cancel_failed`（退出 1）。
+`turn.cancel_failed`（退出 1）。`run` 经短连接组合 `session.create`/`session.list`/`session.read`/
+`session.configure`、`queue.enqueue`、`session.subscribe`、`turn.start` 与 `turn.cancel`：提示词只入队，
+客户端先订阅再入队，只等目标 `turnId` 的 `turn.ended`（详见 §7.2）。
 `config` 直接读写本地配置层，`extensions list` 只做本地发现且不加载扩展代码。`provider list` 与
 `models list` 经短连接调用 `provider.list`，不读本地 provider 定义、不碰凭据：前者输出
 `id  ready|unready  models=<n>`；后者把模型展平为 `provider/model`（provider 按 `id` 字典序，
@@ -1979,7 +1981,7 @@ turn 时输出 `no active turn` 并退出 0，`{cancelled:false}` 映射为 CLI 
 | 命令 | 路径 |
 |---|---|
 | `start` / `stop` / `status` | 本地 daemon 生命周期（已实现） |
-| `run` | 经协议创建/读取会话、入队、`turn.start` |
+| `run` | 经协议创建/读取会话、入队、订阅、`turn.start`/`turn.cancel`（已实现） |
 | `sessions list` | 经协议 `session.list`（已实现） |
 | `sessions export` | 经协议 `session.read` 输出 JSONL（已实现） |
 | `sessions cancel` | 先解析活跃 turn，再 `turn.cancel`（已实现） |
@@ -2001,21 +2003,48 @@ turn 时输出 `no active turn` 并退出 0，`{cancelled:false}` 映射为 CLI 
 
 ### 7.2 `run`
 
-本阶段 `run` **未实现**（同样未实现 `client`、`providers check`、
-`auth`）；`sessions list|export|cancel`、`provider list`、`models list`、`config`、`extensions list`
-与模板命令见 §7.1 与 `docs/templates.md` / `docs/cli.md`；以下为目标设计，不是当前行为。
+非交互 `run` 已实现；`client`、`providers check`、`auth` 仍未实现。`sessions list|export|cancel`、
+`provider list`、`models list`、`config`、`extensions list` 与模板命令见 §7.1 与
+`docs/templates.md` / `docs/cli.md`。以下为当前行为，不再是目标设计。
 
-- `--new`：创建新会话。
-- `--continue`：继续最近会话。
-- `--session <id>`：指定会话；不存在时按 `--create` 处理。
-- `--create`：与 `--session` 同用，不存在时新建。
-- `--enable` / `--disable`：解析为 `package#name` 列表，入队声明类控制消息。
-- `--system-prompt` / `--use-default-system-prompt`：设置/使用默认系统提示词；进入队列。
-- `--model` / `--provider`：设置会话模型与供应商。
-- `--print` / `--json`：非交互输出。
-- 交互模式：用户输入入队；发送 `turn.start`；流式展示事件；Ctrl-C 等同 `sessions cancel`。
-- `run` 不把提示词直接写入请求体；所有输入先入队。
-- 退出码：成功 0；协议/会话/供应商错误非 0；取消按 CLI 约定返回。
+```text
+pisces run [prompt] [--new | --continue | --session <id> [--create]]
+           [--model <id>] [--provider <id>]
+           [--system-prompt <text> | --use-default-system-prompt]
+           [--enable <package#name>]... [--disable <package#name>]...
+           [--print | --json] [--config <path>] [--data-dir <dir>]
+```
+
+- 非交互：只创建一个 turn 并等待结束，不读取 stdin、不循环、不做多轮输入；`[prompt]` 必填且去空白后
+  非空，位置参数可在任意选项前后，多余位置参数是用法错误。
+- 会话选择（`--new`/`--continue`/`--session` 互斥，缺省等同 `--new`）：`--continue` 取 `session.list`
+  中 `createdAt` 最大的已落盘会话（并列取 daemon 返回顺序第一个），空则 `session.not_found`（1）；
+  `--session <id>` 先做一次 `session.read {limit: 1}` 存在性检查，不存在且带 `--create` 时新建，
+  否则 `session.not_found`（1）；`--create` 只能与 `--session` 同用；id 必须匹配 `[A-Za-z0-9_-]+`。
+- 会话选项：`--model`/`--provider` 对新会话交给 `session.create`、对既有会话交给
+  `session.configure`（既有会话两者必须成对，否则 daemon 返回 `session.model_required`）；
+  `--system-prompt` 对新会话交给 `session.create.systemPrompt`、对既有会话交给
+  `session.configure.systemPrompt`；`--use-default-system-prompt` 只对新会话有效，对既有会话本地返回
+  `run.default_system_prompt_unsupported`（1）。
+- 扩展选择：`--enable`/`--disable` 重复给出 `package#name`；一次有界 `session.read`（`limit: 1`）同时
+  取回已提交 `selection` 与整个队列，按队列顺序在提交选择上重放未确认的
+  `control`/`declaration` toggle，再按参数顺序求差集（先 enables 后 disables）。只有实际变化才生成一条
+  `{kind:"control",role:"declaration",source:"run"}`，`content` 为 `[{"toggle":[names]}]`，与提示词在
+  同一 `queue.enqueue` 批次提交（控制条目在前）；无变化不发。手动模式 daemon 以
+  `queue.invalid_control` 拒绝控制条目。
+- 事件与输出契约：`run` 在入队前 `session.subscribe`，只处理 `sessionId`/`turnId` 匹配的事件；
+  `turn.delta` 只拼接 `kind="text"` 的 `delta`；只有目标 `turnId` 的 `turn.ended` 结束命令，重复或
+  无关事件忽略；连接中途断开按 1 退出（不等 `turn.ended`）。默认把 delta 写 stdout 并在结束时补换行；
+  `--print` 只在结束时写最终文本加换行；`--json` 只写一行
+  `{sessionId,turnId,reason:"completed"|"cancelled"|"failed",text,error?}`，`error` 仅 `failed` 时出现
+  且为 daemon 投影的 `{code,message}`。提示词从不写入请求体。
+- 退出码：完成 0；失败 turn、协议/会话/连接错误 1；用法或 `config.invalid` 2；取消（Ctrl-C 或外部
+  `sessions cancel`）130。Ctrl-C 经可注入 seam 触发，只发一次 `turn.cancel {turnId}` 并等待
+  `turn.ended`。用法/配置/建立连接阶段的错误只写 stderr，即使 `--json` 也不产生 JSON 对象；失败 turn
+  在 `--json` 下只写对象（含 `error`）且 stderr 为空，人类模式写 `error: <code>: <message>`。
+- 失败码由 daemon 的 `turn.ended` 投影决定：目前仅 `turn.empty` 保留原码，其他失败一律
+  `internal.error: Turn failed`，CLI 不回显供应商、适配器或异常原文。
+- 限制：交互式 stdin 循环与多轮输入仍未实现；没有 `--output`；不会直接读会话文件或事件日志。
 
 ### 7.3 数据迁移
 

@@ -1133,19 +1133,19 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
   - `list`、`get <key>`、`set <key> <value>`、`unset <key>`
   - 范围：新会话的默认扩展选择；默认 `provider`/`model`；默认工作区 `defaultWorkspace`；provider 与扩展声明；扩展清点只读
   - `defaultWorkspace` 只校验绝对路径格式；存在性与可写性在 `session.create` 时检查；只影响此后创建的会话
-- `run [prompt]`：无客户端时的基本交互入口。
-  - `--new`：强制新建会话。
-  - `--continue`：继续最近一个会话。
-  - `--session <id>`：指定会话；不存在时报错，配合 `--create` 新建。
-  - `--create`：与 `--session` 同用，会话不存在时新建。
-  - `--enable <patterns>`：设置该会话的扩展选择。
-  - `--disable <patterns>`：取消该会话的扩展选择。
-  - `--system-prompt <text>`：设置该会话的系统提示词。
-  - `--use-default-system-prompt`：使用默认系统提示词。
-  - `--model <name>`：设置该会话的模型。
-  - `--provider <name>`：指定该会话的模型供应商。
-  - `--print`：非交互输出。
-  - `--json`：以 JSON 输出。
+- `run [prompt]`：非交互执行一个 turn（已实现）；交互式 stdin 循环与多轮输入仍未实现。
+  - 会话选择：`--new` 新建；`--continue` 取 `createdAt` 最大的已落盘会话；`--session <id>` 指定会话，
+    配合 `--create` 在其不存在时新建；三者互斥，缺省等同 `--new`。
+  - `--enable <patterns>` / `--disable <patterns>`：按 `entries` 当前的提交选择（叠加队列中待生效的
+    声明）计算差集，只把实际变化的 `package#name` 作为一条声明类控制条目与提示词同批入队。
+  - `--system-prompt <text>`：设置该会话的系统提示词；既有会话经 `session.configure` 改写待确认的
+    系统提示，新会话经 `session.create` 写入。
+  - `--use-default-system-prompt`：只对新会话有效；对既有会话本地报
+    `run.default_system_prompt_unsupported`，不做静默 no-op。
+  - `--model <name>` / `--provider <name>`：设置该会话的模型与供应商；既有会话两者必须成对。
+  - `--print`：只输出最终文本；`--json`：只输出一行 `{sessionId,turnId,reason,text,error?}`。
+  - 退出码：完成 0；失败 turn、协议/会话/连接错误 1；用法或配置错误 2；取消（Ctrl-C 或外部
+    `sessions cancel`）130。
 - `templates`：模板管理。
   - `list`：列出模板。
   - `preview <id>`：预览将创建的目录、文件与初始化脚本。
@@ -1160,18 +1160,19 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
 
 约定：
 
-- `--new`、`--continue`、`--session` 三者互斥。
+- `--new`、`--continue`、`--session` 三者互斥；`--create` 只能与 `--session` 同用。
 - `run` 仅在用户通过参数显式指定时才使用系统提示词（`--system-prompt` 或 `--use-default-system-prompt`），否则不写入系统提示词。
 - 扩展选择、系统提示词、模型为会话级，经 `run` 选项设置，只影响该会话。
 - `config` 只影响新会话的默认选择，不改写既有会话。
 - 管理命令（`providers check`、`extensions`、`auth`、`config`）直接读写本地配置、凭据与扩展目录，不经协议；供应商与模型的只读查询由协议 `provider.list` 提供。
 - `meta.json` 由 daemon 维护，用户不应手工编辑；会话级设置经 `session.configure` 修改。
 - 扩展的安装、更新与移除由 npm、git 完成，不在本软件生命周期内。
-- `run` 交互中按 Ctrl-C 等同 `sessions cancel <id>`。
+- 非交互的 `run` 执行中按 Ctrl-C 等同 `sessions cancel <id>`（发 `turn.cancel`、等待 `turn.ended`），
+  以 130 退出；交互式 stdin 循环仍未实现。
 
 实现状态（本阶段）：CLI 已实现 `--help`、`--version`、`start`/`status`/`stop`、
 `templates list`/`preview`/`apply`、`config list|get|set|unset`、`extensions list`、`sessions list|export|cancel`、
-`provider list` 与 `models list`。`start` 以 detached
+`run`、`provider list` 与 `models list`。`start` 以 detached
 子进程启动 daemon，写入 pid 记录与日志，只有子进程存活、pid 记录仍指向它、且本 dataDir 的 socket
 完成 `protocol.hello` 握手后才报告成功（总预算 10 s，轮询 50 ms）；`status` 结合进程存活、socket
 探测与 pid 记录给出 `running`/`stopped`/`stale`/`unresponsive`/`unmanaged`，`--json` 输出同名
@@ -1180,12 +1181,15 @@ PID 复用防护见 §8.1。模板命令经单个短连接调用 `template.*`，
 详见 `docs/templates.md`。`config` 直接读写全局与工作区配置层，`extensions list` 只做本地发现
 且不加载代码，`sessions list` 经协议 `session.list` 列出已落盘会话，`sessions export` 经协议
 `session.read` 分页输出 JSONL，`sessions cancel` 先 `turn.list` 选择该会话的活跃 turn 再
-`turn.cancel`。`provider list` 与
+`turn.cancel`。`run` 组合 `session.create`/`session.list`/`session.read`/`session.configure`、
+`queue.enqueue`、`session.subscribe`、`turn.start` 与 `turn.cancel`：提示词先入队，订阅在入队前建立，
+只等目标 `turnId` 的 `turn.ended`，默认流式输出、`--print` 只输出最终文本、`--json` 只输出一行对象。
+`provider list` 与
 `models list` 都只经协议 `provider.list`（不读本地 provider 定义）：前者每行
 `id  ready|unready  models=<n>`，列出全部 provider；后者把模型展平为 `provider/model`，provider 按
 `id` 字典序、模型保持 daemon 顺序，`--provider <id>` 只保留该 provider，未知 id 由 CLI 以
-`provider.not_found` 退出 1。其余命令（`run`、`client`、`providers check`、`auth`）仍为目标设计，
-**未实现**。全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir`
+`provider.not_found` 退出 1。其余命令（`client`、`providers check`、`auth`）仍为目标设计，
+**未实现**。交互式 `run` 循环也未实现，但非交互 `run` 已按上述语义交付。全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir`
 与扩展组 `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 共存，两个加载器互不拒绝；
 默认 provider/model 只使用 `defaults`（旧 `defaultProvider`/`defaultModel` 已移除），CLI
 接受但不校验、不使用扩展键。CLI 仅支持 Linux x64，
@@ -1279,8 +1283,8 @@ interface ProjectRef {
   `defaults` 的 `config.json` 加载器；daemon 本身仍不读取配置，嵌入程序调用
   `startDaemon({ dataDir, providers, providerHost, ... })` 启动，返回的 `DaemonHost` 提供
   `socketPath`、`initializationIssues`、`recoveryIssues`、`status()` 与 `stop()`。CLI 的 pid 记录、
-  日志、socket/lock 文件与退出码约定见 DDS §7.5；`run`、`client`、`providers check`、`auth` 命令
-  未实现。daemon 只监听本地
+  日志、socket/lock 文件与退出码约定见 DDS §7.5；`client`、`providers check`、`auth` 命令
+  未实现（非交互 `run` 已实现，交互式循环未实现）。daemon 只监听本地
   Unix socket，不监听网络地址。
 - 连接在读取任何协议字节前用原生 `SO_PEERCRED` 校验 peer UID 必须等于 daemon 有效 UID；不一致只销毁该连接。原生插件为仓内 plain C Node-API，使用固定 `node-gyp` 编译为被忽略的 `packages/daemon/native/peercred.node`，需在测试前按当前 Node ABI 显式构建；缺失或构建失败以 `daemon.native_unavailable` 拒绝启动，无降级认证。
 - `stop()` 先阻断新帧并停止 accept，等待已受理请求与尽力取消活跃 turn，再关闭连接、按 inode 清理 socket、释放锁并 dispose `Gateway`；无法完成时以 `daemon.stop_incomplete` 失败并保留锁、标记与 `quiescing` 状态，不自动强杀进程，也不声称已优雅停止。
