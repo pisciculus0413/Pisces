@@ -293,7 +293,8 @@ pisces sessions export <session-id> [--node <node-id>] [--config <path>] [--data
 - `--node` 仅本命令接受；`--json` 不适用于本命令。两者用错时均按用法错误退出 2。
 - 未知会话由协议返回 `session.not_found`，未知节点返回 `session.node_not_found`，两者及分页/记录
   响应不合法（`client.protocol`）都退出 1；配置不合法退出 2；daemon 未运行或握手失败输出
-  `error: daemon.unreachable: Daemon is not reachable`，退出 1。失败时不打印半行。
+  `error: daemon.unreachable: Daemon is not reachable`，退出 1。失败时不打印半行：分页中途失败时
+  此前已输出的完整行仍保留在 stdout，命令以非零退出。
 
 ```console
 $ pisces sessions export s-1
@@ -397,7 +398,7 @@ $ pisces models list --json
 | 命令 | 退出码 |
 |---|---|
 | 全部命令成功 | 0 |
-| `config get` / `config unset` 未命中（`config.key_not_found`）；`sessions list|export|cancel` / `provider list` / `models list` 连接失败（`daemon.unreachable`）；`sessions export|cancel` 与人类模式的 `sessions list` 协议响应不合法（`client.protocol`，`sessions list --json` 原样透传、不校验）；`sessions export` 的 `session.not_found` / `session.node_not_found`；`sessions cancel` 被拒绝（`turn.cancel_failed`）；`models list --provider` 未知 id（`provider.not_found`） | 1 |
+| `config get` / `config unset` 未命中（`config.key_not_found`）；`sessions list|export|cancel` / `provider list` / `models list` 连接失败（`daemon.unreachable`）；`sessions export|cancel`、`provider list`、`models list` 与人类模式的 `sessions list` 协议响应不合法（`client.protocol`；`sessions list --json` 与 `provider list --json` 原样透传、不做结构校验，但协议层/传输失败仍退出 1）；`sessions export` 的 `session.not_found` / `session.node_not_found`；`sessions cancel` 被拒绝（`turn.cancel_failed`）；`models list --provider` 未知 id（`provider.not_found`） | 1 |
 | 已在运行 / 未知属主 / 启动失败 / 停止超时 / socket 无属主 / pid 记录写入或清除失败 | 1 |
 | 用法错误、配置不合法、配置键未知、工作区不可用、缺少密钥、数据目录不可用 | 2 |
 

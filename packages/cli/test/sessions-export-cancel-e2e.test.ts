@@ -34,8 +34,9 @@ import { sessionExport } from "../src/session-export.js";
  * `SessionStore`) commits nodes for a normal provider and holds a turn open on a
  * blocked provider. The CLI functions run with production dependencies against
  * that socket, so the JSONL export and the turn cancellation are proven end to
- * end rather than against a fake client. One built-CLI subprocess test repeats
- * the same commands against a daemon held by this process.
+ * end rather than against a fake client. One built-CLI subprocess test covers
+ * full-tree export and idle cancel (no `--node`, no live cancel) against a
+ * daemon held by this process.
  */
 
 const MAIN = fileURLToPath(new URL("../dist/main.js", import.meta.url));
