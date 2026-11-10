@@ -25,6 +25,9 @@ export interface ProtocolError {
 /** Fixed provenance for host-created queue entries (prompts and initial declarations). */
 export const CREATE_ENTRY_SOURCE = "create";
 
+/** Fixed provenance for prompts contributed by a template's `systemPromptFile`. */
+export const TEMPLATE_ENTRY_SOURCE = "template";
+
 export interface GatewayRequest<P = JsonValue> {
   id: string;
   method: string;

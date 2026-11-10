@@ -44,6 +44,13 @@ async function readGlobalDefaults(extensions: Extensions): Promise<ExtensionConf
   }
 }
 
+/** The global-layer workspace, the configured-mode analogue of `GatewayDeps.defaults`. */
+export async function extensionDefaultWorkspace(
+  extensions: Extensions,
+): Promise<string | undefined> {
+  return (await readGlobalDefaults(extensions)).defaultWorkspace;
+}
+
 /** Runs discovery and file reads for one binding; never imports extension modules. */
 export async function prepareBinding(
   extensions: Extensions,

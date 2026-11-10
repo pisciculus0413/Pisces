@@ -47,6 +47,7 @@ import { createWorkspaceAccess } from "../workspace/access.js";
 import type { ActiveTurnStore } from "./active-turn.js";
 import {
   enrichForBinding,
+  extensionDefaultWorkspace,
   initialDeclarationEntries,
   prepareExtensionSession,
   preparePersistedBinding,
@@ -71,7 +72,7 @@ import type {
   TurnListResult,
   TurnStartResult,
 } from "./protocol.js";
-import { CREATE_ENTRY_SOURCE } from "./protocol.js";
+import { CREATE_ENTRY_SOURCE, TEMPLATE_ENTRY_SOURCE } from "./protocol.js";
 
 export interface GatewayDeps {
   store: SessionStore;
@@ -118,7 +119,13 @@ interface SessionSpec {
   model?: string;
   extensions?: EntryName[];
   /** Final prompt list; an explicit prompt list already suppresses the template prompt. */
-  prompts: string[];
+  prompts: Prompt[];
+}
+
+/** One host-created prompt with the provenance recorded on its queue entry. */
+interface Prompt {
+  text: string;
+  source: string;
 }
 
 /** A fully validated session: turning it into a runtime performs no further validation. */
@@ -126,7 +133,7 @@ interface NewSession {
   workspace: string;
   provider: string;
   model: string;
-  prompts: string[];
+  prompts: Prompt[];
   binding?: ExtensionBinding;
   initial?: QueueEntryInput[];
 }
@@ -139,9 +146,13 @@ interface SessionParams {
   systemPrompt?: string[];
 }
 
-function promptsFor(explicit: string[] | undefined, templatePrompt: string | undefined): string[] {
-  if (explicit !== undefined) return explicit;
-  return templatePrompt === undefined ? [] : [templatePrompt];
+function promptsFor(explicit: string[] | undefined, templatePrompt: string | undefined): Prompt[] {
+  // Explicit prompts are user-supplied and keep the create provenance; a template prompt is
+  // marked with its own source so the wire tells the two apart.
+  if (explicit !== undefined)
+    return explicit.map((text) => ({ text, source: CREATE_ENTRY_SOURCE }));
+  if (templatePrompt === undefined) return [];
+  return [{ text: templatePrompt, source: TEMPLATE_ENTRY_SOURCE }];
 }
 
 /** Template defaults sit under explicit request values but over host defaults. */
@@ -483,11 +494,11 @@ export function createGateway(deps: GatewayDeps): Gateway {
       createdAt: now(),
       schemaVersion: 1,
     };
-    const entries: QueueEntryInput[] = input.prompts.map((text) => ({
+    const entries: QueueEntryInput[] = input.prompts.map((prompt) => ({
       kind: "agent",
       role: "system",
-      source: CREATE_ENTRY_SOURCE,
-      content: [{ type: "text", text }],
+      source: prompt.source,
+      content: [{ type: "text", text: prompt.text }],
     }));
     if (input.initial !== undefined) entries.push(...input.initial);
     return deps.concurrency.runExclusive(sessionId, async () => {
@@ -561,6 +572,12 @@ export function createGateway(deps: GatewayDeps): Gateway {
       throw new PiscesError("queue.invalid_control", "Extensions are not available");
 
     return { workspace, provider, model, prompts: spec.prompts };
+  }
+
+  /** The one session-validation branch; both callers create nothing until it succeeds. */
+  function prepareSession(spec: SessionSpec): Promise<NewSession> {
+    if (deps.extensions !== undefined) return prepareConfiguredSession(deps.extensions, spec);
+    return prepareManualSession(spec);
   }
 
   function hasCancel(nodes: SessionNode[], turnId: TurnId): boolean {
@@ -724,23 +741,18 @@ export function createGateway(deps: GatewayDeps): Gateway {
       // Preflight: `inspect` writes nothing and never reads the prompt file, so every
       // session-configuration failure happens before the first file or directory exists.
       const plan = await templates.inspect(templateId, workspace);
-      const spec = sessionSpec({ workspace }, plan.defaults);
-      const prepared =
-        deps.extensions === undefined
-          ? await prepareManualSession(spec)
-          : await prepareConfiguredSession(deps.extensions, spec);
+      await prepareSession(sessionSpec({ workspace }, plan.defaults));
 
       const resolution = await templates.apply(templateId, workspace, {
         confirmed: true,
         ...(overwrite === undefined ? {} : { overwrite }),
       });
-      // Only apply's post-write read can see a prompt file the template itself created; the
-      // provider/model/extensions above came from the same template config that was validated.
-      const prompt = resolution.defaults.systemPrompt;
-      const meta = await createSessionFrom({
-        ...prepared,
-        prompts: prompt === undefined ? [] : [prompt],
-      });
+      // The session takes provider/model/extensions/systemPrompt from apply's resolution:
+      // only its post-write read can see a prompt file the template itself created. The
+      // workspace stays the preflight one, since template defaults never carry a workspace.
+      const meta = await createSessionFrom(
+        await prepareSession(sessionSpec({ workspace }, resolution.defaults)),
+      );
       return { projectId: resolution.projectId, sessionId: meta.id };
     },
 
@@ -775,7 +787,13 @@ export function createGateway(deps: GatewayDeps): Gateway {
       // prompt file and never writes; the workspace must already be valid when it happens.
       let template: TemplateDefaults | undefined;
       if (templateId !== undefined && templateService !== undefined) {
-        const resolvedWorkspace = workspace ?? deps.defaults?.workspace;
+        // Configured mode falls back to the extension global workspace, exactly as the same
+        // request without a template does; manual mode keeps the host-default fallback.
+        const resolvedWorkspace =
+          workspace ??
+          (deps.extensions === undefined
+            ? deps.defaults?.workspace
+            : await extensionDefaultWorkspace(deps.extensions));
         if (resolvedWorkspace === undefined)
           throw new PiscesError("session.workspace_required", "Workspace is required");
         if (!(await validateWorkspace(resolvedWorkspace)))
@@ -796,9 +814,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
         template,
       );
 
-      if (deps.extensions !== undefined)
-        return createSessionFrom(await prepareConfiguredSession(deps.extensions, spec));
-      return createSessionFrom(await prepareManualSession(spec));
+      return createSessionFrom(await prepareSession(spec));
     },
 
     async "session.read"(params): Promise<SessionReadResult> {

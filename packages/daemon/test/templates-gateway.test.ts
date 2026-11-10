@@ -1,7 +1,8 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  createProviderManagement,
   type JsonValue,
   PiscesError,
   type SessionId,
@@ -9,13 +10,16 @@ import {
   type TemplatePreview,
 } from "@pisces/core";
 import { afterEach, expect, test } from "vitest";
+import { createExtensions } from "../src/extensions/extensions.js";
 import type { GatewayDeps } from "../src/gateway/gateway.js";
 import type { GatewayResponse, SessionReadResult } from "../src/gateway/protocol.js";
 import type { TemplateDefaults, TemplatePlan, TemplateResolution } from "../src/templates/store.js";
 import {
   createGatewayHarness,
+  descriptor,
   type GatewayHarness,
   type GatewayHarnessOptions,
+  gatewayModel,
 } from "./support/gateway-harness.js";
 
 const ID = "s-template" as SessionId;
@@ -313,9 +317,39 @@ test("template.apply creates the session from the store resolution", async () =>
   const result = read.result as unknown as SessionReadResult;
   expect(result.meta).toMatchObject({ id: ID, provider: "p", model: "m", workspace });
   expect(queuedPrompts(result)).toEqual([
-    { role: "system", source: "create", text: { type: "text", text: "# Notes\n" } },
+    { role: "system", source: "template", text: { type: "text", text: "# Notes\n" } },
   ]);
   expect(await h.store.list()).toEqual([]);
+});
+
+test("template.apply builds the session from the apply resolution defaults", async () => {
+  // A deliberately divergent preflight: the session must follow apply's own defaults.
+  const providers = createProviderManagement();
+  providers.registerProvider(descriptor({ models: [gatewayModel("m"), gatewayModel("m2")] }));
+  const { store } = fakeTemplates({
+    inspect: async () => ({ preview: previewFixture(), defaults: defaultsFixture() }),
+    apply: async () => ({
+      projectId: "project-1",
+      preview: previewFixture(),
+      defaults: { provider: "p", model: "m2", systemPrompt: "applied prompt" },
+    }),
+  });
+  const workspace = await tempWorkspace();
+  const h = await openHarness({ templates: store, providers });
+
+  const response = await request(h, "template.apply", {
+    templateId: "notes",
+    workspace,
+    confirmed: true,
+  });
+
+  expect(response.error).toBeUndefined();
+  const read = await request(h, "session.read", { sessionId: ID });
+  const result = read.result as unknown as SessionReadResult;
+  expect(result.meta).toMatchObject({ provider: "p", model: "m2", workspace });
+  expect(queuedPrompts(result)).toEqual([
+    { role: "system", source: "template", text: { type: "text", text: "applied prompt" } },
+  ]);
 });
 
 test("template.apply passes store errors through and creates no session", async () => {
@@ -364,9 +398,41 @@ test("session.create uses template defaults without writing", async () => {
 
   const read = await request(h, "session.read", { sessionId: ID });
   expect(queuedPrompts(read.result as unknown as SessionReadResult)).toEqual([
-    { role: "system", source: "create", text: { type: "text", text: "template prompt" } },
+    { role: "system", source: "template", text: { type: "text", text: "template prompt" } },
   ]);
   expect(await h.store.list()).toEqual([]);
+});
+
+test("session.create with templateId uses the configured global workspace", async () => {
+  const workspace = await tempWorkspace();
+  const configDir = join(workspace, "config");
+  await mkdir(configDir);
+  await writeFile(join(configDir, "config.json"), JSON.stringify({ defaultWorkspace: workspace }));
+  const extensions = createExtensions({ configDir });
+  const resolved: string[] = [];
+  const { store } = fakeTemplates({
+    resolve: async (_templateId, resolvedWorkspace) => {
+      resolved.push(resolvedWorkspace);
+      return {
+        preview: previewFixture(),
+        defaults: { ...defaultsFixture(), systemPrompt: "template prompt" },
+      };
+    },
+  });
+  const h = await openHarness({ templates: store, extensions });
+
+  // No explicit workspace: configured mode must fall back exactly as it does without a template.
+  const response = await request(h, "session.create", { templateId: "notes" });
+
+  expect(response.error).toBeUndefined();
+  expect(response.result).toMatchObject({ id: ID, provider: "p", model: "m", workspace });
+  expect(resolved).toEqual([workspace]);
+  const read = await request(h, "session.read", { sessionId: ID });
+  const result = read.result as unknown as SessionReadResult;
+  expect(result.meta.workspace).toBe(workspace);
+  expect(queuedPrompts(result)).toEqual([
+    { role: "system", source: "template", text: { type: "text", text: "template prompt" } },
+  ]);
 });
 
 test("session.create explicit values win over template defaults", async () => {

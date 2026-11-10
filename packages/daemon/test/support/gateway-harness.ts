@@ -29,6 +29,7 @@ import {
   type TurnId,
   type WorkspaceAccess,
 } from "@pisces/core";
+import type { Extensions } from "../../src/extensions/types.js";
 import { type ActiveTurnStore, createActiveTurnStore } from "../../src/gateway/active-turn.js";
 import { bootstrapGateway } from "../../src/gateway/bootstrap.js";
 import type { Gateway, GatewayDeps } from "../../src/gateway/gateway.js";
@@ -42,6 +43,7 @@ const NOW = "2026-11-08T05:00:00.000Z";
 
 export interface GatewayHarnessOptions {
   defaults?: SessionDefaults;
+  extensions?: Extensions;
   templates?: GatewayDeps["templates"];
   execute?: ExecuteProvider;
   adapter?: LlmAdapter;
@@ -208,6 +210,7 @@ export async function createGatewayHarness(
     events: gatewayBus,
     markers,
     ...(options.defaults ? { defaults: options.defaults } : {}),
+    ...(options.extensions ? { extensions: options.extensions } : {}),
     ...(options.templates ? { templates: options.templates } : {}),
     ...(options.validateWorkspace ? { validateWorkspace: options.validateWorkspace } : {}),
     ...(options.newSessionId ? { newSessionId: options.newSessionId } : {}),
