@@ -127,24 +127,43 @@ const ALPHA = {
   ],
 };
 
-const BETA = { id: "beta", ready: false, models: [] };
+// BETA is unready and still owns a model: ordering and readiness tests must
+// show that unready providers are neither dropped nor sorted at the wrong level.
+const BETA = {
+  id: "beta",
+  ready: false,
+  models: [{ id: "beta-1", contextWindow: 2000, maxOutput: 200, modalities: ["text"] }],
+};
+
+const ALPHA_LINES = [
+  "alpha/z  context=8000  maxOutput=1000  modalities=text,image",
+  "alpha/a  context=1000  maxOutput=100  modalities=text",
+];
+
+const BETA_LINE = "beta/beta-1  context=2000  maxOutput=200  modalities=text";
+
+const ALPHA_MODELS_JSON = [
+  {
+    provider: "alpha",
+    id: "z",
+    contextWindow: 8000,
+    maxOutput: 1000,
+    modalities: ["text", "image"],
+    pricing: { input: 1.5, output: 2.5, currency: "USD" },
+  },
+  { provider: "alpha", id: "a", contextWindow: 1000, maxOutput: 100, modalities: ["text"] },
+];
 
 const MODELS_JSON = {
   models: [
-    {
-      provider: "alpha",
-      id: "z",
-      contextWindow: 8000,
-      maxOutput: 1000,
-      modalities: ["text", "image"],
-      pricing: { input: 1.5, output: 2.5, currency: "USD" },
-    },
-    { provider: "alpha", id: "a", contextWindow: 1000, maxOutput: 100, modalities: ["text"] },
+    ...ALPHA_MODELS_JSON,
+    { provider: "beta", id: "beta-1", contextWindow: 2000, maxOutput: 200, modalities: ["text"] },
   ],
 };
 
 test("provider list prints one line per provider in daemon order", async () => {
-  const client = fakeClient(() => ({ providers: [ALPHA, BETA] }));
+  // Daemon order is beta first; lexicographic sorting would put alpha first.
+  const client = fakeClient(() => ({ providers: [BETA, ALPHA] }));
   const { configPath } = await fixture();
   const rec = recorder();
 
@@ -152,7 +171,7 @@ test("provider list prints one line per provider in daemon order", async () => {
 
   expect(code).toBe(0);
   expect(client.calls).toEqual([{ method: "provider.list", params: {} }]);
-  expect(rec.out).toEqual(["alpha  ready  models=2", "beta  unready  models=0"]);
+  expect(rec.out).toEqual(["beta  unready  models=1", "alpha  ready  models=2"]);
   expect(rec.err).toEqual([]);
   expect(client.closed).toBe(true);
 });
@@ -172,6 +191,8 @@ test("provider list --json prints the raw result unchanged", async () => {
 });
 
 test("models list flattens, sorts providers and preserves model order", async () => {
+  // Daemon order is [beta, alpha]; missing `.sort()` would emit beta first.
+  // Alpha's models are [z, a]; sorting models would emit alpha/a first.
   const client = fakeClient(() => ({ providers: [BETA, ALPHA] }));
   const { configPath } = await fixture();
   const rec = recorder();
@@ -180,12 +201,26 @@ test("models list flattens, sorts providers and preserves model order", async ()
 
   expect(code).toBe(0);
   expect(client.calls).toEqual([{ method: "provider.list", params: {} }]);
-  expect(rec.out).toEqual([
-    "alpha/z  context=8000  maxOutput=1000  modalities=text,image",
-    "alpha/a  context=1000  maxOutput=100  modalities=text",
-  ]);
+  expect(rec.out).toEqual([...ALPHA_LINES, BETA_LINE]);
+  // Explicit relative positions: providers sorted, models untouched.
+  expect(rec.out.indexOf(BETA_LINE)).toBeGreaterThan(rec.out.indexOf(ALPHA_LINES[1] ?? ""));
+  expect(rec.out.indexOf(ALPHA_LINES[0] ?? "")).toBeLessThan(rec.out.indexOf(ALPHA_LINES[1] ?? ""));
   expect(rec.out.join("\n")).not.toContain("pricing");
   expect(rec.out.join("\n")).not.toContain("USD");
+  expect(rec.err).toEqual([]);
+  expect(client.closed).toBe(true);
+});
+
+test("models list includes the models of unready providers", async () => {
+  const client = fakeClient(() => ({ providers: [ALPHA, BETA] }));
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await modelsList({ configPath, io: rec.io }, client.deps);
+
+  expect(code).toBe(0);
+  expect(rec.out).toContain(BETA_LINE);
+  expect(rec.out).toHaveLength(3);
   expect(rec.err).toEqual([]);
   expect(client.closed).toBe(true);
 });
@@ -217,7 +252,7 @@ test("models list --provider keeps only that provider", async () => {
   const code = await modelsList({ configPath, io: rec.io, provider: "beta" }, client.deps);
 
   expect(code).toBe(0);
-  expect(rec.out).toEqual(["no models"]);
+  expect(rec.out).toEqual([BETA_LINE]);
 
   const hit = recorder();
   const codeHit = await modelsList(
@@ -225,10 +260,7 @@ test("models list --provider keeps only that provider", async () => {
     fakeClient(() => ({ providers: [ALPHA, BETA] })).deps,
   );
   expect(codeHit).toBe(0);
-  expect(hit.out).toEqual([
-    "alpha/z  context=8000  maxOutput=1000  modalities=text,image",
-    "alpha/a  context=1000  maxOutput=100  modalities=text",
-  ]);
+  expect(hit.out).toEqual(ALPHA_LINES);
 });
 
 test("models list --provider with an unknown id exits 1 without stdout", async () => {
@@ -282,10 +314,15 @@ test("malformed daemon results are rejected as client.protocol", async () => {
       { providers: [{ ...provider, models: [{ ...model, contextWindow: 0 }] }] },
     ],
     [
+      "negative contextWindow",
+      { providers: [{ ...provider, models: [{ ...model, contextWindow: -1 }] }] },
+    ],
+    [
       "fractional contextWindow",
       { providers: [{ ...provider, models: [{ ...model, contextWindow: 1.5 }] }] },
     ],
     ["zero maxOutput", { providers: [{ ...provider, models: [{ ...model, maxOutput: 0 }] }] }],
+    ["negative maxOutput", { providers: [{ ...provider, models: [{ ...model, maxOutput: -1 }] }] }],
     [
       "unknown modality",
       { providers: [{ ...provider, models: [{ ...model, modalities: ["video"] }] }] },
@@ -305,6 +342,33 @@ test("malformed daemon results are rejected as client.protocol", async () => {
           {
             ...provider,
             models: [{ ...model, pricing: { input: -1, output: 2, currency: "USD" } }],
+          },
+        ],
+      },
+    ],
+    [
+      "infinite pricing input",
+      {
+        providers: [
+          {
+            ...provider,
+            models: [
+              {
+                ...model,
+                pricing: { input: Number.POSITIVE_INFINITY, output: 2, currency: "USD" },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    [
+      "NaN pricing output",
+      {
+        providers: [
+          {
+            ...provider,
+            models: [{ ...model, pricing: { input: 1, output: Number.NaN, currency: "USD" } }],
           },
         ],
       },
@@ -341,6 +405,28 @@ test("malformed daemon results are rejected as client.protocol", async () => {
       expect(client.closed, `${command}: ${label}`).toBe(true);
     }
   }
+});
+
+test("models list --json rejects malformed results without stdout", async () => {
+  const malformed = {
+    providers: [
+      {
+        id: "p",
+        ready: true,
+        models: [{ id: "m", contextWindow: 0, maxOutput: 100, modalities: ["text"] }],
+      },
+    ],
+  };
+  const client = fakeClient(() => malformed);
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await modelsList({ configPath, io: rec.io, json: true }, client.deps);
+
+  expect(code).toBe(1);
+  expect(rec.out).toEqual([]);
+  expect(rec.err).toEqual(["error: client.protocol: Invalid response from daemon"]);
+  expect(client.closed).toBe(true);
 });
 
 test("an unreadable config exits 2 before connecting", async () => {
@@ -451,7 +537,7 @@ test("runCli dispatches provider list and models list", async () => {
       modelsClient.deps,
     ),
   ).toBe(0);
-  expect(JSON.parse(modelsRec.out[0] ?? "")).toEqual(MODELS_JSON);
+  expect(JSON.parse(modelsRec.out[0] ?? "")).toEqual({ models: ALPHA_MODELS_JSON });
 
   const humanClient = fakeClient(() => ({ providers: [BETA, ALPHA] }));
   const humanRec = recorder();
@@ -465,7 +551,7 @@ test("runCli dispatches provider list and models list", async () => {
       humanClient.deps,
     ),
   ).toBe(0);
-  expect(humanRec.out).toHaveLength(2);
+  expect(humanRec.out).toEqual([...ALPHA_LINES, BETA_LINE]);
 });
 
 test("runCli forwards --data-dir for provider and models", async () => {
@@ -485,6 +571,34 @@ test("runCli forwards --data-dir for provider and models", async () => {
     ),
   ).toBe(0);
   expect(client.socketPath).toBe(join(override, "run", "pisces.sock"));
+});
+
+test("runCli honors --help and --version for provider and models", async () => {
+  const counter = { connects: 0 };
+  const deps = failingDeps(counter);
+
+  for (const command of ["provider", "models"] as const) {
+    for (const argv of [
+      [command, "--help"],
+      [command, "list", "--help"],
+      [command, "--version"],
+      [command, "list", "--version"],
+    ]) {
+      const rec = recorder();
+      const code = await runCli(argv, rec.io, undefined, undefined, undefined, deps);
+      expect(code, argv.join(" ")).toBe(0);
+      expect(rec.err, argv.join(" ")).toEqual([]);
+      expect(rec.out, argv.join(" ")).toHaveLength(1);
+      const output = rec.out.join("\n");
+      if (argv.includes("--help")) {
+        expect(output, argv.join(" ")).toContain("provider   list providers known to the daemon");
+        expect(output, argv.join(" ")).toContain("models     list models of every provider");
+      } else {
+        expect(output, argv.join(" ")).toMatch(/^pisces \d+\.\d+\.\d+$/);
+      }
+    }
+  }
+  expect(counter.connects).toBe(0);
 });
 
 test("runCli rejects provider/models usage errors without connecting", async () => {
