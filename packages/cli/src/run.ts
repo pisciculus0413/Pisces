@@ -122,9 +122,11 @@ interface ToggleBaseline {
 }
 
 /**
- * Reads the toggle baseline out of the first `session.read` page, which the
- * daemon builds while holding the session lock and therefore reports the
- * committed selection and the whole queue consistently.
+ * Reads the toggle baseline out of a single bounded `session.read` (`limit: 1`),
+ * which the daemon builds while holding the session lock and therefore reports
+ * the committed selection and the whole queue consistently. `limit` only bounds
+ * the `records` bytes; `queue` and `selection` are returned on the first page
+ * regardless, so one small read still carries the whole baseline.
  *
  * `selection` only exposes the committed branch, so a fresh session whose
  * configuration defaults are still queued looks empty. Each unconfirmed
@@ -352,7 +354,9 @@ async function execute(
   } else {
     try {
       sessionId = parseReadMeta(
-        await client.request("session.read", { sessionId: options.sessionId }),
+        // `limit` is a byte budget for `records`; the existence check needs no
+        // tree, and an unbounded read could exceed the protocol frame size.
+        await client.request("session.read", { sessionId: options.sessionId, limit: 1 }),
       ).id;
       existing = true;
     } catch (error) {
@@ -385,7 +389,9 @@ async function execute(
   if (options.enable.length > 0 || options.disable.length > 0) {
     // One read reports both the committed selection and the pending queue, so
     // no other client can slip a declaration in between the two.
-    const baseline = parseToggleBaseline(await client.request("session.read", { sessionId }));
+    const baseline = parseToggleBaseline(
+      await client.request("session.read", { sessionId, limit: 1 }),
+    );
     const selected = new Set(baseline.selection);
     // Unconfirmed declarations are not part of `selection`; replay them in queue
     // order (present removes, absent adds) before diffing so a fresh configured

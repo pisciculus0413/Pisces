@@ -542,7 +542,10 @@ test("--session reads the existing session and never creates one", async () => {
   );
 
   expect(code).toBe(0);
-  expect(client.calls[0]).toEqual({ method: "session.read", params: { sessionId: "s1" } });
+  expect(client.calls[0]).toEqual({
+    method: "session.read",
+    params: { sessionId: "s1", limit: 1 },
+  });
   expect(client.calls.some((call) => call.method === "session.create")).toBe(false);
 });
 
@@ -655,7 +658,7 @@ test("--use-default-system-prompt on an existing session fails before queue writ
   expect(rec.err).toEqual([
     "error: run.default_system_prompt_unsupported: Default system prompt applies only to new sessions",
   ]);
-  expect(client.calls).toEqual([{ method: "session.read", params: { sessionId: "s1" } }]);
+  expect(client.calls).toEqual([{ method: "session.read", params: { sessionId: "s1", limit: 1 } }]);
   expect(client.closed).toBe(true);
 });
 
@@ -832,9 +835,9 @@ test("a pending declaration is replayed before diffing the requested toggles", a
   const enablingPending = await toggleEntries([], queue, ["a#x"], []);
   expect(enablingPending.code).toBe(0);
   expect(enablingPending.entries).toEqual([PROMPT_ENTRY]);
-  // One unqualified read supplies both the selection and the queue.
+  // One bounded read supplies both the selection and the queue.
   expect(enablingPending.client.calls.filter((call) => call.method === "session.read")).toEqual([
-    { method: "session.read", params: { sessionId: "s1" } },
+    { method: "session.read", params: { sessionId: "s1", limit: 1 } },
   ]);
   const methods = enablingPending.client.calls.map((call) => call.method);
   expect(methods).not.toContain("entries.snapshot");
@@ -863,9 +866,10 @@ test("a pending declaration that disables a committed selection is replayed", as
 test("every pending declaration is replayed against the committed selection", async () => {
   const queue = [pendingDeclaration(["a#x"]), pendingDeclaration(["a#x"])];
 
-  // Committed a#x, then two flips: off, back on. Applying only the last
-  // declaration, or diffing against the raw committed selection, ends off and
-  // would send a redundant enable here.
+  // Committed a#x, then two flips: off, back on. Applying only one of the two
+  // declarations ends off and would send a redundant enable here. Ignoring
+  // pending declarations entirely is caught by the sibling case above, where a
+  // single queued declaration already enables a#x.
   expect((await toggleEntries(["a#x"], queue, ["a#x"], [])).entries).toEqual([PROMPT_ENTRY]);
   expect((await toggleEntries(["a#x"], queue, [], ["a#x"])).entries).toEqual([
     controlEntry(["a#x"]),
@@ -1260,12 +1264,12 @@ test("run accumulates --enable/--disable and keeps the last value of each value 
   expect(code).toBe(0);
   expect(client.paths).toEqual([socketPathFor("/second")]);
   expect(client.calls.slice(0, 2)).toEqual([
-    { method: "session.read", params: { sessionId: "s2" } },
+    { method: "session.read", params: { sessionId: "s2", limit: 1 } },
     { method: "session.configure", params: { sessionId: "s1", model: "m2", systemPrompt: "two" } },
   ]);
   expect(client.calls.filter((call) => call.method === "session.read")).toEqual([
-    { method: "session.read", params: { sessionId: "s2" } },
-    { method: "session.read", params: { sessionId: "s1" } },
+    { method: "session.read", params: { sessionId: "s2", limit: 1 } },
+    { method: "session.read", params: { sessionId: "s1", limit: 1 } },
   ]);
   const enqueue = client.calls.find((call) => call.method === "queue.enqueue");
   expect(enqueue?.params).toEqual({
