@@ -1122,9 +1122,11 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
 - `extensions`：扩展管理。
   - `list`：列出已安装扩展。
 - `providers`：供应商管理。
-  - `check`：检查供应商就绪状态，输出具体原因；仅 CLI。
+  - `list`：列出 daemon 已知的全部 provider 是否就绪（`id  ready|unready  models=<n>`）；只经协议 `provider.list`。
+  - `check`：检查供应商就绪状态，输出具体原因；仅 CLI（未实现）。
 - `models`：模型管理。
-  - `list`：列出可用供应商及其模型；与协议 `provider.list` 同源。
+  - `list`：列出全部 provider 的模型（含 `ready=false` 与空模型清单者），按 provider `id` 字典序展平，
+    `--provider <id>` 只保留该 provider；与协议 `provider.list` 同源。
 - `auth`：校验供应商凭证；默认不输出明文。
 - `config`：查看或修改配置，只影响此后创建的会话。
   - `list`、`get <key>`、`set <key> <value>`、`unset <key>`
@@ -1166,17 +1168,20 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
 - `run` 交互中按 Ctrl-C 等同 `sessions cancel <id>`。
 
 实现状态（本阶段）：CLI 已实现 `--help`、`--version`、`start`/`status`/`stop`、
-`templates list`/`preview`/`apply`、`config list|get|set|unset`、`extensions list` 与
-`sessions list`。`start` 以 detached
+`templates list`/`preview`/`apply`、`config list|get|set|unset`、`extensions list`、`sessions list`、
+`provider list` 与 `models list`。`start` 以 detached
 子进程启动 daemon，写入 pid 记录与日志，只有子进程存活、pid 记录仍指向它、且本 dataDir 的 socket
 完成 `protocol.hello` 握手后才报告成功（总预算 10 s，轮询 50 ms）；`status` 结合进程存活、socket
 探测与 pid 记录给出 `running`/`stopped`/`stale`/`unresponsive`/`unmanaged`，`--json` 输出同名
 `state`；`stop` 仅在记录中的 pid 存活且同一 socket 应答后发送 `SIGTERM`，最多等待 10 s，陈旧记录与
 PID 复用防护见 §8.1。模板命令经单个短连接调用 `template.*`，`apply` 必须显式 `--confirm`，
 详见 `docs/templates.md`。`config` 直接读写全局与工作区配置层，`extensions list` 只做本地发现
-且不加载代码，`sessions list` 经协议 `session.list` 列出已落盘会话。其余命令（`run`、
-`sessions export|cancel`、`client`、`models`、`providers check`、`auth`）仍为目标设计，
-**未实现**。全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir`
+且不加载代码，`sessions list` 经协议 `session.list` 列出已落盘会话。`provider list` 与
+`models list` 都只经协议 `provider.list`（不读本地 provider 定义）：前者每行
+`id  ready|unready  models=<n>`，列出全部 provider；后者把模型展平为 `provider/model`，provider 按
+`id` 字典序、模型保持 daemon 顺序，`--provider <id>` 只保留该 provider，未知 id 由 CLI 以
+`provider.not_found` 退出 1。其余命令（`run`、`sessions export|cancel`、`client`、`providers check`、
+`auth`）仍为目标设计，**未实现**。全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir`
 与扩展组 `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 共存，两个加载器互不拒绝；
 默认 provider/model 只使用 `defaults`（旧 `defaultProvider`/`defaultModel` 已移除），CLI
 接受但不校验、不使用扩展键。CLI 仅支持 Linux x64，

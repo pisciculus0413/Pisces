@@ -1,8 +1,9 @@
 # CLI：本地 daemon 生命周期
 
-本文件描述当前已实现、并已被真实进程验收（真实 `dist/main.js`、真实后台 daemon、真实 Unix socket
-握手）覆盖的 CLI 子集：`start`、`status`、`stop`、`templates`、`config`、`extensions list` 与
-`sessions list`，以及配置文件、凭据来源、退出码、文件位置与失败恢复。
+本文件描述当前已实现、并已被真实 socket 与真实进程验收（真实 `dist/main.js`、真实后台 daemon、
+真实 Unix socket 握手）覆盖的 CLI 子集：`start`、`status`、`stop`、`templates`、`config`、
+`extensions list`、`sessions list`、`provider list` 与 `models list`，以及配置文件、凭据来源、
+退出码、文件位置与失败恢复。
 **未交付**的命令与平台在 §8 明确列出。权威契约见
 `docs/2 Detailed Design Specification/2 Detailed Design Specification.md` §7.1、§7.2、§7.5、§8.6，
 daemon 侧的安全边界见 `docs/daemon-linux.md`。
@@ -11,8 +12,8 @@ daemon 侧的安全边界见 `docs/daemon-linux.md`。
 
 - 仅 Linux x64；Node.js `>=22.19.0`，ESM。
 - 命令：`start`、`status`、`stop`、`templates list|preview|apply`、`config list|get|set|unset`、
-  `extensions list`、`sessions list`（模板细节见 `docs/templates.md`，扩展配置见
-  `docs/extensions.md`）。没有 `run`、`sessions export|cancel`、`client`、`models`、
+  `extensions list`、`sessions list`、`provider list`、`models list`（模板细节见 `docs/templates.md`，
+  扩展配置见 `docs/extensions.md`）。没有 `run`、`sessions export|cancel`、`client`、
   `providers check`、`auth`（见 §8）。
 - 本地只在 Node 26.13.0 x64 上验证。CI 配置了 Node 22.19.0 / 24 / 26 x64，但本阶段未 push，
   远端矩阵结果**未验证**。
@@ -276,10 +277,68 @@ $ pisces sessions list --json
 {"sessions":[{"id":"s-1","provider":"openai","model":"gpt-5","workspace":"/home/me/project","createdAt":"2026-01-02T03:04:05.000Z","schemaVersion":1}]}
 ```
 
+### `provider list`
+
+```bash
+pisces provider list [--config <path>] [--data-dir <dir>] [--json]
+```
+
+- 只读：打开一个短连接调用 `provider.list`，数据来自 daemon；本地配置里的 provider 定义不参与
+  该输出（配置文件只用于解析 `dataDir`）。
+- 列出 daemon 已知的**全部** provider，不按 `ready` 过滤：`ready` 只表示该 provider 的凭据当前
+  可用。人类模式每行 `id  ready|unready  models=<n>`，顺序为 daemon 返回顺序（按 `id` 字典序）。
+- 模型清单为空的 provider 同样列出（`models=0`），daemon 对其恒返回 `ready=false`。
+- `--json` 输出 daemon 原始结果 `{ "providers": [{ "id", "ready", "models": [...] }] }`；
+  `pricing` 只可能出现在这里的 `models[]` 里（若 daemon 提供了定价）。
+- 不输出 `dialect`、`baseUrl`、`headers` 或任何凭据值。
+- 配置不合法退出 2；daemon 未运行或握手失败输出
+  `error: daemon.unreachable: Daemon is not reachable`，退出 1。
+
+```console
+$ pisces provider list
+alpha  ready  models=2
+beta  unready  models=0
+$ pisces provider list --json
+{"providers":[{"id":"alpha","ready":true,"models":[{"id":"one","contextWindow":8000,"maxOutput":1000,"modalities":["text"]},{"id":"two","contextWindow":16000,"maxOutput":2000,"modalities":["text","image"],"pricing":{"input":1.5,"output":2.5,"currency":"USD"}}]},{"id":"beta","ready":false,"models":[]}]}
+```
+
+以上示例取自验收测试中直接注册了 `alpha`（2 个模型，其中一个带 `pricing`）与 `beta`（0 个模型）
+的 daemon；CLI 配置文件不接受 `pricing`，所以由 `pisces start` 起的 daemon 不会返回该字段。
+
+### `models list`
+
+```bash
+pisces models list [--provider <id>] [--config <path>] [--data-dir <dir>] [--json]
+```
+
+- 只读：同样只调用 `provider.list`，在 CLI 侧展平为 `{ provider: <provider.id>, ...model }`。
+- 默认列出**所有** provider 的模型：不按 `ready` 过滤，空模型清单的 provider 不贡献任何行。
+  provider 按 `id` 字典序，provider 内的模型保持 daemon 顺序。
+- 人类模式每行 `provider/model  context=<n>  maxOutput=<n>  modalities=text,image`；
+  `pricing` 只出现在 `--json`。
+- `--provider <id>` 只保留该 provider。id 不存在时打印
+  `error: provider.not_found: Unknown provider`，退出 1，stdout 为空。合法的空结果（例如该 provider
+  没有模型）人类模式打印 `no models`，退出 0。
+- `--json` 输出
+  `{ "models": [{ "provider", "id", "contextWindow", "maxOutput", "modalities", "pricing"? }] }`。
+- 配置不合法退出 2；daemon 未运行或握手失败退出 1（`daemon.unreachable`）。
+
+```console
+$ pisces models list
+alpha/one  context=8000  maxOutput=1000  modalities=text
+alpha/two  context=16000  maxOutput=2000  modalities=text,image
+$ pisces models list --provider beta
+no models
+$ pisces models list --provider missing
+error: provider.not_found: Unknown provider
+$ pisces models list --json
+{"models":[{"provider":"alpha","id":"one","contextWindow":8000,"maxOutput":1000,"modalities":["text"]},{"provider":"alpha","id":"two","contextWindow":16000,"maxOutput":2000,"modalities":["text","image"],"pricing":{"input":1.5,"output":2.5,"currency":"USD"}}]}
+```
+
 | 命令 | 退出码 |
 |---|---|
 | 全部命令成功 | 0 |
-| `config get` / `config unset` 未命中（`config.key_not_found`）、`sessions list` 连接失败 | 1 |
+| `config get` / `config unset` 未命中（`config.key_not_found`）、`sessions list` / `provider list` / `models list` 连接失败、`models list --provider` 未知 id（`provider.not_found`） | 1 |
 | 已在运行 / 未知属主 / 启动失败 / 停止超时 / socket 无属主 / pid 记录写入或清除失败 | 1 |
 | 用法错误、配置不合法、配置键未知、工作区不可用、缺少密钥、数据目录不可用 | 2 |
 
@@ -288,15 +347,17 @@ $ pisces sessions list --json
 | 选项 | 说明 |
 |---|---|
 | `--config <path>` | 配置文件路径（所有命令接受） |
-| `--data-dir <path>` | 覆盖 `dataDir`（生命周期、`templates`、`sessions list`） |
+| `--data-dir <path>` | 覆盖 `dataDir`（生命周期、`templates`、`sessions list`、`provider list`、`models list`） |
+| `--provider <id>` | 只列出该 provider 的模型（仅 `models list`） |
 | `--scope <global\|workspace>` | `config` 的目标层，默认 `global` |
 | `--workspace <dir>` | 工作区目录（`config --scope workspace`、`extensions list`） |
-| `--json` | 机器可读输出：`status`、`templates`、`config list/get`、`extensions list`、`sessions list` |
+| `--json` | 机器可读输出：`status`、`templates`、`config list/get`、`extensions list`、`sessions list`、`provider list`、`models list` |
 | `--help` / `--version` | 帮助/版本；可在第一个参数位置或任一命令参数位置使用（`wat --help` 仍是用法错误） |
 
 未知命令（包括本阶段未实现的 `run` 等）打印 usage 并以 2 退出；`--config`、`--data-dir`、
-`--workspace`、`--scope` 缺少取值或其取值以 `-` 开头、`--json` 用于不支持的子命令、以及
-`--workspace` 与 `--scope global` 同用时，同样按用法错误处理。
+`--provider`、`--workspace`、`--scope` 缺少取值或其取值以 `-` 开头、`--json` 用于不支持的子命令、
+`--provider` 用于 `provider list`（只有 `models list` 接受它）、以及 `--workspace` 与
+`--scope global` 同用时，同样按用法错误处理。
 
 ## 6. 文件位置
 
@@ -347,7 +408,8 @@ $ pisces sessions list --json
   按上面 `unknown_owner` 的步骤人工处置。
 - **`daemon.unmanaged`**（socket 应答、无 pid 记录）：`stop` 退出 1 且不发送信号；该 daemon 不是本
   CLI 启动的，需人工确认后用 `kill` 停止。
-- **`config.invalid`**：`start`/`status`/`stop` 都需要可读配置；修复配置文件后重试。
+- **`config.invalid`**：`start`/`status`/`stop` 以及 `sessions list`、`provider list`、`models list`
+  都需要可读配置（用于解析 `dataDir`）；修复配置文件后重试。
 - **`config.unknown_key` / `config.no_workspace`**：`config` 的目标层出现不允许的键，或
   `--scope workspace` 没有可用目录；命令退出 2，不写任何文件。
 - **未知键的码取决于命令**：同一个不允许的顶层键，`config list|get|set|unset` 报
@@ -361,13 +423,16 @@ $ pisces sessions list --json
   新文件先写 `dataDir`、再写 `providers`，最后写 `defaults`；若已有 `defaults` 而要先换掉
   `providers`，先 `config unset defaults`，否则改 `providers` 的那一步会因悬空引用被拒。
 - **`config.key_not_found`**：`config get`/`unset` 的路径不存在；退出 1，文件不变。
-- **`daemon.unreachable`**：`sessions list` 无法连接由 dataDir 推导的 socket；先 `pisces status`，
-  必要时 `start`。`sessions list` 只经协议读取，不直接读会话文件。
+- **`provider.not_found`**：`models list --provider <id>` 的 id 不在 daemon 的 provider 清单里。该码
+  由 CLI 本地产生（协议没有对应错误码），退出 1，stdout 为空；先用 `provider list` 确认可用 id。
+- **`daemon.unreachable`**：`sessions list`、`provider list`、`models list` 无法连接由 dataDir 推导的
+  socket；先 `pisces status`，必要时 `start`。这些命令只经协议读取，不直接读会话文件或本地 provider
+  定义。
 
 ## 8. 本阶段未交付
 
-- `run`（交互/`--print`/`--json`）、`sessions export|cancel`、`client list|start`、`models list`、
-  `providers check`、`auth`。
+- `run`（交互/`--print`/`--json`）、`sessions export|cancel`、`client list|start`、`providers check`、
+  `auth`。
 - 配置文件中的扩展配置对 CLI 生命周期命令只是“接受并忽略”；CLI 尚不装配扩展，也没有交互式配置
   编辑器、配置迁移工具、凭据文件或扩展安装/更新。
 - macOS 与 Windows：仅 Linux x64 已实现并验证。
@@ -426,4 +491,14 @@ sessions-list-socket.test.ts` 另在真实 socket 上验收 `session.list` 的�
 ```bash
 pnpm exec vitest run packages/cli/test/config-extensions-sessions-e2e.test.ts \
   packages/daemon/test/sessions-list-socket.test.ts
+```
+
+`packages/cli/test/providers-e2e.test.ts` 验收 `provider list` 与 `models list`：进程内真实 daemon
+注册 `alpha`（2 个模型，其中一个带 `pricing`）与 `beta`（0 个模型），断言两条命令的人类输出、
+`--json` 与真实 `provider.list` 结果一致、`--provider` 命中/空结果/未知 id（`provider.not_found`）、
+daemon 停止后两者退出 1；并用构建后的 CLI 对 `pisces start` 起的真实 detached daemon 跑
+`provider list --json` 与 `models list --json`。运行方式：
+
+```bash
+pnpm exec vitest run packages/cli/test/providers-e2e.test.ts
 ```

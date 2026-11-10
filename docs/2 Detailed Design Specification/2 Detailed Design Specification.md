@@ -625,6 +625,13 @@ interface TurnStartResult {
 - 不返回 `dialect`、`baseUrl`、`auth`、`headers`。
 - `ready` 由凭据状态计算；空模型清单合法，此时 `models=[]` 且 `ready=false`。
 - 模型选择单位是 `(provider, model)`。
+- 本阶段的消费方是 CLI `provider list` 与 `models list`；两者都不新增协议方法、不改变路由或 daemon
+  行为。`provider list` 逐行输出 `id  ready|unready  models=<n>`，`--json` 原样输出 `{providers}`；
+  `models list` 在 CLI 侧展平为 `{provider, ...model}`（provider 按 `id` 字典序，模型保持本方法
+  返回的顺序），`--provider <id>` 只保留该 provider。两个命令都列出全部 provider，不按 `ready`
+  过滤；`pricing` 只在 `models list --json` 出现。
+- `models list --provider <id>` 的 id 不在清单中时，`provider.not_found` 由 CLI 本地产生（见 §3.9），
+  不通过本方法返回。
 
 #### 3.7.2 模板方法
 
@@ -828,6 +835,7 @@ type ProtocolEvent =
 - turn 进行中的供应商或工具错误通过 `turn.ended.error` 或工具结果回填，不伪造成请求错误。
 - `event.publish_failed` 表示同步事件 handler 失败；Context 与 driver 的事件发布适配器都保留原异常为 `cause`，不重试、不回滚已提交状态。driver 中通过 `turn.ended.reason="failed"` 与 `TurnResult.error` 结束 turn。
 - 错误消息不得包含凭据。Core 内部 `PiscesError.data` 可保存结构化原因或重试提示；本阶段 `Gateway` 的 `Response.error` 仅映射 `code` 与 `message`，不转发 `data`/`cause`。结构化线上错误详情仅为未来目标，不应依赖。
+- `provider.not_found` 是 **CLI 本地**错误码：`models list --provider <id>` 的 id 不在 daemon 返回的清单中时由 `packages/cli/src/providers.ts` 抛出，退出 1；它不出现在 `Response.error` 中，不新增协议方法或 daemon 错误码。
 
 ### 3.10 校验、并发与一致性
 
@@ -1952,11 +1960,15 @@ interface ClientRegistry {
 ### 7.1 CLI 与协议边界
 
 实现状态：本阶段已实现 `start`、`status`、`stop`、`templates list`/`preview`/`apply`、
-`config list|get|set|unset`、`extensions list` 与 `sessions list`。生命周期命令经
+`config list|get|set|unset`、`extensions list`、`sessions list`、`provider list` 与 `models list`。
+生命周期命令经
 pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.hello` 探测完成，使用协议做就绪/归属探测；
 模板命令与 `sessions list` 经短连接调用 `template.*` / `session.list`（详见 `docs/templates.md`）；
-`config` 直接读写本地配置层，`extensions list` 只做本地发现且不加载扩展代码。表中其余命令为目标设计，
-**未实现**；`--help`、`--version` 已实现。
+`config` 直接读写本地配置层，`extensions list` 只做本地发现且不加载扩展代码。`provider list` 与
+`models list` 经短连接调用 `provider.list`，不读本地 provider 定义、不碰凭据：前者输出
+`id  ready|unready  models=<n>`；后者把模型展平为 `provider/model`（provider 按 `id` 字典序，
+模型保持 daemon 顺序），`--provider <id>` 只保留该 provider，未知 id 以 CLI 本地的
+`provider.not_found` 退出 1。表中其余命令为目标设计，**未实现**；`--help`、`--version` 已实现。
 
 | 命令 | 路径 |
 |---|---|
@@ -1967,7 +1979,7 @@ pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.
 | `sessions cancel` | 先解析活跃 turn，再 `turn.cancel` |
 | `client list/start` | 经协议 `client.list` / `client.start` |
 | `templates list/preview/apply` | 经协议模板方法（已实现） |
-| `provider.list` / `models list` | 经协议只读查询 |
+| `provider.list` / `models list` | 经协议只读查询（已实现） |
 | `providers check` | 仅 CLI，直接检查本地凭据与配置 |
 | `extensions list` | 仅 CLI，读取扩展目录（已实现） |
 | `auth` | 仅 CLI，校验凭据 |
@@ -1983,9 +1995,9 @@ pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.
 
 ### 7.2 `run`
 
-本阶段 `run` **未实现**（同样未实现 `sessions export|cancel`、`client`、`models`、`providers check`、
-`auth`）；`sessions list`、`config`、`extensions list` 与模板命令见 §7.1 与 `docs/templates.md` /
-`docs/cli.md`；以下为目标设计，不是当前行为。
+本阶段 `run` **未实现**（同样未实现 `sessions export|cancel`、`client`、`providers check`、
+`auth`）；`sessions list`、`provider list`、`models list`、`config`、`extensions list` 与模板命令见
+§7.1 与 `docs/templates.md` / `docs/cli.md`；以下为目标设计，不是当前行为。
 
 - `--new`：创建新会话。
 - `--continue`：继续最近会话。
