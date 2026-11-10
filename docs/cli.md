@@ -87,17 +87,25 @@ OpenAI 兼容示例：
 | `models[].contextWindow` / `maxOutput` | 是 | 正整数 |
 | `models[].modalities` | 是 | 非空，元素为 `text`、`image`、`audio` |
 | `defaults` | 否 | `{ "provider": ..., "model": ... }`，必须指向已声明的组合 |
-| `templatesDir` | 否 | 模板目录；绝对路径（支持 `~/`），`start` 作为第三个 argv 传给 daemon 子进程 |
-| `defaultWorkspace` | 否 | 新会话的默认工作区；必须是绝对路径（不做 `~` 展开），`start` 作为 daemon `defaults.workspace` 传入 |
+| `templatesDir` | 否 | 模板目录；绝对路径（支持 `~/`），`start` 启动时传给 daemon，修改需重启 |
+| `defaultWorkspace` | 否 | 新会话的默认工作区；必须是绝对路径（不做 `~` 展开），由 daemon 在 `session.create` 时从配置读取 |
 
 - `defaults` 是 CLI 与扩展层共用的唯一默认 provider/model 键；旧的 `defaultProvider`/`defaultModel`
   已移除（pre-release 变更，无迁移）：出现时按未知键退出 2。
-- 全局文件还允许扩展组的 `defaultWorkspace`、`extensions`、`entryConfig`。生命周期命令读取并校验
-  `defaultWorkspace`（新会话默认工作区），由 `start` 合并进 daemon defaults；`extensions` 与
-  `entryConfig` 只由 daemon 扩展加载器使用。daemon 的扩展加载器忽略 CLI 键；`config` 命令同时按
-  两侧规则校验，因此它写出的全局文件对两个加载器都合法。
-- `defaultWorkspace` 只在 daemon 启动时读取：修改配置后需要 `stop` 再 `start`，新默认值才作用于
-  此后创建的会话；已在运行的 daemon 继续使用启动时的旧值。
+- 全局文件还允许扩展组的 `defaultWorkspace`、`extensions`、`entryConfig`。`start` 启动的 daemon
+  始终进入目录驱动扩展模式：CLI 只把解析后的绝对 `--config` 路径作为 `extensions: { configPath }`
+  传给 daemon，不再合并 `defaults` 或 `defaultWorkspace`；daemon 在每次 `session.create` 时读取该文件
+  与 `<workspace>/.pisces/config.json`，并扫描 `dirname(configPath)/extensions` 与
+  `<workspace>/.pisces/extensions`。daemon 的扩展加载器忽略 CLI 键；`config` 命令同时按两侧规则
+  校验，因此它写出的全局文件对两个加载器都合法。
+- `defaults`、`defaultWorkspace`、`extensions`、`entryConfig` 都在 `session.create` 时读取：改写配置后，
+  之后**新建**的会话立即使用新值，无需重启 daemon；已创建的会话保持其冻结绑定与选择。
+  `providers` 与 `templatesDir` 仍是启动绑定，修改后需要 `stop` 再 `start`。
+- `--config <path>` 既精确决定全局配置文件名，也决定扩展根目录 `dirname(<path>)/extensions`；
+  默认路径即 `<configDir>/config.json` 与 `<configDir>/extensions`。
+- `defaultWorkspace` 必须是绝对路径；存在性与可写性在 `session.create` 时检查。省略 `--workspace`
+  时，daemon 使用配置中的默认工作区；未配置返回 `session.workspace_required`，不可用返回
+  `session.invalid_workspace`。
 - 工作区 `<workspace>/.pisces/config.json` 只允许 `defaults`、`extensions`、`entryConfig`；出现
   `dataDir`、`providers`、`templatesDir` 或 `defaultWorkspace` 按未知键处理。
 - 工作区 `defaults` 在全局文件可读且含 `providers` 时也校验其指向；全局文件缺失时只校验格式。
@@ -372,8 +380,9 @@ pisces run [prompt] [--new | --continue | --session <id> [--create]]
     `[A-Za-z0-9_-]+`，否则是用法错误。会话不存在且带 `--create` 时新建（服务端生成新 id）；不带
     `--create` 时按 `session.not_found` 退出 1。`--create` 只能与 `--session` 同用。
 - 会话选项：
-  - `--workspace <dir>`：只为本次新建的会话指定工作区，必须是绝对路径，优先于 daemon 启动时的默认
-    工作区；只传给 `session.create`（`--new`、缺省选择器、或 `--session --create` 且会话不存在）。
+  - `--workspace <dir>`：只为本次新建的会话指定工作区，必须是绝对路径，优先于配置文件中的默认
+    工作区（daemon 在 `session.create` 时读取）；只传给 `session.create`（`--new`、缺省选择器、或
+    `--session --create` 且会话不存在）。
     与既有会话同用（`--session` 命中或 `--continue`）时本地返回
     `error: run.workspace_unsupported: Workspace can only be set for a new session`，退出 1，且不修改
     会话、不入队、不启动 turn；该拒绝只在确有已落盘会话时发生，`--continue --workspace` 在没有会话时
@@ -395,7 +404,8 @@ pisces run [prompt] [--new | --continue | --session <id> [--create]]
     默认值），再按参数顺序求差集：先按 `--enable` 顺序补入未选中的名字，再按 `--disable` 顺序移除已选中的
     名字。只有实际变化才生成一条 `{kind:"control",role:"declaration",source:"run"}` 条目，`content`
     为 `[{"toggle":[names]}]`；它与提示词在同一 `queue.enqueue` 批次中提交（控制条目在前）。没有变化时
-    不发控制条目。手动模式（未装配扩展）的 daemon 会以 `queue.invalid_control` 拒绝该条目。
+    不发控制条目。非扩展装配的嵌入 daemon（不经 CLI 启动的手动模式）会以 `queue.invalid_control`
+    拒绝该条目；CLI 启动的 daemon 始终装配扩展。
 - 所有输入先入队：提示词作为 `{kind:"agent",role:"user",source:"run"}` 经 `queue.enqueue` 提交，随后
   `turn.start`；提示词从不写入请求体。`session.subscribe` 在入队前建立，事件不会漏收。
 - 同一会话已有其他客户端正在运行的 turn 时，daemon 可能让 `turn.start` 返回 `mode:"steer"`；run 不对
@@ -622,9 +632,9 @@ $ pisces models list --json
 
 - `client list|start`、`providers check`、`auth`。
 - `run` 的交互式 stdin 循环与多轮输入；本阶段只交付由位置参数驱动的单个非交互 turn。
-- CLI 尚不装配扩展：`defaultWorkspace` 已作为新会话默认工作区传入 daemon，`extensions` 与
-  `entryConfig` 仍只由 daemon 扩展加载器使用；也没有交互式配置编辑器、配置迁移工具、凭据文件或
-  扩展安装/更新。
+- CLI 已装配目录驱动扩展：`start` 始终传 `extensions.configPath`，`run --enable` 与配置默认值可用。
+  仍没有交互式配置编辑器、配置迁移工具、凭据文件，也没有 `extensions install/enable`（安装与
+  更新由 npm/git 完成）。
 - macOS 与 Windows：仅 Linux x64 已实现并验证。
 - 多用户共享 dataDir、非本地（网络）socket、systemd 等进程管理器集成。
 
@@ -650,13 +660,18 @@ $ pisces models list --json
 `turn.cancel` 让 turn 从 `turn.list` 消失并以 130 退出；daemon 停止后退出 1（`daemon.unreachable`）；
 未装配扩展的 daemon 上 `--enable` 得到 `queue.invalid_control` 且不启动 turn。
 `packages/cli/test/default-workspace-e2e.test.ts` 用 `buildDaemonOptions` 启动真实 daemon，验收全局
-`defaultWorkspace` 生效、运行中的 daemon 保持启动时的默认值（改写配置后仍用旧默认，重启后才生效）、
-`run --workspace` 覆盖默认，以及既有会话上本地拒绝 `--workspace`。构建后的 `dist/main.js`
-子进程另在同一进程内 daemon 上跑一次 `run ... --print` 并断言 stdout 与落盘会话。本地在 Node 26.13.0
-x64 上通过；远端 CI 未运行。运行方式：
+`defaultWorkspace` 生效、运行中的 daemon 在改写配置后让**新会话**立即使用新默认值（无需重启）、
+`run --workspace` 覆盖默认，以及既有会话上本地拒绝 `--workspace`。构建后的 `dist/main.js` 子进程
+另在同一进程内 daemon 上跑一次 `run ... --print` 并断言 stdout 与落盘会话。
+`packages/cli/test/extensions-e2e.test.ts` 同样从 `buildDaemonOptions` + `startDaemon` 启动真实
+daemon（真实 provider host 指向本机 OpenAI 兼容 SSE 服务器），经真实 socket 跑 `run`：配置
+`extensions` 启用内置 shell 并真实执行 `printf tool-ok`、无 `extensions` 时 `run --enable` 成功、
+`--config alt.json` 读取 alt 文件与 `dirname(alt.json)/extensions`、工作区 `.pisces/extensions`
+中的工具可被发现并执行；会话记录与 provider 请求同时验证工具调用与真实命令输出。本地在
+Node 26.13.0 x64 上通过；远端 CI 未运行。运行方式：
 
 ```bash
-pnpm exec vitest run packages/cli/test/run-e2e.test.ts
+pnpm exec vitest run packages/cli/test/run-e2e.test.ts packages/cli/test/extensions-e2e.test.ts
 ```
 
 真实进程验收测试 `packages/cli/test/cli-lifecycle.test.ts` 使用构建后的 `dist/main.js` 与真实后台

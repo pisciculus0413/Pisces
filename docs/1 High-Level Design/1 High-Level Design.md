@@ -1089,8 +1089,9 @@ interface Exec {
 - 加载器负责宿主包映射：`@pisces/*` 解析到宿主实例，扩展不打包宿主包；`tsconfig` 的 `paths` 与
   JSX 由加载器处理。
 - 扩展的依赖安装在其自身目录的 `node_modules` 中，加载器按扩展路径解析；本阶段不哈希依赖树。
-- 清单中的 `providers`、`clients` 不装配，只记录 `extensions.unsupported_contribution`；CLI、沙箱与
-  热重载不在本阶段交付。
+- 清单中的 `providers`、`clients` 不装配，只记录 `extensions.unsupported_contribution`；沙箱与已有
+  会话的热重载不在本阶段交付。CLI 的 `start` 始终注入 `extensions: { configPath }`，把扩展装配
+  交给 daemon 在 `session.create` 时读取与扫描。
 
 ### 6.7 客户端命令与注册
 
@@ -1132,7 +1133,8 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
 - `config`：查看或修改配置，只影响此后创建的会话。
   - `list`、`get <key>`、`set <key> <value>`、`unset <key>`
   - 范围：新会话的默认扩展选择；默认 `provider`/`model`；默认工作区 `defaultWorkspace`；provider 与扩展声明；扩展清点只读
-  - `defaultWorkspace` 只校验绝对路径格式；存在性与可写性在 `session.create` 时检查；`start` 把它合并进 daemon `defaults.workspace`，因此只影响启动后创建的会话；修改后需重启 daemon
+  - `defaultWorkspace` 只校验绝对路径格式；存在性与可写性在 `session.create` 时检查；daemon 在每次
+    `session.create` 读取配置中的默认值，因此修改后新建会话立即生效，无需重启 daemon
 - `run [prompt]`：非交互执行一个 turn（已实现）；交互式 stdin 循环与多轮输入仍未实现。
   - 会话选择：`--new` 新建；`--continue` 取 `createdAt` 最大的已落盘会话；`--session <id>` 指定会话，
     配合 `--create` 在其不存在时新建；三者互斥，缺省等同 `--new`。
@@ -1143,7 +1145,7 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
   - `--use-default-system-prompt`：只对新会话有效；对既有会话本地报
     `run.default_system_prompt_unsupported`，不做静默 no-op。
   - `--model <name>` / `--provider <name>`：设置该会话的模型与供应商；既有会话两者必须成对。
-  - `--workspace <dir>`：只为本次新建的会话指定工作区（绝对路径），经 `session.create` 显式传入并优先于 daemon 默认；既有会话本地报 `run.workspace_unsupported`（1），不修改会话；省略时沿用 daemon 启动时的默认工作区。
+  - `--workspace <dir>`：只为本次新建的会话指定工作区（绝对路径），经 `session.create` 显式传入并优先于配置中的默认工作区（daemon 在 `session.create` 时读取）；既有会话本地报 `run.workspace_unsupported`（1），不修改会话；省略时使用配置中的默认工作区。
   - `--print`：只输出最终文本；`--json`：只输出一行 `{sessionId,turnId,reason,text,error?}`。
   - 退出码：完成 0；失败 turn、协议/会话/连接错误 1；用法或配置错误 2；取消（Ctrl-C 或外部
     `sessions cancel`）130。
@@ -1194,8 +1196,10 @@ PID 复用防护见 §8.1。模板命令经单个短连接调用 `template.*`，
 `provider.not_found` 退出 1。其余命令（`client`、`providers check`、`auth`）仍为目标设计，
 **未实现**。交互式 `run` 循环也未实现，但非交互 `run` 已按上述语义交付。全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir`
 与扩展组 `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 共存，两个加载器互不拒绝；
-默认 provider/model 只使用 `defaults`（旧 `defaultProvider`/`defaultModel` 已移除）。CLI
-读取并校验 `defaultWorkspace` 并在 `start` 时并入 daemon defaults；其余扩展键由 daemon 扩展加载器使用。CLI 仅支持 Linux x64，
+默认 provider/model 只使用 `defaults`（旧 `defaultProvider`/`defaultModel` 已移除）。CLI 的 `start`
+只把 `--config` 的绝对路径作为 `extensions: { configPath }` 注入；daemon 在每次 `session.create`
+读取配置与扫描目录，因此 `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 的修改对之后新建的
+会话立即生效，无需重启；`providers` 与 `templatesDir` 仍是启动绑定。CLI 仅支持 Linux x64，
 只暴露 `openai-chat` 方言；配置、凭据与恢复步骤见 `docs/cli.md`。
 
 ### 6.9 模板接口
@@ -1268,7 +1272,9 @@ interface ProjectRef {
 - `SessionRepository.create` 原子写入 `meta.json` 与 nodes；`append` 批量原子追加 nodes；两者都不改写 `meta.json`。`updateMeta` 仅原子替换 `meta.json`，不写 nodes；其原子性与并发约束同 `create`/`append`。写入原子性由存储实现保证；fsync 与批量策略由详细设计决定。
 - 同一会话的写入由 `Concurrency` 串行化；客户端不持有全局锁。
 - 配置文件与节点记录不保存凭据明文，只保存 `credentialRef`。
-- 配置与凭据由 CLI 写入，daemon 按使用时机读取；`meta.json` 由 daemon 维护。
+- 配置与凭据由 CLI 写入；daemon 在目录驱动扩展模式下于每次 `session.create` 读取扩展配置层（全局
+  文件与工作区文件）并扫描扩展目录，`providers` 与 `templatesDir` 仍由启动选项固定；`meta.json`
+  由 daemon 维护。
 
 ### 7.3 导出
 
@@ -1282,12 +1288,12 @@ interface ProjectRef {
 
 - 本阶段 daemon 仅支持 Linux x64 与 Node.js >= 22.19.0；macOS 与 Windows（命名管道）仍为目标设计，未实现，非 Linux 平台在绑定前以 `daemon.unsupported_platform` 失败。
 - daemon 以用户级单实例运行：启动时对 `<dataDir>/run/pisces.lock` 取 `flock` 并绑定 `<dataDir>/run/pisces.sock`（权限 `0600`）；锁已被占用时以 `daemon.lock_busy` 退出，且不删除存活实例的 socket。
-- 本阶段已提供 CLI `start`/`status`/`stop`（见 `docs/cli.md`）与只接受 `dataDir`/`providers`/
-  `defaults` 的 `config.json` 加载器；daemon 本身仍不读取配置，嵌入程序调用
-  `startDaemon({ dataDir, providers, providerHost, ... })` 启动，返回的 `DaemonHost` 提供
-  `socketPath`、`initializationIssues`、`recoveryIssues`、`status()` 与 `stop()`。CLI 的 pid 记录、
-  日志、socket/lock 文件与退出码约定见 DDS §7.5；`client`、`providers check`、`auth` 命令
-  未实现（非交互 `run` 已实现，交互式循环未实现）。daemon 只监听本地
+- 本阶段已提供 CLI `start`/`status`/`stop`（见 `docs/cli.md`）；`start` 把 `--config` 的绝对路径作为
+  `extensions: { configPath }` 传给 daemon，扩展配置层与目录由 daemon 在 `session.create` 时读取与
+  扫描（目录驱动模式）。嵌入程序调用 `startDaemon({ dataDir, providers, providerHost, ... })` 启动，
+  返回的 `DaemonHost` 提供 `socketPath`、`initializationIssues`、`recoveryIssues`、`status()` 与
+  `stop()`。CLI 的 pid 记录、日志、socket/lock 文件与退出码约定见 DDS §7.5；`client`、
+  `providers check`、`auth` 命令未实现（非交互 `run` 已实现，交互式循环未实现）。daemon 只监听本地
   Unix socket，不监听网络地址。
 - 连接在读取任何协议字节前用原生 `SO_PEERCRED` 校验 peer UID 必须等于 daemon 有效 UID；不一致只销毁该连接。原生插件为仓内 plain C Node-API，使用固定 `node-gyp` 编译为被忽略的 `packages/daemon/native/peercred.node`，需在测试前按当前 Node ABI 显式构建；缺失或构建失败以 `daemon.native_unavailable` 拒绝启动，无降级认证。
 - `stop()` 先阻断新帧并停止 accept，等待已受理请求与尽力取消活跃 turn，再关闭连接、按 inode 清理 socket、释放锁并 dispose `Gateway`；无法完成时以 `daemon.stop_incomplete` 失败并保留锁、标记与 `quiescing` 状态，不自动强杀进程，也不声称已优雅停止。

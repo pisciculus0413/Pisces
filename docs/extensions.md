@@ -2,8 +2,9 @@
 
 本文件描述当前已实现并已被真实 Unix socket 端到端验收的扩展契约。它只覆盖本阶段交付的部分：
 目录发现、清点、声明式选择、冻结定义、按需装载、`entries.snapshot`、队列路由，以及仓库自带的
-内置 shell 工具与宿主注入的 `files`/`exec` 能力。**未交付**的能力在文末“本阶段未交付”一节明确
-列出。权威设计见
+内置 shell 工具与宿主注入的 `files`/`exec` 能力。CLI 的 `start` 始终把 `--config` 的绝对路径作为
+`extensions` 启动选项注入；配置内容与扩展目录都由 daemon 在 `session.create` 时读取与扫描。
+**未交付**的能力在文末“本阶段未交付”一节明确列出。权威设计见
 `docs/2 Detailed Design Specification/2 Detailed Design Specification.md` §5.5 与
 `docs/1 High-Level Design/1 High-Level Design.md` §5.4、§6.6。
 
@@ -14,7 +15,7 @@
 | 来源 | 路径 |
 |---|---|
 | 内置 | `<repo>/extensions/builtin`（由 daemon 模块 URL 向上推导到仓库根，与进程工作目录无关） |
-| 软件配置目录 | `<configDir>/extensions/` |
+| 软件配置目录 | `<configDir>/extensions/`；`<configDir>` 是 `dirname(configPath)`，而 `configPath` 是 CLI `--config` 的精确路径（默认 `<configDir>/config.json`） |
 | 工作区 | `<workspace>/.pisces/extensions/` |
 
 - 每个直接子目录为一个包；以 `@scope` 开头的目录下再取一层子目录，包名仍以 `package.json` 的
@@ -110,14 +111,15 @@ demo/
 | 层级 | 文件 | 说明 |
 |---|---|---|
 | 内置默认 | 包内 sidecar `config.defaults` | 只对包装器生效 |
-| 全局 | `<configDir>/config.json` | 可含全部配置键 |
+| 全局 | `<configDir>/config.json`（CLI 可经 `--config <path>` 精确指定文件；扩展根仍取该路径的 `dirname`） | 可含全部配置键 |
 | 工作区 | `<workspace>/.pisces/config.json` | `defaultWorkspace` 在此层非法 |
 
 - 允许键：`defaults`、`defaultWorkspace`、`extensions`、`entryConfig`；全局层还允许并忽略 CLI 键
   `dataDir`、`providers`、`templatesDir`（由 CLI 校验，扩展层不读取）。
 - 未知键 → `config.unknown_key`；类型或组合非法 → `config.invalid`。
 - `defaultWorkspace` 只允许出现在全局层且必须是绝对路径；它只在 `session.create` 省略
-  `workspace` 时使用。
+  `workspace` 时使用。全局层与工作区层都在 `session.create` 时重新读取，因此改写配置后新建会话
+  立即生效，无需重启 daemon。
 - `defaults` 是唯一的默认 provider/model 键，必须成对出现；旧的 `defaultProvider`/`defaultModel`
   已移除（pre-release 变更，无迁移），出现时按未知键处理。`session.create` 也接受显式成对值。
 - `extensions` 是默认选择（`package#name` 数组）；`session.create.extensions` 显式给出时
@@ -196,7 +198,7 @@ demo/
 | 方法 | 扩展相关行为 |
 |---|---|
 | `protocol.hello` | 连接层处理；未握手前其它方法返回 `protocol.hello_required` |
-| `session.create` | 配置模式：冻结绑定 → 解析 provider/model → 把 `systemPrompt` 与**一条**未确认声明入队；显式 `extensions: []` 不生成声明 |
+| `session.create` | 配置模式：读取全局与工作区配置层、冻结绑定 → 解析 provider/model → 把 `systemPrompt` 与**一条**未确认声明入队；显式 `extensions: []` 不生成声明 |
 | `entries.snapshot` | 见 §4 |
 | `queue.enqueue` | 配置模式下接受 `kind=control`/`role=declaration`；整批富化后一次入队；失败不改队列 |
 | `queue.edit` | 只允许未确认的 `kind=agent`；已确认 → `queue.entry_locked`；声明 → `queue.invalid_control` |
@@ -213,6 +215,8 @@ demo/
 
 ## 6. 执行时机与失败隔离
 
+- 启动只锁定配置文件与扩展根目录的位置：目录驱动模式在构造 `Extensions` 时不读文件、不扫描目录；
+  读取全局/工作区配置与发现扩展都发生在每次 `session.create`。
 - 清点、`session.create`、`entries.snapshot`、`queue.*` 与 `turn.start` 都不导入实现模块。
 - 工具/包装器模块在**首次实际调用**时由宿主内置加载器导入并缓存；上下文来源在首次被选中装配
   时导入并 `resolve`；技能正文在发现阶段读取，首次选中装配时写入会话节点。
@@ -270,6 +274,9 @@ demo/
 
 ## 7. stale 与重启
 
+- CLI 的 `start` 只注入 `extensions: { configPath }`；daemon 在每次 `session.create` 时重新读取配置
+  并扫描目录，所以 `defaults`、`defaultWorkspace`、`extensions`、`entryConfig` 的修改对之后新建的
+  会话立即生效，不需要重启 daemon。`providers` 与 `templatesDir` 仍是启动绑定。
 - 每个会话在创建（或重启后首次加载）时冻结自己的绑定；已有会话的绑定不重建，新建会话会重新扫描。
 - `SessionMeta`/`schemaVersion` 不含选择或清点；已审查定义只存在于持久化的 declaration 节点中。
 - 扩展代码、sidecar 或 `entryConfig` 改变后：
@@ -408,7 +415,9 @@ const host = await startDaemon({
   dataDir: "/home/me/.pisces",
   providers,
   providerHost,
-  extensions: { configDir: "/home/me/.config/pisces" },
+  // CLI `start` 的写法：精确文件；扩展根为 dirname(configPath)/extensions。
+  // 旧写法 `{ configDir: "/home/me/.config/pisces" }` 仍可用，读 <configDir>/config.json。
+  extensions: { configPath: "/home/me/.config/pisces/config.json" },
 });
 
 await host.stop();
@@ -432,8 +441,9 @@ await host.stop();
 - **providers 扩展装配**：清单中的 `providers` 只产生 `extensions.unsupported_contribution`，
   不注册供应商；provider 仍由宿主通过 `ProviderManagement` 注入。
 - **clients 扩展与 `client.*` 路由**：未装配，未路由。
-- **CLI**：已实现 `extensions list` 与 `config list|get|set|unset`；仍没有
-  `extensions install/enable`、`run` 等命令，安装与更新由 npm/git 完成。
+- **CLI**：已实现 `start`/`status`/`stop`、`run`、`extensions list` 与 `config list|get|set|unset`；
+  `start` 启动的 daemon 始终装配目录驱动扩展。仍没有 `extensions install/enable`、交互式配置编辑器；
+  安装与更新由 npm/git 完成。
 - **沙箱**：扩展代码与工具以 daemon 用户权限运行，没有进程/文件系统隔离。
 - **热重载**：已有会话的绑定不重建、已装载模块不重载；进程存活期间新建会话仍会重新发现并冻结新定义，而仍存活的已固化会话只显示 `stale`。改变扩展后不需要重启进程，但已有会话不会自动刷新。
 - **依赖树锁定**：只哈希条目文件本身（`definitionHash`）与合并后的包装器配置
@@ -454,6 +464,11 @@ await host.stop();
 回填 `tool.denied` 与固定文案，不抛错、不终止 turn。工具自身的参数校验、截断标记与超时由
 `packages/daemon/test/shell-tool.test.ts` 覆盖，`exec` 与路径包含分别由
 `packages/daemon/test/exec-host.test.ts`、`packages/daemon/test/workspace-access.test.ts` 覆盖。
+
+CLI 装配由 `packages/cli/test/extensions-e2e.test.ts` 验收：真实 `buildDaemonOptions` + `startDaemon`
+（真实 provider host 指向本机 OpenAI 兼容 SSE 服务器）上，配置 `extensions` 启用内置 shell 并执行
+`printf tool-ok`、无 `extensions` 时 `run --enable` 成功、`--config alt.json` 读取 alt 文件与
+`dirname(alt.json)/extensions`、工作区 `.pisces/extensions` 中的工具被发现并执行。
 
 - 本机结果：该文件 12 个用例全部通过（`pnpm exec vitest run packages/daemon/test/extensions-socket.test.ts`）。
 - 平台：Linux x86_64，Node v26.13.0，pnpm 12.8.1。

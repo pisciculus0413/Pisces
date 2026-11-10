@@ -1356,7 +1356,7 @@ daemon 是用户级单实例进程，负责监听、路由、持久化、扩展�
 
 #### 5.1.1 启动与停止
 
-- 公开入口是 `startDaemon(options: { dataDir: string; providers; providerHost; defaults?; /* 既有可选工具/条目/技能/来源工厂 */ }): Promise<DaemonHost>`；本阶段没有 CLI 或配置加载器。宿主用同一个 `dataDir` 构造 `SessionStore`、`ActiveTurnStore`、`EventBus`、`Concurrency`、`Gateway` 与 Linux 监听器，不接受外部 store/marker 注入。
+- 公开入口是 `startDaemon(options: { dataDir: string; providers; providerHost; defaults?; extensions?: { configDir?; configPath? }; /* 既有可选工具/条目/技能/来源工厂 */ }): Promise<DaemonHost>`；启动只锁定配置位置，不在启动时读取扩展配置或扫描目录。宿主用同一个 `dataDir` 构造 `SessionStore`、`ActiveTurnStore`、`EventBus`、`Concurrency`、`Gateway` 与 Linux 监听器，不接受外部 store/marker 注入。
 - `dataDir` 必须为绝对路径、属主为当前有效 UID 且组/其他用户不可写；`dataDir/run` 必须为属主 `0700`，既有符号链接或不安全模式直接拒绝。socket 为 `dataDir/run/pisces.sock`（`0600`），锁为 `dataDir/run/pisces.lock`。
 - 本阶段仅 Linux。平台检查与 `getuid() === geteuid()` 在导入原生绑定、绑定 socket 之前完成；macOS 与 Windows 以 `daemon.unsupported_platform` 失败，Windows 命名管道仍为目标设计。
 - 启动顺序：
@@ -1372,7 +1372,7 @@ daemon 是用户级单实例进程，负责监听、路由、持久化、扩展�
 - 已受理请求超时、仍有登记 turn（含 `turn.cleanup_failed`）、标记删除失败或监听器/锁释放失败统一抛 `daemon.stop_incomplete`，按其实际状态保留锁、socket、`Gateway` 与 `quiescing`，允许重试；不自动强杀进程，也不声称已优雅停止。操作者终止进程后由下一次启动按 §6.5 恢复。成功返回后 `stop()` 幂等。
 - daemon 崩溃后只恢复已落盘会话；临时会话与消息队列随进程退出丢失。
 - 未完成的热会话在恢复时标记为中断，由用户决定是否继续。
-- 本阶段尚未装配：通用软件/工作区配置加载、`ClientRegistry`、`CredentialStore`，以及清单中的 `providers`/`clients` 扩展装配；这些仍为目标设计。已装配的是目录驱动模式的 `Extensions`（`startDaemon({ extensions: { configDir } })`）与模板存储（`startDaemon({ templates: { configDir } })`）。
+- 本阶段尚未装配：`ClientRegistry`、`CredentialStore`，以及清单中的 `providers`/`clients` 扩展装配；这些仍为目标设计。已装配的是目录驱动模式的 `Extensions`（`startDaemon({ extensions: { configDir } })` 或 `{ configPath }`，配置层与目录在 `session.create` 时读取与扫描）、CLI 启动时的配置加载器与模板存储（`startDaemon({ templates: { configDir } })`）。
 
 #### 5.1.2 `Transport`
 
@@ -1639,7 +1639,8 @@ interface SessionStore extends SessionRepository {
 #### 5.5.1 发现来源
 
 - 内置扩展：`extensions/builtin`。
-- 软件配置目录：`<configDir>/extensions/`。
+- 软件配置目录：`<configDir>/extensions/`；`configDir` 为显式选项，或 `dirname(configPath)`（CLI
+  `--config` 的精确路径）。
 - 工作区：`<workspace>/.pisces/extensions/`。
 - 扩展是普通 npm 包或目录；以 `package.json` 的 `pisces` 字段或约定目录声明条目。
 
@@ -1678,10 +1679,12 @@ interface Inventory {
 
 #### 5.5.3 配置
 
-- 配置来源优先级：工作区 `.pisces/config.json` > 软件配置目录 > 内置默认。
+- 配置来源优先级：工作区 `.pisces/config.json` > 全局配置文件 > 内置默认。目录驱动模式在每次
+  `session.create` 重新读取两层；全局文件为 `options.configPath`（CLI `--config` 精确路径）或
+  `<configDir>/config.json`。
 - 默认 provider/model 从 `defaults` 读取，供 `session.create` 使用；工作区配置可覆盖软件配置。`defaults` 必须成对出现；旧的 `defaultProvider`/`defaultModel` 已移除。
 - `defaultWorkspace` 只来自全局配置，供 `session.create` 在省略 `workspace` 时使用；工作区配置需要先确定工作区才能读取，因此不提供 `defaultWorkspace`，也不参与默认工作区解析；若出现按未知配置键处理。
-- `defaultWorkspace` 必须是绝对路径；`config` 与 CLI 加载器只校验格式（不做 `~` 展开），存在性与可写性在 `session.create` 时检查。CLI `start` 将它合并进 daemon `defaults.workspace`；daemon 只在启动时读取，修改后需重启才对之后创建的会话生效。
+- `defaultWorkspace` 必须是绝对路径；`config` 与 CLI 加载器只校验格式（不做 `~` 展开），存在性与可写性在 `session.create` 时检查。daemon 在每次 `session.create` 读取配置中的默认值，因此修改后新建会话立即生效，无需重启；`providers`/`templatesDir` 仍由启动选项固定。
 - `config` CLI 只影响此后创建的会话；不修改既有会话的 `SessionMeta`。
 - 新会话的默认扩展选择来自配置；`session.create.extensions` 显式列表替换默认选择。
 - `entryConfig` 的键必须是当前清点中存在的 `wrapper` 条目，否则 `config.invalid`；它的合并顺序为 sidecar `config.defaults` < 用户覆盖（深合并），schema 校验合并结果：无用户覆盖时不合法只丢弃该包装器（`extensions.invalid`），有用户覆盖时不合法使整个 `prepare` 以 `config.invalid` 失败。
@@ -1829,7 +1832,7 @@ interface ClientRegistry {
 
 - 公开装配路径是 `startDaemon`（§5.1.1）：宿主用同一个 `dataDir` 构造 store/marker/EventBus/Concurrency，再调用 `bootstrapGateway(deps)` 完成 `SessionStore.initialize()`、`markers.scan()` 恢复（逐会话隔离损坏标记）与 `createGateway`，最后绑定并校验 socket。`bootstrapGateway` 本身不做锁、socket 或 `Transport` 装配；返回 `{ gateway, initializationIssues, recoveryIssues }`，且须在任何请求被服务前完成。
 - `Gateway` 依赖 `SessionStore`、`ActiveTurnStore`、`EventBus`、`Concurrency`、`ProviderManagement`、`ProviderHost`，以及可选的默认值、工具/条目/技能/来源工厂与 id/时间工厂。
-- 目录驱动模式已装配 `Extensions`：`startDaemon({ extensions })` 在 lock 获取后构造真实服务并传入 `GatewayDeps.extensions`；该模式与手动注入互斥。`TemplateStore` 按 `startDaemon({ templates: { configDir } })` 装配，与 `extensions` 模式可共存；`ClientRegistry`、`CredentialStore` 与 CLI 仍未装配。
+- 目录驱动模式已装配 `Extensions`：`startDaemon({ extensions })` 在 lock 获取后构造真实服务并传入 `GatewayDeps.extensions`；该模式与手动注入互斥。CLI 的 `start` 总是选择该模式并传 `{ configPath }`。`TemplateStore` 按 `startDaemon({ templates: { configDir } })` 装配，与 `extensions` 模式可共存；`ClientRegistry` 与 `CredentialStore` 仍未装配。
 - `Extensions` 依赖 `Tools`、`Skills`、`Context`；`providers`/`clients` 清单项本阶段不装配（`ClientRegistry` 为目标设计）。
 - `ProviderHost` 依赖 `CredentialStore` 与 `ProviderManagement`（目标设计）。
 - `TemplateStore` 依赖 `WorkspaceAccess`、`ExecHost`、`projects.json`，输入 `configDir` 与 `dataDir`；会话创建能力保留在 `Gateway`。
@@ -1999,9 +2002,9 @@ turn 时输出 `no active turn` 并退出 0，`{cancelled:false}` 映射为 CLI 
 - `config` 只影响此后创建的会话，不改写既有会话。
 - CLI 不直接访问 `events.jsonl`；会话读取与导出经协议/服务层。
 - 全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir` 与扩展组
-  `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 共存；CLI 加载器解析并校验
-  `defaultWorkspace`（转发为 daemon 默认工作区），其余扩展键由扩展加载器使用，扩展解析器忽略 CLI 键。
-  默认 provider/model 只使用 `defaults`；旧 `defaultProvider`/`defaultModel` 按未知键拒绝。provider
+  `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 共存；`start` 只将 `--config` 的绝对路径
+  作为 `extensions: { configPath }` 注入，扩展层由 daemon 在 `session.create` 时读取，扩展解析器忽略
+  CLI 键。默认 provider/model 只使用 `defaults`；旧 `defaultProvider`/`defaultModel` 按未知键拒绝。provider
   方言固定为 `openai-chat`。
 
 ### 7.2 `run`
@@ -2025,7 +2028,8 @@ pisces run [prompt] [--new | --continue | --session <id> [--create]]
   `--session <id>` 先做一次 `session.read {limit: 1}` 存在性检查，不存在且带 `--create` 时新建，
   否则 `session.not_found`（1）；`--create` 只能与 `--session` 同用；id 必须匹配 `[A-Za-z0-9_-]+`。
 - 会话选项：`--workspace` 必须是绝对路径，只传给本次新建的 `session.create`（`--new`、缺省选择器、
-  或 `--session --create` 且会话不存在），显式值优先于 daemon 启动时的默认工作区；既有会话（`--session`
+  或 `--session --create` 且会话不存在），显式值优先于配置中的默认工作区（daemon 在 `session.create`
+  时读取）；既有会话（`--session`
   命中或 `--continue`）与 `--workspace` 同用时本地返回 `run.workspace_unsupported`（1），不配置、
   不入队、不启动 turn。该拒绝只针对已落盘会话：`--continue` 没有任何已落盘会话时先以
   `session.not_found`（1）失败，不会报 `run.workspace_unsupported`。省略时由 daemon 解析默认工作区：
