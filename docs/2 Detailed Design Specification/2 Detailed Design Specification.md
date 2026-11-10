@@ -2097,7 +2097,8 @@ CLI 生命周期约定（已实现）：
   `open(..., "wx", 0o600)` 独占创建）、`<dataDir>/daemon.log`（`0600`，子进程 stdout/stderr）、
   `<dataDir>/run/pisces.sock` 与 `<dataDir>/run/pisces.lock`（`0600`，由 daemon 维护）。
   `dataDir` 策略（绝对路径、当前 uid 拥有、无 group/world 写位、`0700` 创建）**只由 `start` 执行**；
-  `status`/`stop` 不校验该策略，只读 pid 记录并探测由 dataDir 推导的 socket。
+  `status`/`stop` 不校验该策略，只读 pid 记录并探测由 dataDir 推导的 socket；`status` 在探测
+  成功后还会在同一 socket 上调用一次 `turn.list` 列出活跃会话。
 - `start`：一个 10 s 墙钟预算覆盖预检探测与就绪轮询；轮询 50 ms，要求子进程存活、pid 记录仍指向
   该子进程、且由 dataDir 推导的 socket 握手成功。子进程句柄携带 `'error'` 监听，libuv 启动失败
   （EAGAIN/EMFILE/ENOMEM）只表现为 `daemon.start_failed`，不崩溃、不打印原始错误。失败时 SIGTERM
@@ -2112,8 +2113,10 @@ CLI 生命周期约定（已实现）：
   `stop` 的输出与 `status --json` 也只输出推导路径。必须先 `ps -p <pid>` 确认该进程身份；是本
   dataDir 的 daemon 才可人工 SIGTERM，否则只删除 `daemon.pid`。详见 `docs/cli.md` §7。
 - `status`：`running`/`unmanaged` 时用一次短连接调用 `turn.list`，按出现顺序去重输出活跃
-  `sessionId`。人类输出在状态行后追加 `sessions: <id...>`（无活跃 turn 为 `sessions: none`，查询
-  失败为 `sessions: unavailable`）；`--json` 仅在查询成功时增加 `sessions` 数组，失败或未查询
+  `sessionId`。握手与该请求各用 `PROBE_TIMEOUT_MS`（500 ms，与探测预算相同），socket 在探测后
+  不再应答也不会让 `status` 阻塞在客户端默认的 5 s 预算上。人类输出在状态行后追加
+  `sessions: <id...>`（无活跃 turn 为 `sessions: none`，查询失败为 `sessions: unavailable`）；
+  `--json` 仅在查询成功时增加 `sessions` 数组，失败或未查询
   （`stopped`/`stale`/`unresponsive` 与 `daemon.unknown_owner` 早退）时省略。查询失败不改变退出码、
   不写 stderr，也不输出 turnId、时间戳或错误原文。
 - `stop` 先握手再发信号，握手失败不调用 `kill`；`stop` 输出 `stopped (pid N, socket S)`，其中 `S`

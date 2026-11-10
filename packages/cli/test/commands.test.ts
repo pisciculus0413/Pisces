@@ -12,6 +12,7 @@ import {
   type CommandDeps,
   type CommandIo,
   listActiveSessions,
+  PROBE_TIMEOUT_MS,
   type SpawnedChild,
   startCommand,
   statusCommand,
@@ -27,6 +28,7 @@ const SECRET = "sk-task4-secret";
 const CHILD_PID = 4242;
 
 const roots: string[] = [];
+const daemons: FakeTurnListDaemon[] = [];
 
 beforeEach(() => {
   vi.stubEnv(KEY_ENV, SECRET);
@@ -35,6 +37,9 @@ beforeEach(() => {
 
 afterEach(async () => {
   vi.unstubAllEnvs();
+  // Fake servers are closed here too, so a failing assertion cannot leak a
+  // listening socket or its event loop handle.
+  await Promise.all(daemons.splice(0).map((daemon) => daemon.close()));
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -641,8 +646,19 @@ interface FakeTurnListDaemon {
   close(): Promise<void>;
 }
 
+interface FakeTurnListOptions {
+  /** Answer `protocol.hello`; when false the handshake never settles. */
+  answerHello?: boolean;
+  /** Answer `turn.list`; when false the request never settles. */
+  answerTurnList?: boolean;
+}
+
 /** Minimal NDJSON daemon that answers hello and returns `turnListResult` for `turn.list`. */
-async function fakeTurnListDaemon(turnListResult: unknown): Promise<FakeTurnListDaemon> {
+async function fakeTurnListDaemon(
+  turnListResult: unknown,
+  options: FakeTurnListOptions = {},
+): Promise<FakeTurnListDaemon> {
+  const { answerHello = true, answerTurnList = true } = options;
   const root = await mkdtemp(join(tmpdir(), "pisces-status-sessions-"));
   roots.push(root);
   const path = join(root, "pisces.sock");
@@ -668,11 +684,16 @@ async function fakeTurnListDaemon(turnListResult: unknown): Promise<FakeTurnList
         if (line === "") continue;
         const frame = JSON.parse(line) as { id: string; method: string };
         methods.push(frame.method);
-        const result =
-          frame.method === "protocol.hello"
-            ? { version: PROTOCOL_VERSION, compatible: true }
-            : turnListResult;
-        socket.write(`${JSON.stringify({ id: frame.id, result })}\n`);
+        if (frame.method === "protocol.hello") {
+          if (answerHello) {
+            const result = { version: PROTOCOL_VERSION, compatible: true };
+            socket.write(`${JSON.stringify({ id: frame.id, result })}\n`);
+          }
+          continue;
+        }
+        if (answerTurnList) {
+          socket.write(`${JSON.stringify({ id: frame.id, result: turnListResult })}\n`);
+        }
       }
     });
   });
@@ -681,7 +702,7 @@ async function fakeTurnListDaemon(turnListResult: unknown): Promise<FakeTurnList
     server.listen(path, resolve);
   });
 
-  return {
+  const daemon: FakeTurnListDaemon = {
     path,
     methods,
     closed,
@@ -692,6 +713,8 @@ async function fakeTurnListDaemon(turnListResult: unknown): Promise<FakeTurnList
       });
     },
   };
+  daemons.push(daemon);
+  return daemon;
 }
 
 test("listActiveSessions dedupes turn.list session ids in first-seen order and closes", async () => {
@@ -706,7 +729,6 @@ test("listActiveSessions dedupes turn.list session ids in first-seen order and c
   await expect(listActiveSessions(daemon.path)).resolves.toEqual(["a", "b"]);
   expect(daemon.methods).toEqual(["protocol.hello", "turn.list"]);
   await daemon.closed;
-  await daemon.close();
 });
 
 test("listActiveSessions returns no sessions for an empty turn list", async () => {
@@ -714,7 +736,6 @@ test("listActiveSessions returns no sessions for an empty turn list", async () =
 
   await expect(listActiveSessions(daemon.path)).resolves.toEqual([]);
   await daemon.closed;
-  await daemon.close();
 });
 
 test("listActiveSessions rejects a malformed turn list and still closes", async () => {
@@ -729,8 +750,30 @@ test("listActiveSessions rejects a malformed turn list and still closes", async 
     const daemon = await fakeTurnListDaemon(result);
     await expect(listActiveSessions(daemon.path)).rejects.toThrow();
     await daemon.closed;
-    await daemon.close();
   }
+});
+
+/** Both the handshake and `turn.list` stay inside the probe budget, not the 5 s client default. */
+const STATUS_QUERY_BUDGET_MS = PROBE_TIMEOUT_MS * 4;
+
+test("listActiveSessions bounds turn.list by the probe budget", async () => {
+  const daemon = await fakeTurnListDaemon({ turns: [] }, { answerTurnList: false });
+
+  const started = Date.now();
+  await expect(listActiveSessions(daemon.path)).rejects.toMatchObject({ code: "client.timeout" });
+  expect(Date.now() - started).toBeLessThan(STATUS_QUERY_BUDGET_MS);
+  expect(daemon.methods).toEqual(["protocol.hello", "turn.list"]);
+  await daemon.closed;
+});
+
+test("listActiveSessions bounds the handshake by the probe budget", async () => {
+  const daemon = await fakeTurnListDaemon({ turns: [] }, { answerHello: false });
+
+  const started = Date.now();
+  await expect(listActiveSessions(daemon.path)).rejects.toMatchObject({ code: "client.timeout" });
+  expect(Date.now() - started).toBeLessThan(STATUS_QUERY_BUDGET_MS);
+  expect(daemon.methods).toEqual(["protocol.hello"]);
+  await daemon.closed;
 });
 
 test("status --json reports the state without key material", async () => {

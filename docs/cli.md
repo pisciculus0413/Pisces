@@ -167,7 +167,8 @@ $ pisces status --json
 pid 记录里的 `socketPath` 与它不一致时，按 `daemon.unknown_owner` 退出 1，不删记录。
 
 只有 `running` 与 `unmanaged`（本 dataDir 的 socket 有应答）才会用一次短连接调用 `turn.list`，
-把活跃 turn 的 `sessionId` 按出现顺序去重后输出：
+把活跃 turn 的 `sessionId` 按出现顺序去重后输出。握手与该请求各自使用 500 ms 预算（与探测相同），
+因此 socket 在探测后卡住也不会让 `status` 无限等待：
 
 - 有活跃 turn：状态行之后追加 `sessions: <id1>, <id2>`；
 - 无活跃 turn：`sessions: none`；
@@ -539,7 +540,8 @@ $ pisces models list --json
   写位；`start` 以 `0700` 创建。不满足时 `error: daemon.insecure_directory: Data directory is not
   private`，退出 2。
 - `status`/`stop` **不**校验该策略：它们只读 `<dataDir>/daemon.pid`，并探测由 dataDir 推导的
-  `<dataDir>/run/pisces.sock`；目录不安全只会表现为探测失败（`unresponsive`/`unknown_owner`）。
+  `<dataDir>/run/pisces.sock`；`status` 在探测成功后还会沿同一 socket 调用一次 `turn.list` 以列出
+  活跃会话（探测失败则不调用）。目录不安全只会表现为探测失败（`unresponsive`/`unknown_owner`）。
 - `daemon.pid` 写入或清除失败时打印 `error: storage.io: Daemon pid file could not be written`，
   退出 1（运行时失败）。
 - `daemon.log` 会记录 socket 路径与错误码，不会记录密钥。

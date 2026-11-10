@@ -160,13 +160,18 @@ function invalidResponse(): never {
  * Reads the active `sessionId`s with one short-lived connection.
  *
  * Only `sessionId` is used: turn ids, timestamps and any extra fields are
- * ignored. Duplicates collapse to their first occurrence. A connect, protocol
- * or malformed-result failure rejects, and the connection is always closed.
+ * ignored. Duplicates collapse to their first occurrence. A connect, protocol,
+ * timeout or malformed-result failure rejects, and the connection is always
+ * closed.
+ *
+ * Both the handshake and `turn.list` use `PROBE_TIMEOUT_MS`, the budget the
+ * caller already spent probing the same socket, so `status` stays bounded
+ * instead of falling back to the longer client default.
  */
 export async function listActiveSessions(socketPath: string): Promise<string[]> {
-  const client = await connectClient(socketPath);
+  const client = await connectClient(socketPath, PROBE_TIMEOUT_MS);
   try {
-    const result = await client.request("turn.list", {});
+    const result = await client.request("turn.list", {}, { timeoutMs: PROBE_TIMEOUT_MS });
     if (!isRecord(result) || !Array.isArray(result.turns)) invalidResponse();
 
     const seen = new Set<string>();

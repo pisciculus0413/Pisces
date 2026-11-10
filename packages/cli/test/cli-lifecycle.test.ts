@@ -274,6 +274,9 @@ test(
     const status = await run(command(fixture, ["status"]));
     expect(status.code).toBe(0);
     expect(status.stdout).toContain("running");
+    // The real daemon answers `turn.list`, so the session line is exercised
+    // against a live process rather than only a fake.
+    expect(status.stdout).toContain("sessions: none");
 
     const json = await run(command(fixture, ["status", "--json"]));
     expect(json.code).toBe(0);
