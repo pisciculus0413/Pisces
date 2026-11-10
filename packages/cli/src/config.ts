@@ -26,7 +26,16 @@ export interface CliConfig {
 }
 
 const INVALID_MESSAGE = "Invalid configuration";
-const CONFIG_KEYS = ["dataDir", "providers", "defaults", "templatesDir"] as const;
+const CONFIG_KEYS = [
+  "dataDir",
+  "providers",
+  "defaults",
+  "templatesDir",
+  // Extension keys share the file but are validated by the daemon extension parser, never here.
+  "defaultWorkspace",
+  "extensions",
+  "entryConfig",
+] as const;
 const PROVIDER_KEYS = ["id", "baseUrl", "apiKeyEnv", "headers", "models"] as const;
 const MODEL_KEYS = ["id", "contextWindow", "maxOutput", "modalities"] as const;
 const DEFAULTS_KEYS = ["provider", "model"] as const;

@@ -5,6 +5,8 @@ import { type EntryName, type JsonObject, type JsonValue, PiscesError } from "@p
 import { afterEach, beforeEach, expect, test } from "vitest";
 import {
   mergeConfigLayers,
+  parseExtensionConfig,
+  parseExtensionConfigText,
   readConfigLayer,
   readGlobalConfig,
   readWorkspaceConfig,
@@ -114,7 +116,7 @@ test("unreadable configuration is invalid rather than empty", async () => {
 
 test("malformed JSON is a fixed safe config.invalid error", async () => {
   const path = join(root, "config.json");
-  await writeText(path, '{"defaultProvider":"leaky-secret"');
+  await writeText(path, '{"defaults":{"provider":"leaky-secret"');
   const error = await rejects(() => readConfigLayer(path, "global"));
   expect(error.code).toBe("config.invalid");
   expect(error.message).toBe(INVALID);
@@ -132,24 +134,43 @@ test("malformed JSON is a fixed safe config.invalid error", async () => {
   }
 });
 
-test("unknown top-level keys fail with config.unknown_key and no leak", async () => {
+test("unknown and removed top-level keys fail with config.unknown_key and no leak", async () => {
   const path = join(root, "global", "config.json");
-  await writeJson(path, { defaultProvider: "p", defaultModel: "m", providers: "leaky-secret" });
-  const error = await rejects(() => readConfigLayer(path, "global"));
-  expect(error.code).toBe("config.unknown_key");
-  expect(error.message).toBe(UNKNOWN_KEY);
-  expect(error.message).not.toContain("providers");
-  expect(error.message).not.toContain("leaky-secret");
-  expect(error.data).toBeUndefined();
+  for (const value of [
+    { unknownKey: "leaky-secret" },
+    { defaultProvider: "leaky-secret" },
+    { defaultModel: "leaky-secret" },
+    { defaultProvider: "p", defaultModel: "m" },
+  ]) {
+    await writeJson(path, value);
+    const error = await rejects(() => readConfigLayer(path, "global"));
+    expect(error.code).toBe("config.unknown_key");
+    expect(error.message).toBe(UNKNOWN_KEY);
+    expect(error.message).not.toContain("leaky-secret");
+    expect(error.message).not.toContain(Object.keys(value)[0] as string);
+    expect(error.data).toBeUndefined();
+  }
 });
 
-test("workspace scopes forbid defaultWorkspace as an unknown key", async () => {
+test("workspace scope rejects cli keys and defaultWorkspace as unknown keys", async () => {
   const path = join(root, "workspace", ".pisces", "config.json");
-  await writeJson(path, { defaultWorkspace: "/absolute/workspace" });
-  const error = await rejects(() => readConfigLayer(path, "workspace"));
-  expect(error.code).toBe("config.unknown_key");
-  expect(error.message).toBe(UNKNOWN_KEY);
-  expect(error.message).not.toContain("defaultWorkspace");
+  for (const key of ["defaultWorkspace", "dataDir", "providers", "templatesDir"]) {
+    await writeJson(path, { [key]: "/absolute/workspace" });
+    const error = await rejects(() => readConfigLayer(path, "workspace"));
+    expect(error.code).toBe("config.unknown_key");
+    expect(error.message).toBe(UNKNOWN_KEY);
+    expect(error.message).not.toContain(key);
+  }
+  await writeJson(path, {
+    defaults: { provider: "p", model: "m" },
+    extensions: ["pkg#a"],
+    entryConfig: { "pkg#wrapper": { option: true } },
+  });
+  expect(await readConfigLayer(path, "workspace")).toEqual({
+    defaults: { provider: "p", model: "m" },
+    extensions: ["pkg#a"],
+    entryConfig: { "pkg#wrapper": { option: true } },
+  });
 });
 
 test("global defaultWorkspace must be a non-empty absolute path", async () => {
@@ -166,19 +187,67 @@ test("global defaultWorkspace must be a non-empty absolute path", async () => {
   expect((await rejects(() => readConfigLayer(path, "global"))).code).toBe("config.invalid");
 });
 
-test("defaultProvider and defaultModel must be paired within a layer", async () => {
+test("defaults must be a complete pair of non-empty strings", async () => {
   const path = join(root, "global", "config.json");
-  await writeJson(path, { defaultProvider: "p" });
-  expect((await rejects(() => readConfigLayer(path, "global"))).code).toBe("config.invalid");
-  await writeJson(path, { defaultModel: "m" });
-  expect((await rejects(() => readConfigLayer(path, "global"))).code).toBe("config.invalid");
-  await writeJson(path, { defaultProvider: "", defaultModel: "m" });
-  expect((await rejects(() => readConfigLayer(path, "global"))).code).toBe("config.invalid");
-  await writeJson(path, { defaultProvider: "p", defaultModel: "m" });
+  for (const value of [
+    { provider: "p" },
+    { model: "m" },
+    { provider: "", model: "m" },
+    { provider: "p", model: "" },
+    { provider: 1, model: "m" },
+    { provider: "p", model: null },
+    { provider: "p", model: "m", extra: true },
+    [],
+    "p",
+    null,
+  ]) {
+    await writeJson(path, { defaults: value });
+    expect((await rejects(() => readConfigLayer(path, "global"))).code).toBe("config.invalid");
+  }
+  await writeJson(path, { defaults: { provider: "p", model: "m" } });
   expect(await readConfigLayer(path, "global")).toEqual({
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
   });
+});
+
+test("global scope accepts cli keys without validating them", async () => {
+  const path = join(root, "global", "config.json");
+  await writeJson(path, {
+    dataDir: "/home/u/.local/state/pisces",
+    providers: [{ id: "openai" }],
+    defaults: { provider: "p", model: "m" },
+    templatesDir: "/home/u/.config/pisces/templates",
+    defaultWorkspace: "/home/u/projects/notes",
+    extensions: ["pkg#a"],
+    entryConfig: { "pkg#wrapper": { timeoutMs: 5000 } },
+  });
+  expect(await readGlobalConfig(join(root, "global"))).toEqual({
+    defaults: { provider: "p", model: "m" },
+    defaultWorkspace: "/home/u/projects/notes",
+    extensions: ["pkg#a"],
+    entryConfig: { "pkg#wrapper": { timeoutMs: 5000 } },
+  });
+
+  // Skipped before any semantic validation: arbitrary JSON shapes are never inspected.
+  await writeJson(path, { dataDir: 3, providers: "not-an-array", templatesDir: null });
+  expect(await readConfigLayer(path, "global")).toEqual({});
+});
+
+test("parseExtensionConfig and parseExtensionConfigText are pure entry points", () => {
+  const config = { defaults: { provider: "p", model: "m" }, extensions: ["pkg#a"] };
+  expect(parseExtensionConfig(config, "global")).toEqual({
+    defaults: { provider: "p", model: "m" },
+    extensions: ["pkg#a"],
+  });
+  expect(parseExtensionConfigText(JSON.stringify(config), "workspace")).toEqual({
+    defaults: { provider: "p", model: "m" },
+    extensions: ["pkg#a"],
+  });
+  expect(rejectsSync(() => parseExtensionConfig("nope", "global")).code).toBe("config.invalid");
+  expect(rejectsSync(() => parseExtensionConfigText("{", "global")).code).toBe("config.invalid");
+  expect(rejectsSync(() => parseExtensionConfig({ dataDir: "/d" }, "workspace")).code).toBe(
+    "config.unknown_key",
+  );
 });
 
 test("extensions must be an array of entry names and may be empty", async () => {
@@ -237,8 +306,7 @@ test("own __proto__ keys stay data without polluting or vanishing", async () => 
 
 test("mergeConfigLayers replaces arrays and merges objects recursively", () => {
   const globalLayer: ExtensionConfig = {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: ["pkg#a" as EntryName],
     entryConfig: {
       "pkg#wrapper": { keep: 1, nested: { x: 1, y: 2 }, list: [1, 2] },
@@ -254,8 +322,7 @@ test("mergeConfigLayers replaces arrays and merges objects recursively", () => {
 
   const merged = mergeConfigLayers([globalLayer, workspaceLayer]);
   expect(merged).toEqual({
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [],
     entryConfig: {
       "pkg#wrapper": { keep: 1, nested: { x: 1, y: 4, z: 5 }, list: [9] },
@@ -325,16 +392,16 @@ test("canonicalJson normalizes deep recursion to safe config.invalid", () => {
 test("readGlobalConfig reads <configDir>/config.json", async () => {
   const configDir = join(root, "config");
   await writeJson(join(configDir, "config.json"), {
+    dataDir: "/state/pisces",
+    providers: [],
     defaultWorkspace: "/workspace/one",
-    defaultProvider: "provider",
-    defaultModel: "model",
+    defaults: { provider: "provider", model: "model" },
     extensions: ["pkg#a"],
     entryConfig: { "pkg#wrapper": { option: true } },
   });
   expect(await readGlobalConfig(configDir)).toEqual({
     defaultWorkspace: "/workspace/one",
-    defaultProvider: "provider",
-    defaultModel: "model",
+    defaults: { provider: "provider", model: "model" },
     extensions: ["pkg#a"],
     entryConfig: { "pkg#wrapper": { option: true } },
   });
@@ -345,20 +412,17 @@ test("readWorkspaceConfig merges global then <workspace>/.pisces/config.json", a
   const workspace = join(root, "workspace");
   await writeJson(join(configDir, "config.json"), {
     defaultWorkspace: "/workspace/one",
-    defaultProvider: "provider",
-    defaultModel: "model",
+    defaults: { provider: "provider", model: "model" },
     extensions: ["pkg#a"],
     entryConfig: { "pkg#wrapper": { keep: 1, nested: { x: 1, y: 2 } } },
   });
   await writeJson(join(workspace, ".pisces", "config.json"), {
-    defaultProvider: "provider2",
-    defaultModel: "model2",
+    defaults: { provider: "provider2", model: "model2" },
     entryConfig: { "pkg#wrapper": { nested: { y: 4 } } },
   });
   expect(await readWorkspaceConfig(configDir, workspace)).toEqual({
     defaultWorkspace: "/workspace/one",
-    defaultProvider: "provider2",
-    defaultModel: "model2",
+    defaults: { provider: "provider2", model: "model2" },
     extensions: ["pkg#a"],
     entryConfig: { "pkg#wrapper": { keep: 1, nested: { x: 1, y: 4 } } },
   });
@@ -368,10 +432,11 @@ test("readWorkspaceConfig tolerates a missing workspace layer", async () => {
   const configDir = join(root, "config");
   const workspace = join(root, "workspace");
   await mkdir(workspace, { recursive: true });
-  await writeJson(join(configDir, "config.json"), { defaultProvider: "p", defaultModel: "m" });
+  await writeJson(join(configDir, "config.json"), {
+    defaults: { provider: "p", model: "m" },
+  });
   expect(await readWorkspaceConfig(configDir, workspace)).toEqual({
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
   });
   expect(await readWorkspaceConfig(join(root, "absent-config"), workspace)).toEqual({});
 });
@@ -385,7 +450,7 @@ test("readWorkspaceConfig rejects workspace defaultWorkspace and pairing violati
   expect(unknown.code).toBe("config.unknown_key");
   expect(unknown.message).toBe(UNKNOWN_KEY);
 
-  await writeJson(join(workspace, ".pisces", "config.json"), { defaultProvider: "p" });
+  await writeJson(join(workspace, ".pisces", "config.json"), { defaults: { provider: "p" } });
   expect((await rejects(() => readWorkspaceConfig(configDir, workspace))).code).toBe(
     "config.invalid",
   );

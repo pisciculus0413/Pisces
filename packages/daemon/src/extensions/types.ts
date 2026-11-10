@@ -15,9 +15,8 @@ export interface ExtensionsOptions {
 }
 
 export interface ExtensionConfig {
+  defaults?: { provider: string; model: string };
   defaultWorkspace?: string;
-  defaultProvider?: string;
-  defaultModel?: string;
   extensions?: EntryName[];
   entryConfig?: Record<string, JsonObject>;
 }

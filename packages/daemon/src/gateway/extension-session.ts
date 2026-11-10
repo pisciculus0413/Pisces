@@ -129,8 +129,8 @@ export async function prepareExtensionSession(
   const hasModel = params.model !== undefined;
   if (hasProvider !== hasModel)
     throw new PiscesError("session.model_required", "Provider and model are required");
-  const provider = hasProvider ? params.provider : binding.config.defaultProvider;
-  const model = hasModel ? params.model : binding.config.defaultModel;
+  const provider = hasProvider ? params.provider : binding.config.defaults?.provider;
+  const model = hasModel ? params.model : binding.config.defaults?.model;
   if (provider === undefined || model === undefined)
     throw new PiscesError("session.model_required", "Provider and model are required");
 

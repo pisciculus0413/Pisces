@@ -415,8 +415,7 @@ test("serves a configured extension session, runs its TS tool, then stops cleanl
   const sentinel = join(root, "tool.log");
   await addTool(workspace, sentinel);
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [RUN],
   });
   const configDir = join(root, "config");
@@ -504,8 +503,7 @@ test("resolves the default builtin directory from the module URL, not the workin
   const sentinel = join(root, "cwd-tool.log");
   await addTool(workspace, sentinel);
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [RUN],
   });
   const configDir = join(root, "config");
@@ -576,8 +574,7 @@ test("a bounded dist child serves an extension session over a real socket and ru
   const sentinel = join(root, "dist-tool.log");
   await addTool(workspace, sentinel);
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [RUN],
   });
   // A genuinely invalid package: an unparseable package.json yields `extensions.invalid`

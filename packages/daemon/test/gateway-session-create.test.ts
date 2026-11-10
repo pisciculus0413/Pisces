@@ -232,7 +232,7 @@ test("does not enter configuration mode from workspace config alone", async () =
   await mkdir(join(workspace, ".pisces"), { recursive: true });
   await writeFile(
     join(workspace, ".pisces", "config.json"),
-    JSON.stringify({ extensions: ["pkg#tool"], defaultProvider: "p", defaultModel: "m" }),
+    JSON.stringify({ extensions: ["pkg#tool"], defaults: { provider: "p", model: "m" } }),
     "utf8",
   );
   const h = await openHarness();

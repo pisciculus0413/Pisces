@@ -5,8 +5,18 @@
  */
 
 export type { ProtocolEvent } from "@pisces/protocol";
+export {
+  type ConfigScope,
+  mergeConfigLayers,
+  parseExtensionConfig,
+  parseExtensionConfigText,
+  readConfigLayer,
+  readGlobalConfig,
+  readWorkspaceConfig,
+} from "./extensions/config.js";
 export type {
   ExtensionBinding,
+  ExtensionConfig,
   Extensions,
   ExtensionsOptions,
 } from "./extensions/types.js";

@@ -215,6 +215,63 @@ test("loadConfig reads a valid file", async () => {
   expect(config.defaults).toEqual({ provider: "openai", model: "m" });
 });
 
+test("loadConfig accepts the global union of cli and extension keys", async () => {
+  const dir = await tempDir();
+  const path = join(dir, "config.json");
+  await writeFile(
+    path,
+    JSON.stringify(
+      raw({
+        defaults: { provider: "openai", model: "m" },
+        templatesDir: "/srv/pisces/templates",
+        defaultWorkspace: "/home/u/projects/notes",
+        extensions: ["@pisces/builtin-shell#shell"],
+        entryConfig: { "@scope/pkg#wrapper": { timeoutMs: 5000 } },
+      }),
+    ),
+  );
+  const config = await loadConfig(path);
+  expect(config.dataDir).toBe("/tmp/pisces");
+  expect(config.defaults).toEqual({ provider: "openai", model: "m" });
+  expect(config.templatesDir).toBe("/srv/pisces/templates");
+  expect(Object.keys(config).sort()).toEqual(["dataDir", "defaults", "providers", "templatesDir"]);
+});
+
+test("parseConfig accepts and ignores extension keys without validating them", () => {
+  const config = parseConfig(
+    raw({
+      defaultWorkspace: 3,
+      extensions: "not-an-array",
+      entryConfig: ["not", "an", "object"],
+    }),
+  );
+  expect(Object.keys(config).sort()).toEqual(["dataDir", "providers"]);
+  expectInvalid(() => parseConfig(raw({ unknown: true })));
+  expectInvalid(() => parseConfig(raw({ defaultProviders: { provider: "openai" } })));
+});
+
+test("loadConfig ignores malformed extension keys on the lifecycle path", async () => {
+  const dir = await tempDir();
+  const path = join(dir, "config.json");
+  for (const extensionKeys of [
+    { extensions: "pkg#a" },
+    { extensions: [1] },
+    { defaultWorkspace: "relative/path" },
+    { entryConfig: [] },
+    { entryConfig: { "not an entry": {} } },
+  ]) {
+    await writeFile(path, JSON.stringify(raw(extensionKeys)));
+    await expect(loadConfig(path)).resolves.toMatchObject({ dataDir: "/tmp/pisces" });
+  }
+});
+
+test("loadConfig still requires the strict cli group", async () => {
+  const dir = await tempDir();
+  const path = join(dir, "config.json");
+  await writeFile(path, JSON.stringify({ extensions: [], defaultWorkspace: "/ws" }));
+  await expect(loadConfig(path)).rejects.toMatchObject({ code: "config.invalid" });
+});
+
 test("loadConfig maps missing files and malformed json to config.invalid", async () => {
   const dir = await tempDir();
   await expect(loadConfig(join(dir, "missing.json"))).rejects.toMatchObject({

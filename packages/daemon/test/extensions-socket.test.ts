@@ -573,8 +573,7 @@ test("serves a frozen declaration, snapshot projection and first-invoke tools ov
   const workspace = await workspaceDir(root, "ws");
   const paths = await installDemo(workspace, root);
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [RUN, GUIDE, NOTE],
   });
   const configDir = join(root, "config");
@@ -689,7 +688,7 @@ test("edits and removes queue entries, locks confirmed ones and isolates subscri
   const root = await tempRoot();
   const workspace = await workspaceDir(root, "ws");
   const paths = await installDemo(workspace, root);
-  await writeWorkspaceConfig(workspace, { defaultProvider: "p", defaultModel: "m" });
+  await writeWorkspaceConfig(workspace, { defaults: { provider: "p", model: "m" } });
   const configDir = join(root, "config");
   const gateFirst = gate();
   const record: CapturedRequest[] = [];
@@ -785,8 +784,7 @@ test("filters deselected content, reuses reviewed bodies and retries a zero-frag
   const workspace = await workspaceDir(root, "ws");
   const paths = await installDemo(workspace, root);
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [NOTE],
   });
   const configDir = join(root, "config");
@@ -861,8 +859,7 @@ test("merges wrapper sidecar defaults with user config and fails mismatches safe
   const paths = await installDemo(workspace, root);
   await installHostileWrapper(workspace);
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [RUN, WRAP],
     entryConfig: { [WRAP]: { tag: "user" } },
   });
@@ -895,8 +892,7 @@ test("merges wrapper sidecar defaults with user config and fails mismatches safe
   const hostilePaths = await installDemo(hostile, hostileRoot);
   await installHostileWrapper(hostile);
   await writeWorkspaceConfig(hostile, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [RUN, GUARD],
   });
   const before = record.length;
@@ -932,8 +928,7 @@ test("isolates discovery conflicts without blocking the daemon or healthy entrie
   }
   await writeText(join(workspace, ".pisces", "extensions", "broken", "package.json"), "{ nope\n");
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [RUN],
   });
   const configDir = join(root, "config");
@@ -973,8 +968,7 @@ test("keeps a registered turn running after its client disconnects (g)", {
   const workspace = await workspaceDir(root, "ws");
   await installDemo(workspace, root);
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [RUN],
   });
   const configDir = join(root, "config");
@@ -1018,8 +1012,7 @@ test("a source resolver that ignores cancellation does not commit the pending ba
   const workspace = await workspaceDir(root, "ws");
   const slow = await installSlowSource(workspace, root);
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
   });
   const configDir = join(root, "config");
   const { client } = await openDaemon({ dataDir: join(root, "data"), configDir });
@@ -1078,8 +1071,7 @@ test("answers an oversized snapshot with a safe error and keeps the connection u
   const workspace = await workspaceDir(root, "ws");
   await installWideTool(workspace);
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [],
   });
   const configDir = join(root, "config");
@@ -1106,8 +1098,7 @@ test("keeps config values, paths, nested causes and source bodies off the wire (
   const paths = await installDemo(workspace, root);
   const secret = "sk-live-socket-secret-value";
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [RUN, WRAP],
     entryConfig: { [WRAP]: { token: secret } },
   });
@@ -1156,8 +1147,7 @@ test("keeps config values, paths, nested causes and source bodies off the wire (
     },
   });
   await writeWorkspaceConfig(hostile, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: ["leaky#boom"],
   });
   const leaky = await createSession(client, { workspace: hostile, systemPrompt: ["x"] });
@@ -1349,8 +1339,7 @@ test("rejects a real cross-UID client before it reads any protocol byte", {
   const workspace = await workspaceDir(root, "ws");
   await installDemo(workspace, root);
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [RUN],
   });
   const configDir = join(root, "config");
@@ -1415,8 +1404,7 @@ test("stops cleanly and shows a stale definition until the entry is reselected",
   const workspace = await workspaceDir(root, "ws");
   const paths = await installDemo(workspace, root);
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [RUN],
   });
   const configDir = join(root, "config");
@@ -1537,8 +1525,7 @@ test("runs the built-in shell over a real socket with selection, output and cwd 
   const root = await tempRoot();
   const workspace = await workspaceDir(root, "ws");
   await writeWorkspaceConfig(workspace, {
-    defaultProvider: "p",
-    defaultModel: "m",
+    defaults: { provider: "p", model: "m" },
     extensions: [],
   });
   const configDir = join(root, "config");

@@ -335,8 +335,7 @@ describe("prepareExtensionSession", () => {
     const tool = await addTool(ws, sentinel);
     await writeWorkspaceConfig(ws, {
       extensions: [tool],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const real = createExtensions(options);
     const validated: string[] = [];
@@ -367,7 +366,7 @@ describe("prepareExtensionSession", () => {
 
   test("rejects a failed workspace validation and a lone provider or model", async () => {
     const ws = await workspaceDir("prepare-invalid");
-    await writeWorkspaceConfig(ws, { defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { defaults: { provider: "p", model: "m" } });
     const real = createExtensions(options);
 
     await expect(
@@ -389,8 +388,7 @@ describe("session.create in configuration mode", () => {
     const tool = await addTool(ws, sentinel);
     await writeWorkspaceConfig(ws, {
       extensions: [tool],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const h = await openHarness({
       extensions: createExtensions(options),
@@ -430,8 +428,7 @@ describe("session.create in configuration mode", () => {
     const tool = await addTool(ws, join(root, "empty.log"));
     await writeWorkspaceConfig(ws, {
       extensions: [tool],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const h = await openHarness({
       extensions: createExtensions(options),
@@ -456,8 +453,7 @@ describe("session.create in configuration mode", () => {
     const wrap = await addWrap(ws, sentinel);
     await writeWorkspaceConfig(ws, {
       extensions: [wrap],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const h = await openHarness({
       extensions: createExtensions(options),
@@ -478,7 +474,7 @@ describe("session.create in configuration mode", () => {
   test("requires a provider/model pair, prefers explicit values and validates the catalogue", async () => {
     const ws = await workspaceDir("models");
     await addTool(ws, join(root, "models.log"));
-    await writeWorkspaceConfig(ws, { defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { defaults: { provider: "p", model: "m" } });
     const h = await openHarness({
       extensions: createExtensions(options),
       newSessionId: sequentialIds(),
@@ -508,7 +504,7 @@ describe("session.create in configuration mode", () => {
     const wsA = await workspaceDir("ws-a");
     const wsB = await workspaceDir("ws-b");
     await addTool(wsA, join(root, "ws-a.log"));
-    await writeWorkspaceConfig(wsA, { defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(wsA, { defaults: { provider: "p", model: "m" } });
     await writeGlobal({ defaultWorkspace: wsA });
     const h = await openHarness({
       extensions: createExtensions(options),
@@ -537,8 +533,7 @@ describe("session.create in configuration mode", () => {
     const tool = await addTool(ws, sentinel);
     await writeWorkspaceConfig(ws, {
       extensions: [tool],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const h = await openHarness({
       extensions: createExtensions(options),
@@ -561,8 +556,7 @@ describe("session.create in configuration mode", () => {
     const tool = await addTool(ws, sentinel, "x".repeat(300_000));
     await writeWorkspaceConfig(ws, {
       extensions: [tool],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const h = await openHarness({
       extensions: createExtensions(options),
@@ -592,8 +586,7 @@ describe("session.create in configuration mode", () => {
     await addTool(ws, sentinel, "version one");
     await writeWorkspaceConfig(ws, {
       extensions: [RUN],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const real = createExtensions(options);
     let prepared = 0;
@@ -642,10 +635,10 @@ describe("session lifecycle in configuration mode", () => {
     const wsA = await workspaceDir("restart-a");
     const wsB = await workspaceDir("restart-b");
     const tool = await addTool(wsA, join(root, "restart.log"), "version one");
-    await writeWorkspaceConfig(wsA, { defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(wsA, { defaults: { provider: "p", model: "m" } });
     await addSource(wsB, join(root, "restart-b.log"));
     await writeWorkspaceConfig(wsB, { extensions: [NOTE] });
-    await writeGlobal({ defaultWorkspace: wsB, defaultProvider: "p", defaultModel: "m2" });
+    await writeGlobal({ defaultWorkspace: wsB, defaults: { provider: "p", model: "m2" } });
 
     const real = createExtensions(options);
     const frozen = await real.prepare(await realpath(wsA));
@@ -705,7 +698,7 @@ describe("session lifecycle in configuration mode", () => {
   test("keeps a persisted session readable only while its workspace resolves", async () => {
     const ws = await workspaceDir("gone-workspace");
     await addTool(ws, join(root, "gone-workspace.log"));
-    await writeWorkspaceConfig(ws, { extensions: [RUN], defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { extensions: [RUN], defaults: { provider: "p", model: "m" } });
     const canonical = await realpath(ws);
     const h = await openHarness({
       extensions: createExtensions(options),
@@ -748,7 +741,7 @@ describe("session lifecycle in configuration mode", () => {
     const ws = await workspaceDir("lock-prepare");
     const sentinel = join(root, "lock-prepare.log");
     await addTool(ws, sentinel);
-    await writeWorkspaceConfig(ws, { defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { defaults: { provider: "p", model: "m" } });
     const real = createExtensions(options);
     let prepares = 0;
     const counting: Extensions = {
@@ -792,8 +785,7 @@ describe("session lifecycle in configuration mode", () => {
     await addTool(ws, sentinel);
     await writeWorkspaceConfig(ws, {
       extensions: [RUN],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     let step = 0;
     const toolCalling: LlmAdapter = {
@@ -869,8 +861,7 @@ describe("session lifecycle in configuration mode", () => {
     });
     await writeWorkspaceConfig(ws, {
       extensions: [RUN],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     let step = 0;
     const toolCalling: LlmAdapter = {
@@ -933,7 +924,7 @@ describe("session lifecycle in configuration mode", () => {
     const sentinel = join(root, "budget-entry.log");
     const metaPath = join(ws, ".pisces", "extensions", "demo", "tools", "run.ts.meta.json");
     const tool = await addTool(ws, sentinel, "x".repeat(200_000));
-    await writeWorkspaceConfig(ws, { extensions: [], defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { extensions: [], defaults: { provider: "p", model: "m" } });
     const h = await openHarness({
       extensions: createExtensions(options),
       newSessionId: sequentialIds(),
@@ -972,7 +963,7 @@ describe("session lifecycle in configuration mode", () => {
   test("counts server ids and timestamps when rejecting a batch over 1 MiB", async () => {
     const ws = await workspaceDir("budget-queue");
     await addTool(ws, join(root, "budget-queue.log"));
-    await writeWorkspaceConfig(ws, { extensions: [], defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { extensions: [], defaults: { provider: "p", model: "m" } });
     const h = await openHarness({
       extensions: createExtensions(options),
       newSessionId: sequentialIds(),
@@ -1013,7 +1004,7 @@ describe("session lifecycle in configuration mode", () => {
     const ws = await workspaceDir("enqueue");
     const sentinel = join(root, "enqueue.log");
     const tool = await addTool(ws, sentinel);
-    await writeWorkspaceConfig(ws, { extensions: [], defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { extensions: [], defaults: { provider: "p", model: "m" } });
     const h = await openHarness({
       extensions: createExtensions(options),
       newSessionId: sequentialIds(),

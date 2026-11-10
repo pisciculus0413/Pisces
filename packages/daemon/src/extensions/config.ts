@@ -9,13 +9,9 @@ const UNKNOWN_KEY = "Unknown extension configuration key";
 export type ConfigScope = "global" | "workspace";
 
 const ENTRY_NAME = /^[^#\s]+#[^#\s]+$/u;
-const CONFIG_KEYS = new Set([
-  "defaultWorkspace",
-  "defaultProvider",
-  "defaultModel",
-  "extensions",
-  "entryConfig",
-]);
+// CLI-owned keys are accepted and skipped in the global scope only: the CLI validator owns their
+// semantics and the daemon never reads them.
+const CLI_KEYS = new Set(["dataDir", "providers", "templatesDir"]);
 
 function invalid(): never {
   throw new PiscesError("config.invalid", INVALID);
@@ -80,35 +76,35 @@ function parseEntryConfig(value: unknown): Record<string, JsonObject> {
   return result;
 }
 
-function parseLayer(text: string, scope: ConfigScope): ExtensionConfig {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    invalid();
+function parseDefaults(value: unknown): { provider: string; model: string } {
+  if (!isRecord(value)) invalid();
+  for (const key of Object.keys(value)) {
+    if (key !== "provider" && key !== "model") invalid();
   }
+  const provider = value.provider;
+  const model = value.model;
+  if (typeof provider !== "string" || provider.length === 0) invalid();
+  if (typeof model !== "string" || model.length === 0) invalid();
+  return { provider, model };
+}
+
+function parseLayer(raw: unknown, scope: ConfigScope): ExtensionConfig {
   if (!isRecord(raw)) invalid();
   const config: ExtensionConfig = {};
-  let hasProvider = false;
-  let hasModel = false;
   for (const key of Object.keys(raw)) {
     const value = raw[key];
-    if (!CONFIG_KEYS.has(key)) unknownKey();
-    if (scope === "workspace" && key === "defaultWorkspace") unknownKey();
+    if (CLI_KEYS.has(key)) {
+      if (scope === "global") continue;
+      unknownKey();
+    }
+    if (key === "defaultWorkspace" && scope === "workspace") unknownKey();
     switch (key) {
+      case "defaults":
+        config.defaults = parseDefaults(value);
+        break;
       case "defaultWorkspace":
         if (typeof value !== "string" || !isAbsolute(value)) invalid();
         config.defaultWorkspace = value;
-        break;
-      case "defaultProvider":
-        if (typeof value !== "string" || value.length === 0) invalid();
-        config.defaultProvider = value;
-        hasProvider = true;
-        break;
-      case "defaultModel":
-        if (typeof value !== "string" || value.length === 0) invalid();
-        config.defaultModel = value;
-        hasModel = true;
         break;
       case "extensions":
         if (!Array.isArray(value) || !value.every(isEntryName)) invalid();
@@ -121,8 +117,27 @@ function parseLayer(text: string, scope: ConfigScope): ExtensionConfig {
         unknownKey();
     }
   }
-  if (hasProvider !== hasModel) invalid();
   return config;
+}
+
+/** Pure layer parser shared with the CLI; CLI keys are skipped in the global scope. */
+export function parseExtensionConfig(value: unknown, scope: ConfigScope): ExtensionConfig {
+  try {
+    return parseLayer(value, scope);
+  } catch (error) {
+    rethrowKnown(error);
+  }
+}
+
+/** Pure text parser shared with the CLI; malformed JSON is a fixed `config.invalid`. */
+export function parseExtensionConfigText(text: string, scope: ConfigScope): ExtensionConfig {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    invalid();
+  }
+  return parseExtensionConfig(raw, scope);
 }
 
 function mergeJson(base: JsonObject, patch: JsonObject): JsonObject {
@@ -149,7 +164,7 @@ export async function readConfigLayer(path: string, scope: ConfigScope): Promise
     invalid();
   }
   try {
-    return parseLayer(text, scope);
+    return parseExtensionConfigText(text, scope);
   } catch (error) {
     rethrowKnown(error);
   }
@@ -169,8 +184,7 @@ function mergeLayers(layers: readonly ExtensionConfig[]): ExtensionConfig {
   let hasEntryConfig = false;
   for (const layer of layers) {
     if (layer.defaultWorkspace !== undefined) result.defaultWorkspace = layer.defaultWorkspace;
-    if (layer.defaultProvider !== undefined) result.defaultProvider = layer.defaultProvider;
-    if (layer.defaultModel !== undefined) result.defaultModel = layer.defaultModel;
+    if (layer.defaults !== undefined) result.defaults = { ...layer.defaults };
     if (layer.extensions !== undefined) result.extensions = [...layer.extensions];
     if (layer.entryConfig === undefined) continue;
     hasEntryConfig = true;

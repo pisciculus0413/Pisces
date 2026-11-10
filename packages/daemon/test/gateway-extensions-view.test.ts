@@ -481,8 +481,7 @@ describe("entries.snapshot", () => {
     const tool = await addTool(ws, join(root, "snapshot-temp.log"));
     await writeWorkspaceConfig(ws, {
       extensions: [tool],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const h = await openHarness({
       extensions: createExtensions(options),
@@ -523,7 +522,7 @@ describe("entries.snapshot", () => {
     const ws = await workspaceDir("snapshot-stale");
     const sentinel = join(root, "snapshot-stale.log");
     const tool = await addTool(ws, sentinel);
-    await writeWorkspaceConfig(ws, { defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { defaults: { provider: "p", model: "m" } });
     const real = createExtensions(options);
     const frozen = await real.prepare(await realpath(ws));
     const definition = definitionOf(frozen, tool);
@@ -565,8 +564,7 @@ describe("entries.snapshot", () => {
     const wrap = await addWrap(ws, join(root, "snapshot-secret.log"));
     await writeWorkspaceConfig(ws, {
       extensions: [wrap],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
       entryConfig: { [wrap]: { token: secret } },
     });
     const h = await openHarness({
@@ -635,8 +633,7 @@ describe("entries.snapshot", () => {
     await addTool(ws, join(root, "snapshot-large.log"), description);
     await writeWorkspaceConfig(ws, {
       extensions: [],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const h = await openHarness({
       extensions: createExtensions(options),
@@ -669,8 +666,7 @@ describe("entries.snapshot", () => {
     await addTool(probeWs, join(root, "probe.log"), "x".repeat(64));
     await writeWorkspaceConfig(probeWs, {
       extensions: [],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const h = await openHarness({
       extensions: createExtensions(options),
@@ -686,8 +682,7 @@ describe("entries.snapshot", () => {
     await addTool(exactWs, join(root, "exact.log"), "x".repeat(length));
     await writeWorkspaceConfig(exactWs, {
       extensions: [],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const meta = (await createSession(h, { workspace: exactWs })).result as unknown as SessionMeta;
 
@@ -719,7 +714,7 @@ describe("queue routes with a frozen binding", () => {
   test("edits an unconfirmed agent entry once through Core", async () => {
     const ws = await workspaceDir("queue-edit");
     await addTool(ws, join(root, "queue-edit.log"));
-    await writeWorkspaceConfig(ws, { extensions: [], defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { extensions: [], defaults: { provider: "p", model: "m" } });
     const h = await openHarness({
       extensions: createExtensions(options),
       newSessionId: sequentialIds(),
@@ -751,8 +746,7 @@ describe("queue routes with a frozen binding", () => {
     const tool = await addTool(ws, join(root, "queue-confirmed.log"));
     await writeWorkspaceConfig(ws, {
       extensions: [tool],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const h = await openHarness({
       extensions: createExtensions(options),
@@ -806,8 +800,7 @@ describe("queue routes with a frozen binding", () => {
     const wrap = await addWrap(ws, join(root, "queue-secret.log"));
     await writeWorkspaceConfig(ws, {
       extensions: [wrap],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
       entryConfig: { [wrap]: { token: secret } },
     });
     const h = await openHarness({
@@ -905,7 +898,7 @@ describe("turn.start declaration validation", () => {
   test("rejects a cross-type reopen on the target branch before any marker or state change", async () => {
     const ws = await workspaceDir("cross-type");
     const tool = await addTool(ws, join(root, "cross-type.log"));
-    await writeWorkspaceConfig(ws, { defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { defaults: { provider: "p", model: "m" } });
     const real = createExtensions(options);
     const frozen = await real.prepare(await realpath(ws));
     const current = definitionOf(frozen, tool);
@@ -947,7 +940,7 @@ describe("turn.start declaration validation", () => {
   test("validates steer against the original branch before the first commit", async () => {
     const ws = await workspaceDir("steer-before");
     const tool = await addTool(ws, join(root, "steer-before.log"));
-    await writeWorkspaceConfig(ws, { defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { defaults: { provider: "p", model: "m" } });
     const real = createExtensions(options);
     const frozen = await real.prepare(await realpath(ws));
     const current = definitionOf(frozen, tool);
@@ -1002,8 +995,7 @@ describe("turn.start declaration validation", () => {
     const tool = await addTool(ws, join(root, "steer-after.log"));
     await writeWorkspaceConfig(ws, {
       extensions: [tool],
-      defaultProvider: "p",
-      defaultModel: "m",
+      defaults: { provider: "p", model: "m" },
     });
     const h = await openHarness({
       extensions: createExtensions(options),
@@ -1057,7 +1049,7 @@ describe("turn.start declaration validation", () => {
   test("confirms a same-kind reopen on another branch after removing a queued declaration", async () => {
     const ws = await workspaceDir("same-kind");
     const tool = await addTool(ws, join(root, "same-kind.log"));
-    await writeWorkspaceConfig(ws, { defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { defaults: { provider: "p", model: "m" } });
     const real = createExtensions(options);
     const frozen = await real.prepare(await realpath(ws));
     const definition = definitionOf(frozen, tool);
@@ -1109,7 +1101,7 @@ describe("daemon route surface", () => {
   test("keeps unknown methods unknown and rejects malformed queue parameters", async () => {
     const ws = await workspaceDir("malformed");
     await addTool(ws, join(root, "malformed.log"));
-    await writeWorkspaceConfig(ws, { extensions: [], defaultProvider: "p", defaultModel: "m" });
+    await writeWorkspaceConfig(ws, { extensions: [], defaults: { provider: "p", model: "m" } });
     const h = await openHarness({
       extensions: createExtensions(options),
       newSessionId: sequentialIds(),
