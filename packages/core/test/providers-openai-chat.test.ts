@@ -624,3 +624,35 @@ test("rejects unsafe or malformed responses without leaking provider details", a
     }),
   );
 });
+
+test("fits long ASCII entry names with a compact reversible wire name", async () => {
+  const { createOpenAiChatAdapter } = await import("../src/index.js");
+  const adapter = createOpenAiChatAdapter();
+  const shell = "@pisces/builtin-shell#shell" as EntryName;
+  const wire = adapter.buildRequest({
+    model: "m",
+    messages: [message("user", text("go"))],
+    tools: [{ name: shell, description: "shell", parameters: { type: "object" } }],
+  });
+  const toolName = (JSON.parse(wire.body) as { tools: { function: { name: string } }[] }).tools[0]
+    ?.function.name as string;
+  expect(toolName.length).toBeLessThanOrEqual(64);
+  expect(toolName).not.toBe(encodeWireName(shell));
+
+  const events = adapter.parseChunk(
+    chunk({
+      tool_calls: [
+        {
+          index: 0,
+          id: "call_1",
+          function: { name: toolName, arguments: '{"command":"printf tool-ok"}' },
+        },
+      ],
+    }),
+  );
+  const stopped = adapter.parseChunk(chunk({}, "tool_calls"));
+  expect([...events, ...stopped]).toContainEqual({
+    type: "toolCall",
+    call: { id: "call_1", name: shell, arguments: { command: "printf tool-ok" } },
+  });
+});

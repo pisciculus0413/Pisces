@@ -2,18 +2,9 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import {
-  type ContentBlock,
-  createProviderManagement,
-  type EntryName,
-  type JsonValue,
-  type LlmAdapter,
-  type LlmRequest,
-  type ProviderManagement,
-} from "@pisces/core";
+import type { ContentBlock, EntryName } from "@pisces/core";
 import {
   type DaemonHost,
-  type ProviderHost,
   type SessionListResult,
   type SessionReadResult,
   startDaemon,
@@ -33,13 +24,9 @@ import { type RunOptions, runCommand } from "../src/run.js";
  * extension read and workspace extension scan are the production code paths.
  * The CLI runs with production dependencies against that socket.
  *
- * Non-shell variants keep the real provider host and point `baseUrl` at a
- * localhost OpenAI-compatible SSE server. The built-in shell variants replace
- * only the provider seam with an in-memory `test` dialect: the encoded
- * `@pisces/builtin-shell#shell` wire name is 74 characters, above the 64-char
- * limit of the real openai-chat adapter (see the task report), so the adapter
- * wire format is deliberately out of scope for these shell assertions. The
- * extension config assembly and the shell execution itself stay real.
+ * Every variant keeps the real provider host: `baseUrl` points at a localhost
+ * OpenAI-compatible SSE server, including the built-in shell turn, whose long
+ * ASCII entry name exercises the adapter's compact wire-name fallback.
  */
 
 const KEY_ENV = "PISCES_EXTENSIONS_E2E_KEY";
@@ -227,81 +214,6 @@ async function startAcceptanceDaemon(fixture: Fixture): Promise<DaemonHost> {
   return host;
 }
 
-/**
- * Calls the shell when the request declares it and the latest message is not
- * a result, then finishes with text; records every request for assertions.
- */
-function shellAdapter(captured: LlmRequest[], toolArguments: JsonValue, final: string): LlmAdapter {
-  let pendingToolCall = false;
-  return {
-    dialect: "test",
-    buildRequest(request) {
-      captured.push(request);
-      const declaresShell = (request.tools ?? []).some((tool) => tool.name === SHELL);
-      pendingToolCall = declaresShell && request.messages.at(-1)?.role !== "tool";
-      return { path: "/v1/chat/completions", body: JSON.stringify({ model: request.model }) };
-    },
-    parseChunk() {
-      const call = pendingToolCall;
-      pendingToolCall = false;
-      if (call) {
-        return [
-          {
-            type: "toolCall" as const,
-            call: { id: "call_1", name: SHELL, arguments: toolArguments },
-          },
-          { type: "stop" as const, reason: "toolCall" as const },
-        ];
-      }
-      return [
-        { type: "content" as const, delta: final },
-        { type: "stop" as const, reason: "stop" as const },
-      ];
-    },
-  };
-}
-
-function shellProviders(adapter: LlmAdapter): ProviderManagement {
-  const providers = createProviderManagement();
-  providers.registerProvider({
-    id: "stub",
-    dialect: "test",
-    baseUrl: "https://provider.test/v1",
-    auth: { type: "apiKey", credentialRef: "stub" },
-    models: [{ id: "m", contextWindow: 1000, maxOutput: 100, modalities: ["text"] }],
-  });
-  providers.registerDialect("test", () => adapter);
-  return providers;
-}
-
-const immediateFrames: ProviderHost = {
-  execute() {
-    return async function* () {
-      yield "frame";
-    };
-  },
-  async ready() {
-    return true;
-  },
-};
-
-/** Same assembly as `pisces start`, with only the provider seam replaced. */
-async function startShellDaemon(
-  fixture: Fixture,
-  captured: LlmRequest[],
-  toolArguments: JsonValue,
-  final: string,
-): Promise<DaemonHost> {
-  const options = await daemonOptionsFor(fixture);
-  const host = await startDaemon({
-    ...options,
-    providers: shellProviders(shellAdapter(captured, toolArguments, final)),
-    providerHost: immediateFrames,
-  });
-  hosts.push(host);
-  return host;
-}
-
 interface Recorder {
   io: CommandIo;
   out: string[];
@@ -344,8 +256,6 @@ const toolCallNames = (read: SessionReadResult): string[] =>
   read.records.flatMap((record) =>
     record.content.flatMap((block) => (block.type === "toolCall" ? [block.name] : [])),
   );
-
-const requestText = (request: LlmRequest | undefined): string => JSON.stringify(request?.messages);
 
 interface ObservedSession {
   sessions: SessionListResult["sessions"];
@@ -395,34 +305,28 @@ test("a configured shell extension starts from buildDaemonOptions and run execut
   timeout: SOCKET_TIMEOUT_MS,
 }, async () => {
   const fixture = await makeFixture();
-  await writeConfig(
-    fixture.configPath,
-    fixture.dataDir,
-    fixture.workspace,
-    "http://127.0.0.1:9/v1",
-    [SHELL],
-  );
+  const server = await startSseServer({
+    final: "shell-final",
+    toolArguments: { command: `printf ${SHELL_OUTPUT}` },
+  });
+  await writeConfig(fixture.configPath, fixture.dataDir, fixture.workspace, server.baseUrl, [
+    SHELL,
+  ]);
 
   const options = await daemonOptionsFor(fixture);
   // The CLI always injects the exact config file; the daemon reads extensions from it.
   expect(options.extensions).toEqual({ configPath: fixture.configPath });
 
-  const captured: LlmRequest[] = [];
-  const host = await startShellDaemon(
-    fixture,
-    captured,
-    { command: `printf ${SHELL_OUTPUT}` },
-    "shell-final",
-  );
+  const host = await startAcceptanceDaemon(fixture);
   const rec = recorder();
   expect(await runCommand(runOptions(fixture, { io: rec.io }))).toBe(0);
   expect(rec.err).toEqual([]);
   expect(rec.out).toEqual(["shell-final"]);
 
-  // The provider loop saw the shell declaration, then the real command output.
-  expect(captured).toHaveLength(2);
-  expect(captured[0]?.tools?.map((tool) => tool.name)).toEqual([SHELL]);
-  expect(requestText(captured[1])).toContain(SHELL_OUTPUT);
+  // The real provider loop saw the shell declaration, then the command output.
+  expect(server.requests).toHaveLength(2);
+  expect(server.requests[0]?.tools).toHaveLength(1);
+  expect(JSON.stringify(server.requests[1]?.messages)).toContain(SHELL_OUTPUT);
 
   const { sessions, read } = await observedSession(host);
   expect(sessions[0]?.workspace).toBe(fixture.workspace);
@@ -439,28 +343,21 @@ test("run --enable selects the shell when the config declares no extensions", {
   timeout: SOCKET_TIMEOUT_MS,
 }, async () => {
   const fixture = await makeFixture();
-  await writeConfig(
-    fixture.configPath,
-    fixture.dataDir,
-    fixture.workspace,
-    "http://127.0.0.1:9/v1",
-  );
+  const server = await startSseServer({
+    final: "enabled-final",
+    toolArguments: { command: `printf ${SHELL_OUTPUT}` },
+  });
+  await writeConfig(fixture.configPath, fixture.dataDir, fixture.workspace, server.baseUrl);
 
-  const captured: LlmRequest[] = [];
-  const host = await startShellDaemon(
-    fixture,
-    captured,
-    { command: `printf ${SHELL_OUTPUT}` },
-    "enabled-final",
-  );
+  const host = await startAcceptanceDaemon(fixture);
   const rec = recorder();
   expect(await runCommand(runOptions(fixture, { io: rec.io, enable: [SHELL] }))).toBe(0);
   expect(rec.err).toEqual([]);
   expect(rec.out).toEqual(["enabled-final"]);
 
-  expect(captured).toHaveLength(2);
-  expect(captured[0]?.tools?.map((tool) => tool.name)).toEqual([SHELL]);
-  expect(requestText(captured[1])).toContain(SHELL_OUTPUT);
+  expect(server.requests).toHaveLength(2);
+  expect(server.requests[0]?.tools).toHaveLength(1);
+  expect(JSON.stringify(server.requests[1]?.messages)).toContain(SHELL_OUTPUT);
 
   const { read } = await observedSession(host);
   expect(toolCallNames(read)).toEqual([SHELL]);

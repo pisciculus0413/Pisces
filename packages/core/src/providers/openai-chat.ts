@@ -1,7 +1,12 @@
 import type { LlmRequest } from "../context/types.js";
 import type { LlmAdapter, LlmEvent } from "../loop/types.js";
 import type { ContentBlock, EntryName, Message, StopReason, ToolCall, Usage } from "../messages.js";
-import { decodeWireName, encodeWireName } from "../tools/wire-name.js";
+import {
+  decodeCompactWireName,
+  decodeWireName,
+  encodeCompactWireName,
+  encodeWireName,
+} from "../tools/wire-name.js";
 import { type JsonObject, type JsonValue, PiscesError } from "../types.js";
 import type { LlmAdapterFactory } from "./types.js";
 
@@ -112,8 +117,12 @@ function validateOptions(options: OpenAiChatAdapterOptions | undefined): {
 
 function encodeToolName(name: string, maxLength: number): string {
   const encoded = encodeWireName(name as EntryName);
-  if (encoded.length > maxLength) fail("provider.invalid_response", TOOL_NAME_LIMIT);
-  return encoded;
+  if (encoded.length <= maxLength) return encoded;
+  // Long ASCII names fall back to a compact lossless form that still fits providers
+  // enforcing the usual 64-character function-name limit.
+  const compact = encodeCompactWireName(name as EntryName);
+  if (compact !== undefined && compact.length <= maxLength) return compact;
+  fail("provider.invalid_response", TOOL_NAME_LIMIT);
 }
 
 function flattenTextContent(blocks: ContentBlock[], role: string): string {
@@ -388,7 +397,7 @@ function parseArguments(value: string): JsonValue {
 
 function decodeToolName(value: string, maxLength: number): EntryName {
   if (!value.length || value.length > maxLength) invalidResponse();
-  const decoded = decodeWireName(value);
+  const decoded = decodeWireName(value) ?? decodeCompactWireName(value);
   if (!decoded) invalidResponse();
   return decoded;
 }

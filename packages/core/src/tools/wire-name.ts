@@ -2,15 +2,11 @@ import type { EntryName } from "../messages.js";
 
 const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const prefix = "t_";
+/** Compact form for ASCII-only names: one base64 character per six input bits. */
+const compactPrefix = "u_";
 
-export function encodeWireName(name: EntryName): string {
-  const bytes: number[] = [];
-  for (let index = 0; index < name.length; index++) {
-    const codeUnit = name.charCodeAt(index);
-    bytes.push(codeUnit & 0xff, codeUnit >>> 8);
-  }
-
-  let encoded = prefix;
+function base64UrlEncode(bytes: readonly number[]): string {
+  let encoded = "";
   for (let index = 0; index < bytes.length; index += 3) {
     const first = bytes[index] as number;
     const second = bytes[index + 1];
@@ -25,13 +21,10 @@ export function encodeWireName(name: EntryName): string {
   return encoded;
 }
 
-export function decodeWireName(value: string): EntryName | undefined {
-  if (!value.startsWith(prefix)) return undefined;
-  const encoded = value.slice(prefix.length);
-  if (encoded.length === 0 || encoded.length % 4 === 1) return undefined;
-
+function base64UrlDecode(value: string): number[] | undefined {
+  if (value.length === 0 || value.length % 4 === 1) return undefined;
   const values: number[] = [];
-  for (const character of encoded) {
+  for (const character of value) {
     const index = alphabet.indexOf(character);
     if (index < 0) return undefined;
     values.push(index);
@@ -45,13 +38,56 @@ export function decodeWireName(value: string): EntryName | undefined {
     const fourth = values[index + 3];
     bytes.push((first << 2) | (second >>> 4));
     if (third !== undefined) bytes.push(((second & 0b1111) << 4) | (third >>> 2));
-    if (fourth !== undefined) bytes.push(((third as number) << 6) | fourth);
+    if (fourth !== undefined) bytes.push((((third as number) & 0b11) << 6) | fourth);
   }
-  if (bytes.length % 2 !== 0) return undefined;
+  return bytes;
+}
+
+export function encodeWireName(name: EntryName): string {
+  const bytes: number[] = [];
+  for (let index = 0; index < name.length; index++) {
+    const codeUnit = name.charCodeAt(index);
+    bytes.push(codeUnit & 0xff, codeUnit >>> 8);
+  }
+  return prefix + base64UrlEncode(bytes);
+}
+
+export function decodeWireName(value: string): EntryName | undefined {
+  if (!value.startsWith(prefix)) return undefined;
+  const bytes = base64UrlDecode(value.slice(prefix.length));
+  if (bytes === undefined || bytes.length % 2 !== 0) return undefined;
 
   let decoded = "";
   for (let index = 0; index < bytes.length; index += 2) {
     decoded += String.fromCharCode((bytes[index] as number) | ((bytes[index + 1] as number) << 8));
   }
   return encodeWireName(decoded as EntryName) === value ? (decoded as EntryName) : undefined;
+}
+
+/**
+ * Compact lossless form for ASCII-only names, used as a fallback when the
+ * UTF-16LE form would exceed a provider's wire-name limit.
+ */
+export function encodeCompactWireName(name: EntryName): string | undefined {
+  if (name.length === 0) return undefined;
+  const bytes: number[] = [];
+  for (let index = 0; index < name.length; index++) {
+    const codeUnit = name.charCodeAt(index);
+    if (codeUnit > 0x7f) return undefined;
+    bytes.push(codeUnit);
+  }
+  return compactPrefix + base64UrlEncode(bytes);
+}
+
+export function decodeCompactWireName(value: string): EntryName | undefined {
+  if (!value.startsWith(compactPrefix)) return undefined;
+  const bytes = base64UrlDecode(value.slice(compactPrefix.length));
+  if (bytes === undefined || bytes.length === 0) return undefined;
+
+  let decoded = "";
+  for (const byte of bytes) {
+    if (byte > 0x7f) return undefined;
+    decoded += String.fromCharCode(byte);
+  }
+  return encodeCompactWireName(decoded as EntryName) === value ? (decoded as EntryName) : undefined;
 }
