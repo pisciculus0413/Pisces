@@ -660,7 +660,7 @@ test("fits long ASCII entry names with a compact reversible wire name", async ()
 test("rejects ASCII tool names that stay over the limit even in compact form", async () => {
   const { createOpenAiChatAdapter } = await import("../src/index.js");
   const adapter = createOpenAiChatAdapter();
-  // 80 ASCII bytes encode to 109 compact characters, still above the 64 limit.
+  // The 84-byte ASCII name encodes to 114 compact characters, still above the 64 limit.
   const longName = `pkg#${"a".repeat(80)}` as EntryName;
   expect(encodeWireName(longName).length).toBeGreaterThan(64);
   expect(() =>
