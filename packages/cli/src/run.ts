@@ -21,8 +21,8 @@ const DEFAULT_PROMPT_MESSAGE = "Default system prompt applies only to new sessio
 
 /** Same shape the daemon accepts for `session.read` and the other session methods. */
 const SESSION_ID = /^[A-Za-z0-9_-]+$/;
-/** `package#name` with both parts non-empty and exactly one separator. */
-const ENTRY_NAME = /^[^#]+#[^#]+$/;
+/** `package#name` with both parts non-empty, no whitespace, exactly one separator. */
+const ENTRY_NAME = /^[^#\s]+#[^#\s]+$/u;
 
 export interface RunOptions {
   configPath: string;
@@ -114,31 +114,37 @@ function parseReadMeta(value: unknown): SessionMeta {
   return parseMeta(value.meta);
 }
 
-function parseSelection(value: unknown): string[] {
-  if (
-    !isRecord(value) ||
-    !Array.isArray(value.selection) ||
-    !value.selection.every((entry: unknown) => typeof entry === "string")
-  ) {
-    invalidResponse();
-  }
-  return value.selection as string[];
+interface ToggleBaseline {
+  /** Committed branch selection, exactly as `session.read` reports it. */
+  selection: string[];
+  /** Toggles still queued, in queue order. */
+  pending: string[][];
 }
 
 /**
- * Replays the toggle declarations still waiting in the queue.
+ * Reads the toggle baseline out of the first `session.read` page, which the
+ * daemon builds while holding the session lock and therefore reports the
+ * committed selection and the whole queue consistently.
  *
- * `entries.snapshot` only exposes the committed branch selection, so a fresh
- * session whose configuration defaults are still queued looks empty. Each
- * unconfirmed `control`/`declaration` entry with one text block that parses to
- * `{toggle: string[]}` is applied in queue order; malformed entries are skipped
- * rather than failing the whole snapshot, matching the daemon's replay filter.
+ * `selection` only exposes the committed branch, so a fresh session whose
+ * configuration defaults are still queued looks empty. Each unconfirmed
+ * `control`/`declaration` entry with one text block that parses to
+ * `{toggle: string[]}` is returned in queue order. Malformed queue entries are
+ * skipped rather than failing the whole read: the daemon validates declarations
+ * when they are enqueued, so this is a shape guard on the projection, not the
+ * daemon's replay filter.
  */
-function parsePendingToggles(value: unknown): string[][] {
-  if (!isRecord(value) || !Array.isArray(value.records) || !Array.isArray(value.queue)) {
+function parseToggleBaseline(value: unknown): ToggleBaseline {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.selection) ||
+    !value.selection.every((entry: unknown) => typeof entry === "string") ||
+    !Array.isArray(value.records) ||
+    !Array.isArray(value.queue)
+  ) {
     invalidResponse();
   }
-  const toggles: string[][] = [];
+  const pending: string[][] = [];
   for (const entry of value.queue) {
     if (!isRecord(entry)) invalidResponse();
     if (entry.confirmedAt !== undefined) continue;
@@ -155,9 +161,9 @@ function parsePendingToggles(value: unknown): string[][] {
     }
     if (!isRecord(payload) || !Array.isArray(payload.toggle)) continue;
     if (!payload.toggle.every((name: unknown) => typeof name === "string")) continue;
-    toggles.push(payload.toggle as string[]);
+    pending.push(payload.toggle as string[]);
   }
-  return toggles;
+  return { selection: value.selection as string[], pending };
 }
 
 function parseSubscribe(value: unknown): void {
@@ -377,15 +383,14 @@ async function execute(
 
   let control: Record<string, unknown> | undefined;
   if (options.enable.length > 0 || options.disable.length > 0) {
-    const selected = new Set(
-      parseSelection(await client.request("entries.snapshot", { sessionId })),
-    );
-    // Unconfirmed declarations are not part of `snapshot.selection`; replay them
-    // in queue order (present removes, absent adds) before diffing so a fresh
-    // configured session with queued defaults is not toggled by mistake.
-    for (const pending of parsePendingToggles(
-      await client.request("session.read", { sessionId, limit: 1 }),
-    )) {
+    // One read reports both the committed selection and the pending queue, so
+    // no other client can slip a declaration in between the two.
+    const baseline = parseToggleBaseline(await client.request("session.read", { sessionId }));
+    const selected = new Set(baseline.selection);
+    // Unconfirmed declarations are not part of `selection`; replay them in queue
+    // order (present removes, absent adds) before diffing so a fresh configured
+    // session with queued defaults is not toggled by mistake.
+    for (const pending of baseline.pending) {
       for (const name of pending) {
         if (selected.has(name)) selected.delete(name);
         else selected.add(name);

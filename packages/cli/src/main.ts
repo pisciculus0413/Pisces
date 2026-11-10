@@ -554,7 +554,7 @@ function parseProviders(
 }
 
 const RUN_SESSION_ID = /^[A-Za-z0-9_-]+$/;
-const RUN_ENTRY_NAME = /^[^#]+#[^#]+$/;
+const RUN_ENTRY_NAME = /^[^#\s]+#[^#\s]+$/u;
 
 /** `run [prompt]`; the positional prompt may appear before or after any flag. */
 function parseRun(argv: readonly string[]): RunParsed | "help" | "version" | undefined {

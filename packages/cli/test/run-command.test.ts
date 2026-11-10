@@ -682,10 +682,8 @@ test("--use-default-system-prompt is accepted for a new session", async () => {
 test("--enable/--disable sends one toggle declaration in the same batch as the prompt", async () => {
   const client = fakeClient((method, params) => {
     if (method === "session.create") return META;
-    if (method === "entries.snapshot")
-      return { entries: [], selection: ["a#x", "b#y"], effective: [] };
     if (method === "session.read")
-      return { meta: META, seq: 0, records: [], queue: [], selection: [] };
+      return { meta: META, seq: 0, records: [], queue: [], selection: ["a#x", "b#y"] };
     if (method === "session.subscribe") return { sessionId: "s1" };
     if (method === "queue.enqueue") return { ids: ["q1", "q2"] };
     if (method === "turn.start") return startAndEmit(client, [endedEvent("completed")]);
@@ -728,9 +726,8 @@ test("--enable/--disable sends one toggle declaration in the same batch as the p
 test("no toggle declaration is sent when the selection would not change", async () => {
   const client = fakeClient((method) => {
     if (method === "session.create") return META;
-    if (method === "entries.snapshot") return { entries: [], selection: ["a#x"], effective: [] };
     if (method === "session.read")
-      return { meta: META, seq: 0, records: [], queue: [], selection: [] };
+      return { meta: META, seq: 0, records: [], queue: [], selection: ["a#x"] };
     if (method === "session.subscribe") return { sessionId: "s1" };
     if (method === "queue.enqueue") return { ids: ["q1"] };
     if (method === "turn.start") return startAndEmit(client, [endedEvent("completed")]);
@@ -750,7 +747,7 @@ test("no toggle declaration is sent when the selection would not change", async 
   );
 
   expect(code).toBe(0);
-  expect(client.calls.filter((call) => call.method === "entries.snapshot")).toHaveLength(1);
+  expect(client.calls.some((call) => call.method === "entries.snapshot")).toBe(false);
   const enqueue = client.calls.find((call) => call.method === "queue.enqueue");
   expect(enqueue?.params).toEqual({
     sessionId: "s1",
@@ -789,6 +786,12 @@ const pendingDeclaration = (toggle: string[]): unknown => ({
   createdAt: "2026-11-01T00:00:00.000Z",
 });
 
+/** The same declaration once the daemon has folded it into the committed selection. */
+const confirmedDeclaration = (toggle: string[]): unknown => ({
+  ...(pendingDeclaration(toggle) as Record<string, unknown>),
+  confirmedAt: "2026-11-02T00:00:00.000Z",
+});
+
 async function toggleEntries(
   selection: string[],
   queue: unknown[],
@@ -799,8 +802,6 @@ async function toggleEntries(
     switch (method) {
       case "session.create":
         return META;
-      case "entries.snapshot":
-        return { entries: [], selection };
       case "session.read":
         return { meta: META, seq: 0, records: [], queue, selection };
       case "session.subscribe":
@@ -831,11 +832,12 @@ test("a pending declaration is replayed before diffing the requested toggles", a
   const enablingPending = await toggleEntries([], queue, ["a#x"], []);
   expect(enablingPending.code).toBe(0);
   expect(enablingPending.entries).toEqual([PROMPT_ENTRY]);
+  // One unqualified read supplies both the selection and the queue.
   expect(enablingPending.client.calls.filter((call) => call.method === "session.read")).toEqual([
-    { method: "session.read", params: { sessionId: "s1", limit: 1 } },
+    { method: "session.read", params: { sessionId: "s1" } },
   ]);
   const methods = enablingPending.client.calls.map((call) => call.method);
-  expect(methods.indexOf("entries.snapshot")).toBeLessThan(methods.indexOf("session.read"));
+  expect(methods).not.toContain("entries.snapshot");
   expect(methods.indexOf("session.read")).toBeLessThan(methods.indexOf("session.subscribe"));
 
   expect((await toggleEntries([], queue, [], ["a#x"])).entries).toEqual([
@@ -858,22 +860,25 @@ test("a pending declaration that disables a committed selection is replayed", as
   expect((await toggleEntries(["a#x"], queue, [], ["a#x"])).entries).toEqual([PROMPT_ENTRY]);
 });
 
-test("pending toggles replay in queue order and skip committed declarations", async () => {
-  const queue = [
-    pendingDeclaration(["a#x"]),
-    { ...(pendingDeclaration(["b#y"]) as Record<string, unknown>), confirmedAt: "2026-11-02" },
-    pendingDeclaration(["a#x", "c#z"]),
-  ];
+test("every pending declaration is replayed against the committed selection", async () => {
+  const queue = [pendingDeclaration(["a#x"]), pendingDeclaration(["a#x"])];
 
-  // a#x: on, off, on; b#y stays off because its declaration is confirmed.
-  expect((await toggleEntries([], queue, ["a#x", "b#y"], [])).entries).toEqual([
-    controlEntry(["a#x", "b#y"]),
+  // Committed a#x, then two flips: off, back on. Applying only the last
+  // declaration, or diffing against the raw committed selection, ends off and
+  // would send a redundant enable here.
+  expect((await toggleEntries(["a#x"], queue, ["a#x"], [])).entries).toEqual([PROMPT_ENTRY]);
+  expect((await toggleEntries(["a#x"], queue, [], ["a#x"])).entries).toEqual([
+    controlEntry(["a#x"]),
     PROMPT_ENTRY,
   ]);
-  expect((await toggleEntries([], queue, [], ["c#z"])).entries).toEqual([
-    controlEntry(["c#z"]),
-    PROMPT_ENTRY,
-  ]);
+
+  // A confirmed declaration is part of the committed selection, never replayed.
+  expect(
+    (await toggleEntries(["a#x"], [confirmedDeclaration(["a#x"])], ["a#x"], [])).entries,
+  ).toEqual([PROMPT_ENTRY]);
+  expect(
+    (await toggleEntries(["a#x"], [confirmedDeclaration(["b#y"])], [], ["b#y"])).entries,
+  ).toEqual([PROMPT_ENTRY]);
 });
 
 test("duplicate extension names are a usage error before connecting", async () => {
@@ -1051,10 +1056,9 @@ test("a malformed session result is rejected as client.protocol", async () => {
   expect(rec.err).toEqual(["error: client.protocol: Invalid response from daemon"]);
 });
 
-test("a malformed queue snapshot on the toggle path is rejected as client.protocol", async () => {
+test("a malformed session read on the toggle path is rejected as client.protocol", async () => {
   const client = fakeClient((method) => {
     if (method === "session.create") return META;
-    if (method === "entries.snapshot") return { entries: [], selection: [] };
     if (method === "session.read") return { meta: META, seq: 0, records: [] };
     throw new Error(`unexpected method ${method}`);
   });
@@ -1118,6 +1122,11 @@ test("a malformed frame mid-turn exits 1 with client.protocol", async () => {
   expect(code).toBe(1);
   expect(rec.err).toEqual(["error: client.protocol: Invalid response from daemon"]);
   expect(rec.out).toEqual([]);
+  // A protocol failure goes through the same cleanup as a socket close.
+  expect(client.log).toContain("event:unsubscribe");
+  expect(client.log).toContain("close:unsubscribe");
+  expect(client.log).toContain("interrupt:unregister");
+  expect(client.listenerCount()).toBe(0);
 });
 
 test("default output falls back to io.out when io.write is absent", async () => {
@@ -1174,6 +1183,8 @@ test("runCli rejects run usage errors without connecting", async () => {
     ["run", "hello", "--enable", "nopackage#"],
     ["run", "hello", "--enable", "#noname"],
     ["run", "hello", "--disable", "a#b#c"],
+    ["run", "hello", "--enable", "a b#x"],
+    ["run", "hello", "--disable", "a#b c"],
   ];
   const counter = { connects: 0 };
   const deps = unreachableDeps(counter);
@@ -1195,8 +1206,6 @@ test("run accumulates --enable/--disable and keeps the last value of each value 
         return { meta: META, seq: 0, records: [], queue: [], selection: [] };
       case "session.configure":
         return META;
-      case "entries.snapshot":
-        return { entries: [], selection: [] };
       case "session.subscribe":
         return { sessionId: "s1" };
       case "queue.enqueue":
@@ -1256,7 +1265,7 @@ test("run accumulates --enable/--disable and keeps the last value of each value 
   ]);
   expect(client.calls.filter((call) => call.method === "session.read")).toEqual([
     { method: "session.read", params: { sessionId: "s2" } },
-    { method: "session.read", params: { sessionId: "s1", limit: 1 } },
+    { method: "session.read", params: { sessionId: "s1" } },
   ]);
   const enqueue = client.calls.find((call) => call.method === "queue.enqueue");
   expect(enqueue?.params).toEqual({
