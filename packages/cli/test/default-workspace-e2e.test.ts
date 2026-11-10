@@ -195,18 +195,27 @@ test("run without --workspace uses the configured default and persists it", {
   expect(sessions[0]?.workspace).toBe(fixture.first);
 });
 
-test("a restarted daemon applies an updated default workspace", {
+test("a running daemon keeps its startup default until restarted", {
   timeout: SOCKET_TIMEOUT_MS,
 }, async () => {
   const fixture = await makeFixture();
   const first = await startAcceptanceDaemon(fixture);
+
+  // Rewrite the config while the daemon is still up: a running daemon keeps the
+  // defaults it read at startup, so this session must land in the old workspace.
+  await writeConfig(fixture, fixture.second);
   expect(await runCommand(runOptions(fixture, { io: recorder().io }))).toBe(0);
+
+  const running = await openClient(first.socketPath);
+  const beforeRestart = (await sessionList(running)).sessions;
+  expect(beforeRestart).toHaveLength(1);
+  expect(beforeRestart[0]?.workspace).toBe(fixture.first);
 
   await first.stop();
   const index = hosts.indexOf(first);
   if (index !== -1) hosts.splice(index, 1);
 
-  await writeConfig(fixture, fixture.second);
+  // Only a restart picks up the rewritten config.
   const restarted = await startAcceptanceDaemon(fixture);
   expect(await runCommand(runOptions(fixture, { io: recorder().io }))).toBe(0);
 

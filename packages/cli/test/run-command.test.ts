@@ -477,6 +477,34 @@ test("--workspace on an existing session fails locally before any write", async 
   }
 });
 
+test("--workspace is reported before --use-default-system-prompt on an existing session", async () => {
+  const client = fakeClient((method) => {
+    if (method === "session.read") return { meta: META, seq: 0, records: [], queue: [] };
+    throw new Error(`unexpected method ${method}`);
+  });
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await runCommand(
+    runOptions(configPath, {
+      io: rec.io,
+      sessionId: "s1",
+      workspace: "/tmp/ws",
+      useDefaultSystemPrompt: true,
+    }),
+    client.deps,
+  );
+
+  expect(code).toBe(1);
+  expect(rec.err).toEqual([
+    "error: run.workspace_unsupported: Workspace can only be set for a new session",
+  ]);
+  expect(rec.out).toEqual([]);
+  expect(client.calls.some((call) => call.method === "session.configure")).toBe(false);
+  expect(client.calls.some((call) => call.method === "queue.enqueue")).toBe(false);
+  expect(client.calls.some((call) => call.method === "turn.start")).toBe(false);
+});
+
 test("a relative or empty workspace is a usage error before connecting", async () => {
   const { configPath } = await fixture();
   const counter = { connects: 0 };

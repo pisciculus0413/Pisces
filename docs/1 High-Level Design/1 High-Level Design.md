@@ -1143,7 +1143,7 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
   - `--use-default-system-prompt`：只对新会话有效；对既有会话本地报
     `run.default_system_prompt_unsupported`，不做静默 no-op。
   - `--model <name>` / `--provider <name>`：设置该会话的模型与供应商；既有会话两者必须成对。
-  - `--workspace <name>`：只为本次新建的会话指定工作区（绝对路径），经 `session.create` 显式传入并优先于 daemon 默认；既有会话本地报 `run.workspace_unsupported`（1），不修改会话；省略时沿用 daemon 启动时的默认工作区。
+  - `--workspace <dir>`：只为本次新建的会话指定工作区（绝对路径），经 `session.create` 显式传入并优先于 daemon 默认；既有会话本地报 `run.workspace_unsupported`（1），不修改会话；省略时沿用 daemon 启动时的默认工作区。
   - `--print`：只输出最终文本；`--json`：只输出一行 `{sessionId,turnId,reason,text,error?}`。
   - 退出码：完成 0；失败 turn、协议/会话/连接错误 1；用法或配置错误 2；取消（Ctrl-C 或外部
     `sessions cancel`）130。

@@ -2027,7 +2027,10 @@ pisces run [prompt] [--new | --continue | --session <id> [--create]]
 - 会话选项：`--workspace` 必须是绝对路径，只传给本次新建的 `session.create`（`--new`、缺省选择器、
   或 `--session --create` 且会话不存在），显式值优先于 daemon 启动时的默认工作区；既有会话（`--session`
   命中或 `--continue`）与 `--workspace` 同用时本地返回 `run.workspace_unsupported`（1），不配置、
-  不入队、不启动 turn。省略时由 daemon 解析默认工作区，仍缺则 `session.workspace_required`。
+  不入队、不启动 turn。该拒绝只针对已落盘会话：`--continue` 没有任何已落盘会话时先以
+  `session.not_found`（1）失败，不会报 `run.workspace_unsupported`。省略时由 daemon 解析默认工作区：
+  未配置则 `session.workspace_required`，已配置但不可用则 `session.invalid_workspace`，两者均由 daemon
+  返回、CLI 退出 1。
   `--model`/`--provider` 对新会话交给 `session.create`、对既有会话交给
   `session.configure`（既有会话两者必须成对，否则 daemon 返回 `session.model_required`）；
   `--system-prompt` 对新会话交给 `session.create.systemPrompt`、对既有会话交给
