@@ -20,6 +20,7 @@ import {
 } from "./config-commands.js";
 import { isEntryPath } from "./entry.js";
 import { extensionsList } from "./extensions.js";
+import { productionSessionsDeps, type SessionsDeps, sessionsList } from "./sessions.js";
 import {
   productionTemplatesDeps,
   type TemplatesDeps,
@@ -48,13 +49,14 @@ export const USAGE = [
   "  templates  list, preview or apply a template",
   "  config     list, get, set or unset configuration values",
   "  extensions list discovered extensions without loading them",
+  "  sessions   list persisted sessions",
   "",
   "options:",
   "  --config <path>     configuration file (default: <config home>/pisces/config.json)",
   "  --data-dir <path>   override the configured data directory",
   "  --scope <scope>     config scope: global (default) or workspace",
   "  --workspace <dir>   workspace directory (config workspace scope, extensions list)",
-  "  --json              machine-readable output (status, templates, config, extensions)",
+  "  --json              machine-readable output (status, templates, config, extensions, sessions)",
   "  --help              show this help",
   "  --version           print the version",
 ].join("\n");
@@ -70,6 +72,9 @@ type ConfigSub = (typeof CONFIG_SUBS)[number];
 
 const EXTENSIONS_SUBS = ["list"] as const;
 type ExtensionsSub = (typeof EXTENSIONS_SUBS)[number];
+
+const SESSIONS_SUBS = ["list"] as const;
+type SessionsSub = (typeof SESSIONS_SUBS)[number];
 
 interface LifecycleParsed {
   command: Command;
@@ -108,6 +113,14 @@ interface ConfigCommon {
   json: boolean;
 }
 
+interface SessionsParsed {
+  command: "sessions";
+  sub: "list";
+  configPath?: string;
+  dataDir?: string;
+  json: boolean;
+}
+
 type ConfigParsed =
   | (ConfigCommon & { sub: "list" })
   | (ConfigCommon & { sub: "get"; path: string })
@@ -127,6 +140,7 @@ type Outcome =
   | TemplatesParsed
   | ConfigParsed
   | ExtensionsParsed
+  | SessionsParsed
   | "help"
   | "version"
   | undefined;
@@ -142,6 +156,9 @@ const isConfigSub = (value: string | undefined): value is ConfigSub =>
 
 const isExtensionsSub = (value: string | undefined): value is ExtensionsSub =>
   value !== undefined && (EXTENSIONS_SUBS as readonly string[]).includes(value);
+
+const isSessionsSub = (value: string | undefined): value is SessionsSub =>
+  value !== undefined && (SESSIONS_SUBS as readonly string[]).includes(value);
 
 async function version(): Promise<string> {
   try {
@@ -163,6 +180,7 @@ async function parse(argv: readonly string[]): Promise<Outcome> {
   if (command === "templates") return parseTemplates(argv);
   if (command === "config") return parseConfig(argv);
   if (command === "extensions") return parseExtensions(argv);
+  if (command === "sessions") return parseSessions(argv);
   if (command === undefined || !isCommand(command)) return undefined;
 
   let configPath: string | undefined;
@@ -360,11 +378,52 @@ function parseExtensions(
   return parsed;
 }
 
+/** `sessions <list>`; `undefined` is always a usage error. */
+function parseSessions(argv: readonly string[]): SessionsParsed | "help" | "version" | undefined {
+  const sub = argv[1];
+  if (sub === "--help") return "help";
+  if (sub === "--version") return "version";
+  if (!isSessionsSub(sub)) return undefined;
+
+  let configPath: string | undefined;
+  let dataDir: string | undefined;
+  let json = false;
+
+  for (let index = 2; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--help") return "help";
+    if (argument === "--version") return "version";
+    if (argument === "--json") {
+      json = true;
+      continue;
+    }
+    if (argument === "--config" || argument === "--data-dir") {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("-")) return undefined;
+      if (argument === "--config") configPath = value;
+      else dataDir = value;
+      index += 1;
+      continue;
+    }
+    // `list` takes no positionals.
+    return undefined;
+  }
+
+  return {
+    command: "sessions",
+    sub,
+    json,
+    ...(configPath !== undefined ? { configPath } : {}),
+    ...(dataDir !== undefined ? { dataDir } : {}),
+  };
+}
+
 export async function runCli(
   argv: string[],
   io: CommandIo = processIo,
   deps: CommandDeps = productionDeps,
   templateDeps: TemplatesDeps = productionTemplatesDeps,
+  sessionDeps: SessionsDeps = productionSessionsDeps,
 ): Promise<number> {
   const parsed = await parse(argv);
 
@@ -408,6 +467,18 @@ export async function runCli(
       json: parsed.json,
       ...(parsed.workspace !== undefined ? { workspace: parsed.workspace } : {}),
     });
+  }
+
+  if (parsed.command === "sessions") {
+    return await sessionsList(
+      {
+        configPath: parsed.configPath ?? defaultConfigPath(process.env),
+        io,
+        json: parsed.json,
+        ...(parsed.dataDir !== undefined ? { dataDir: parsed.dataDir } : {}),
+      },
+      sessionDeps,
+    );
   }
 
   if (parsed.command === "templates") {

@@ -116,6 +116,11 @@ export interface ProviderListResult {
   providers: ProviderInfo[];
 }
 
+/** Persisted sessions only; temporary sessions and ordering are not part of the contract. */
+export interface SessionListResult {
+  sessions: SessionMeta[];
+}
+
 export interface TurnListResult {
   turns: ActiveTurn[];
 }

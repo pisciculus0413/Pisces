@@ -66,6 +66,7 @@ import type {
   QueueEnqueueResult,
   QueueRemoveResult,
   SessionDefaults,
+  SessionListResult,
   SessionReadResult,
   TemplateApplyResult,
   TemplateListResult,
@@ -756,6 +757,10 @@ export function createGateway(deps: GatewayDeps): Gateway {
         prompts: promptsFor(undefined, resolution.defaults.systemPrompt),
       });
       return { projectId: resolution.projectId, sessionId: meta.id };
+    },
+
+    async "session.list"(): Promise<SessionListResult> {
+      return { sessions: await deps.store.list() };
     },
 
     async "session.create"(params): Promise<SessionMeta> {
