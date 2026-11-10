@@ -150,13 +150,14 @@ git commit -m "feat(templates): preview, apply and record projects"
 
 **Files:**
 - Modify: `packages/daemon/src/gateway/protocol.ts`
+- Modify: `packages/daemon/src/templates/store.ts` (add read-only `inspect`)
 - Modify: `packages/daemon/src/gateway/gateway.ts`
 - Modify: `packages/daemon/src/host/daemon-host.ts`
 - Test: `packages/daemon/test/templates-gateway.test.ts`
 
 **Interfaces:**
 - Consumes: `TemplateStore` (Task 2).
-- Produces: `GatewayDeps.templates?: Pick<TemplateStore, "list" | "preview" | "resolve" | "apply">`; `template.list|preview|apply` methods; `StartDaemonOptions.templates?: { configDir: string }`.
+- Produces: `TemplateStore.inspect(templateId, workspace): Promise<TemplatePlan>` (preview + config defaults, **never reads the prompt file**; used for pre-write validation); `GatewayDeps.templates?: Pick<TemplateStore, "list" | "preview" | "inspect" | "resolve" | "apply">`; `template.list|preview|apply` methods; `StartDaemonOptions.templates?: { configDir: string }`.
 
 - [ ] **Step 1: Write the failing Gateway tests** (in-memory gateway harness or the existing socket harness):
   - No store → `template.list/preview/apply` return `protocol.unknown_method`.
@@ -172,7 +173,9 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement Gateway integration**
 
-Add the types to `protocol.ts` (`TemplateListResult`, `TemplatePreviewParams`, `TemplateApplyParams`, `TemplateApplyResult`). Add the three handlers next to the other gateway methods with strict param checks. Extract a `createSessionFrom` helper used by both `session.create` and `template.apply`; keep the configured/manual branches intact and their validation ordering. For `session.create {templateId}`: call `store.resolve(templateId, workspace)` first, merge defaults under explicit params, and enqueue the template prompt only when no explicit `systemPrompt`. For `apply`: call `store.resolve` first (no writes), merge template defaults with `deps.defaults`, validate workspace/provider/model/extensions via the same path the create uses, then `store.apply`; create the session from the apply resolution. Do not call `resolve` twice for the same apply unless the store's apply reuses its own resolution. Map store errors through unchanged (`PiscesError` code preserved).
+Add `inspect` to `store.ts`: same resolution/conflict/workspace path as `resolve`, but returns `preview` and `defaults` without `systemPrompt` and without touching `systemPromptFile`. Test: works when the prompt file does not exist yet; still no writes/no project record.
+
+Add the types to `protocol.ts` (`TemplateListResult`, `TemplatePreviewParams`, `TemplateApplyParams`, `TemplateApplyResult`). Add the three handlers next to the other gateway methods with strict param checks. Extract a `createSessionFrom` helper used by both `session.create` and `template.apply`; keep the configured/manual branches intact and their validation ordering. For `session.create {templateId}`: call `store.resolve(templateId, workspace)` first, merge defaults under explicit params, and enqueue the template prompt only when no explicit `systemPrompt`. For `apply`: call `store.inspect` first (no writes, no prompt read), merge template defaults with `deps.defaults`, validate workspace/provider/model/extensions via the same path the create uses, then `store.apply` (which re-reads the prompt after writing); create the session from the apply resolution's `defaults` (do not re-resolve on the now-changed workspace). Map store errors through unchanged (`PiscesError` code preserved).
 
 - [ ] **Step 4: Wire `startDaemon`**
 
