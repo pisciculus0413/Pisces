@@ -145,11 +145,12 @@ $ echo $?
 ```console
 $ pisces status
 running (pid 187181, socket /home/me/.local/state/pisces/run/pisces.sock)
+sessions: s-1, s-2
 ```
 
 ```console
 $ pisces status --json
-{"state":"running","pid":187181,"socketPath":"/home/me/.local/state/pisces/run/pisces.sock","dataDir":"/home/me/.local/state/pisces"}
+{"state":"running","pid":187181,"socketPath":"/home/me/.local/state/pisces/run/pisces.sock","dataDir":"/home/me/.local/state/pisces","sessions":["s-1","s-2"]}
 ```
 
 状态取值与退出码：
@@ -165,8 +166,19 @@ $ pisces status --json
 `status` 里的 `S` 与 JSON 的 `socketPath` 始终是由 dataDir 推导的 `<dataDir>/run/pisces.sock`；
 pid 记录里的 `socketPath` 与它不一致时，按 `daemon.unknown_owner` 退出 1，不删记录。
 
-JSON 只含 `state`、`pid`（仅进程存活的记录）、`socketPath`、`dataDir`；不含密钥、变量名或 provider
-配置。
+只有 `running` 与 `unmanaged`（本 dataDir 的 socket 有应答）才会用一次短连接调用 `turn.list`，
+把活跃 turn 的 `sessionId` 按出现顺序去重后输出：
+
+- 有活跃 turn：状态行之后追加 `sessions: <id1>, <id2>`；
+- 无活跃 turn：`sessions: none`；
+- 查询失败（连接、协议或 `turn.list` 结果不合法）：`sessions: unavailable`。
+
+`--json` 只在查询成功时增加 `sessions`（无活跃 turn 时为 `[]`）；查询失败、`stopped`/`stale`/
+`unresponsive` 以及 `daemon.unknown_owner` 早退时省略该键。新增输出只含 `sessionId`，不含 turnId、
+时间戳或错误原文；查询失败不改变退出码，也不写 stderr。
+
+JSON 只含 `state`、`pid`（仅进程存活的记录）、`socketPath`、`dataDir` 与查询成功时的 `sessions`；不含
+密钥、变量名或 provider 配置。
 
 ### `stop`
 

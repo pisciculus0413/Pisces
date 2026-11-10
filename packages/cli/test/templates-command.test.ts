@@ -428,6 +428,7 @@ test("start forwards templatesDir as the third child argument", async () => {
     clock: () => 0,
     now: () => "2026-11-09T00:00:00.000Z",
     signal: () => {},
+    listSessions: async () => [],
   };
   const rec = recorder();
   process.env[KEY_ENV] = "sk-task4-secret";

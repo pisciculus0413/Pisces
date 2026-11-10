@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { PiscesError } from "@pisces/core";
+import { ClientError, connectClient } from "./client.js";
 import { type CliConfig, loadConfig } from "./config.js";
 import {
   clearPidRecord,
@@ -109,6 +110,8 @@ export interface CommandDeps {
   clock(): number;
   now(): string;
   signal(pid: number, signal: NodeJS.Signals): void;
+  /** Unique active `sessionId`s from `turn.list`, in first-seen order. */
+  listSessions(socketPath: string): Promise<string[]>;
 }
 
 export interface CommandIo {
@@ -142,6 +145,45 @@ const failureMessage = (code: string): string => MESSAGES[code] ?? MESSAGES[FALL
 
 function fail(io: CommandIo, code: string): void {
   io.err(`error: ${code}: ${failureMessage(code)}`);
+}
+
+const PROTOCOL_MESSAGE = "Invalid response from daemon";
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+function invalidResponse(): never {
+  throw new ClientError("client.protocol", PROTOCOL_MESSAGE);
+}
+
+/**
+ * Reads the active `sessionId`s with one short-lived connection.
+ *
+ * Only `sessionId` is used: turn ids, timestamps and any extra fields are
+ * ignored. Duplicates collapse to their first occurrence. A connect, protocol
+ * or malformed-result failure rejects, and the connection is always closed.
+ */
+export async function listActiveSessions(socketPath: string): Promise<string[]> {
+  const client = await connectClient(socketPath);
+  try {
+    const result = await client.request("turn.list", {});
+    if (!isRecord(result) || !Array.isArray(result.turns)) invalidResponse();
+
+    const seen = new Set<string>();
+    const sessions: string[] = [];
+    for (const turn of result.turns) {
+      if (!isRecord(turn) || typeof turn.sessionId !== "string" || turn.sessionId === "") {
+        invalidResponse();
+      }
+      if (!seen.has(turn.sessionId)) {
+        seen.add(turn.sessionId);
+        sessions.push(turn.sessionId);
+      }
+    }
+    return sessions;
+  } finally {
+    client.close();
+  }
 }
 
 /** Every provider must have a non-empty key in the environment; the name is never printed. */
@@ -384,12 +426,37 @@ export async function statusCommand(
     line = `unresponsive (pid ${record.pid})`;
   }
 
+  // Only a socket that answered for this dataDir can be asked for turns; the
+  // other states either have no socket or an owner that cannot be proven ours.
+  let sessions: string[] | undefined;
+  let queryFailed = false;
+  if (state === "running" || state === "unmanaged") {
+    try {
+      sessions = await deps.listSessions(socketPath);
+    } catch {
+      queryFailed = true;
+    }
+  }
+
   if (options.json === true) {
-    io.out(JSON.stringify({ state, ...(pid !== undefined ? { pid } : {}), socketPath, dataDir }));
+    io.out(
+      JSON.stringify({
+        state,
+        ...(pid !== undefined ? { pid } : {}),
+        socketPath,
+        dataDir,
+        ...(sessions !== undefined ? { sessions } : {}),
+      }),
+    );
     return code;
   }
 
   io.out(line);
+  if (sessions !== undefined) {
+    io.out(sessions.length === 0 ? "sessions: none" : `sessions: ${sessions.join(", ")}`);
+  } else if (queryFailed) {
+    io.out("sessions: unavailable");
+  }
   return code;
 }
 
@@ -486,4 +553,5 @@ export const productionDeps: CommandDeps = {
   signal: (pid, signal) => {
     process.kill(pid, signal);
   },
+  listSessions: (socketPath) => listActiveSessions(socketPath),
 };

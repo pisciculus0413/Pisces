@@ -66,6 +66,7 @@ function fakeDeps(overrides: Partial<CommandDeps> = {}): CommandDeps {
     clock: () => elapsed,
     now: () => "2026-11-09T00:00:00.000Z",
     signal: () => {},
+    listSessions: async () => [],
     ...overrides,
   };
 }

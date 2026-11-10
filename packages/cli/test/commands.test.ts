@@ -1,14 +1,17 @@
 import { EventEmitter } from "node:events";
 import { writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PiscesError } from "@pisces/core";
+import { PROTOCOL_VERSION } from "@pisces/protocol";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   type ChildHandle,
   type CommandDeps,
   type CommandIo,
+  listActiveSessions,
   type SpawnedChild,
   startCommand,
   statusCommand,
@@ -99,6 +102,7 @@ function fakeDeps(overrides: Partial<CommandDeps> = {}): CommandDeps {
     clock: () => elapsed,
     now: () => STARTED_AT,
     signal: () => {},
+    listSessions: async () => [],
     ...overrides,
   };
 }
@@ -436,16 +440,24 @@ test("start reports an unusable data directory before spawning", async () => {
 
 test("status reports stopped, stale, running and unresponsive states", async () => {
   const { dataDir, configPath } = await fixture();
+  const queries: string[] = [];
+  const listSessions = async (socketPath: string): Promise<string[]> => {
+    queries.push(socketPath);
+    return [];
+  };
 
   const stopped = recorder();
-  expect(await statusCommand({ configPath, io: stopped.io }, fakeDeps())).toBe(1);
+  expect(await statusCommand({ configPath, io: stopped.io }, fakeDeps({ listSessions }))).toBe(1);
   expect(stopped.out).toEqual(["stopped"]);
 
   await mkdir(dataDir, { mode: 0o700 });
   writeRecord(dataDir, 1111);
   const stale = recorder();
   expect(
-    await statusCommand({ configPath, io: stale.io }, fakeDeps({ isAlive: () => false })),
+    await statusCommand(
+      { configPath, io: stale.io },
+      fakeDeps({ isAlive: () => false, listSessions }),
+    ),
   ).toBe(1);
   expect(stale.out).toEqual(["stopped (stale pid file)"]);
   expect(await readPidRecord(dataDir)).toBeUndefined();
@@ -455,35 +467,270 @@ test("status reports stopped, stale, running and unresponsive states", async () 
   expect(
     await statusCommand(
       { configPath, io: running.io },
-      fakeDeps({ isAlive: () => true, probe: async () => true }),
+      fakeDeps({ isAlive: () => true, probe: async () => true, listSessions }),
     ),
   ).toBe(0);
-  expect(running.out).toEqual([`running (pid 1111, socket ${socketPathFor(dataDir)})`]);
+  expect(running.out).toEqual([
+    `running (pid 1111, socket ${socketPathFor(dataDir)})`,
+    "sessions: none",
+  ]);
 
   const unresponsive = recorder();
   expect(
     await statusCommand(
       { configPath, io: unresponsive.io },
-      fakeDeps({ isAlive: () => true, probe: async () => false }),
+      fakeDeps({ isAlive: () => true, probe: async () => false, listSessions }),
     ),
   ).toBe(1);
   expect(unresponsive.out).toEqual(["unresponsive (pid 1111)"]);
   expect((await readPidRecord(dataDir))?.pid).toBe(1111);
+
+  // Only the running state reached the socket.
+  expect(queries).toEqual([socketPathFor(dataDir)]);
 });
 
-test("status reports an unmanaged socket without a pid record", async () => {
+test("status prints unique active sessions in first-seen order", async () => {
   const { dataDir, configPath } = await fixture();
   await mkdir(dataDir, { mode: 0o700 });
+  writeRecord(dataDir, 1111);
+  const queries: string[] = [];
   const rec = recorder();
 
   const code = await statusCommand(
     { configPath, io: rec.io },
-    fakeDeps({ probe: async () => true }),
+    fakeDeps({
+      isAlive: () => true,
+      probe: async () => true,
+      listSessions: async (socketPath) => {
+        queries.push(socketPath);
+        return ["a", "b"];
+      },
+    }),
+  );
+
+  expect(code).toBe(0);
+  expect(rec.out).toEqual([
+    `running (pid 1111, socket ${socketPathFor(dataDir)})`,
+    "sessions: a, b",
+  ]);
+  expect(rec.err).toEqual([]);
+  expect(queries).toEqual([socketPathFor(dataDir)]);
+});
+
+test("status --json adds an empty sessions array when the query succeeds", async () => {
+  const { dataDir, configPath } = await fixture();
+  await mkdir(dataDir, { mode: 0o700 });
+  writeRecord(dataDir, 1111);
+  const rec = recorder();
+
+  const code = await statusCommand(
+    { configPath, json: true, io: rec.io },
+    fakeDeps({ isAlive: () => true, probe: async () => true }),
+  );
+
+  expect(code).toBe(0);
+  expect(JSON.parse(rec.out.join("\n"))).toEqual({
+    state: "running",
+    pid: 1111,
+    socketPath: socketPathFor(dataDir),
+    dataDir,
+    sessions: [],
+  });
+});
+
+test("status reports a failed session query without changing the exit code", async () => {
+  const { dataDir, configPath } = await fixture();
+  await mkdir(dataDir, { mode: 0o700 });
+  writeRecord(dataDir, 1111);
+  const failing = async (): Promise<string[]> => {
+    throw new Error("daemon.unreachable");
+  };
+
+  const human = recorder();
+  expect(
+    await statusCommand(
+      { configPath, io: human.io },
+      fakeDeps({ isAlive: () => true, probe: async () => true, listSessions: failing }),
+    ),
+  ).toBe(0);
+  expect(human.out).toEqual([
+    `running (pid 1111, socket ${socketPathFor(dataDir)})`,
+    "sessions: unavailable",
+  ]);
+  expect(human.err).toEqual([]);
+
+  const json = recorder();
+  expect(
+    await statusCommand(
+      { configPath, json: true, io: json.io },
+      fakeDeps({ isAlive: () => true, probe: async () => true, listSessions: failing }),
+    ),
+  ).toBe(0);
+  const parsed = JSON.parse(json.out.join("\n")) as Record<string, unknown>;
+  expect(parsed).toEqual({
+    state: "running",
+    pid: 1111,
+    socketPath: socketPathFor(dataDir),
+    dataDir,
+  });
+  expect("sessions" in parsed).toBe(false);
+  expect(json.err).toEqual([]);
+});
+
+test("status never queries sessions without a reachable socket", async () => {
+  const { dataDir, configPath } = await fixture();
+  const listSessions = vi.fn(async () => ["should-not-appear"]);
+
+  const stopped = recorder();
+  expect(await statusCommand({ configPath, io: stopped.io }, fakeDeps({ listSessions }))).toBe(1);
+  expect(stopped.out).toEqual(["stopped"]);
+
+  await mkdir(dataDir, { mode: 0o700 });
+  writeRecord(dataDir, 1111);
+  const stale = recorder();
+  expect(
+    await statusCommand(
+      { configPath, io: stale.io },
+      fakeDeps({ isAlive: () => false, listSessions }),
+    ),
+  ).toBe(1);
+  expect(stale.out).toEqual(["stopped (stale pid file)"]);
+
+  writeRecord(dataDir, 1111);
+  const unresponsive = recorder();
+  expect(
+    await statusCommand(
+      { configPath, json: true, io: unresponsive.io },
+      fakeDeps({ isAlive: () => true, probe: async () => false, listSessions }),
+    ),
+  ).toBe(1);
+  const parsed = JSON.parse(unresponsive.out.join("\n")) as Record<string, unknown>;
+  expect(parsed.state).toBe("unresponsive");
+  expect("sessions" in parsed).toBe(false);
+
+  expect(listSessions).not.toHaveBeenCalled();
+});
+
+test("status reports an unmanaged socket and its sessions without a pid record", async () => {
+  const { dataDir, configPath } = await fixture();
+  await mkdir(dataDir, { mode: 0o700 });
+  const queries: string[] = [];
+  const rec = recorder();
+
+  const code = await statusCommand(
+    { configPath, io: rec.io },
+    fakeDeps({
+      probe: async () => true,
+      listSessions: async (socketPath) => {
+        queries.push(socketPath);
+        return ["s1"];
+      },
+    }),
   );
 
   expect(code).toBe(1);
-  expect(rec.out).toEqual([`unmanaged (socket ${socketPathFor(dataDir)})`]);
+  expect(rec.out).toEqual([`unmanaged (socket ${socketPathFor(dataDir)})`, "sessions: s1"]);
+  expect(queries).toEqual([socketPathFor(dataDir)]);
   expect(await readPidRecord(dataDir)).toBeUndefined();
+});
+
+interface FakeTurnListDaemon {
+  path: string;
+  methods: string[];
+  closed: Promise<void>;
+  close(): Promise<void>;
+}
+
+/** Minimal NDJSON daemon that answers hello and returns `turnListResult` for `turn.list`. */
+async function fakeTurnListDaemon(turnListResult: unknown): Promise<FakeTurnListDaemon> {
+  const root = await mkdtemp(join(tmpdir(), "pisces-status-sessions-"));
+  roots.push(root);
+  const path = join(root, "pisces.sock");
+  const methods: string[] = [];
+  const sockets: Socket[] = [];
+  let markClosed: (() => void) | undefined;
+  const closed = new Promise<void>((resolve) => {
+    markClosed = resolve;
+  });
+
+  const server: Server = createServer((socket) => {
+    sockets.push(socket);
+    let buffer = "";
+    socket.on("error", () => {});
+    socket.once("close", () => markClosed?.());
+    socket.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) return;
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (line === "") continue;
+        const frame = JSON.parse(line) as { id: string; method: string };
+        methods.push(frame.method);
+        const result =
+          frame.method === "protocol.hello"
+            ? { version: PROTOCOL_VERSION, compatible: true }
+            : turnListResult;
+        socket.write(`${JSON.stringify({ id: frame.id, result })}\n`);
+      }
+    });
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(path, resolve);
+  });
+
+  return {
+    path,
+    methods,
+    closed,
+    async close() {
+      for (const socket of sockets.splice(0)) socket.destroy();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+    },
+  };
+}
+
+test("listActiveSessions dedupes turn.list session ids in first-seen order and closes", async () => {
+  const daemon = await fakeTurnListDaemon({
+    turns: [
+      { sessionId: "a", turnId: "t1", startedAt: "2026-11-09T00:00:00.000Z" },
+      { sessionId: "a", turnId: "t2", startedAt: "2026-11-09T00:00:01.000Z", extra: true },
+      { sessionId: "b", turnId: "t3", startedAt: "2026-11-09T00:00:02.000Z" },
+    ],
+  });
+
+  await expect(listActiveSessions(daemon.path)).resolves.toEqual(["a", "b"]);
+  expect(daemon.methods).toEqual(["protocol.hello", "turn.list"]);
+  await daemon.closed;
+  await daemon.close();
+});
+
+test("listActiveSessions returns no sessions for an empty turn list", async () => {
+  const daemon = await fakeTurnListDaemon({ turns: [] });
+
+  await expect(listActiveSessions(daemon.path)).resolves.toEqual([]);
+  await daemon.closed;
+  await daemon.close();
+});
+
+test("listActiveSessions rejects a malformed turn list and still closes", async () => {
+  const malformed: unknown[] = [
+    {},
+    { turns: "nope" },
+    { turns: [{ sessionId: "" }] },
+    { turns: [{ sessionId: 7 }] },
+  ];
+
+  for (const result of malformed) {
+    const daemon = await fakeTurnListDaemon(result);
+    await expect(listActiveSessions(daemon.path)).rejects.toThrow();
+    await daemon.closed;
+    await daemon.close();
+  }
 });
 
 test("status --json reports the state without key material", async () => {
@@ -506,6 +753,7 @@ test("status --json reports the state without key material", async () => {
     pid: 1111,
     socketPath: socketPathFor(dataDir),
     dataDir,
+    sessions: [],
   });
 });
 
@@ -520,6 +768,7 @@ test("status --json omits the pid for stale records", async () => {
   const parsed = JSON.parse(rec.out.join("\n")) as Record<string, unknown>;
   expect(parsed.state).toBe("stale");
   expect("pid" in parsed).toBe(false);
+  expect("sessions" in parsed).toBe(false);
   expect(parsed.socketPath).toBe(socketPathFor(dataDir));
 });
 
@@ -677,6 +926,7 @@ test("status and stop never trust the record's socketPath", async () => {
 
   const probes: string[] = [];
   const signals: NodeJS.Signals[] = [];
+  const listSessions = vi.fn(async () => ["should-not-appear"]);
   const deps = fakeDeps({
     isAlive: () => true,
     // Only the foreign path answers; the derived socket is dead.
@@ -687,6 +937,7 @@ test("status and stop never trust the record's socketPath", async () => {
     signal: (_pid, signal) => {
       signals.push(signal);
     },
+    listSessions,
   });
 
   const status = recorder();
@@ -706,6 +957,7 @@ test("status and stop never trust the record's socketPath", async () => {
   expect(stop.err.join("\n")).toContain("daemon.unknown_owner");
   expect(signals).toEqual([]);
   expect(probes).toEqual([]);
+  expect(listSessions).not.toHaveBeenCalled();
   expect((await readPidRecord(dataDir))?.socketPath).toBe(foreign);
 });
 

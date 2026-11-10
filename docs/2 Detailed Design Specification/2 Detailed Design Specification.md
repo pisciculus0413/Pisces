@@ -1964,7 +1964,9 @@ interface ClientRegistry {
 `config list|get|set|unset`、`extensions list`、`sessions list|export|cancel`、`run`、`provider list` 与
 `models list`。生命周期命令经
 pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.hello` 探测完成，使用协议做就绪/归属探测；
-模板命令、`sessions` 命令经短连接调用 `template.*` / `session.list` / `session.read` /
+`status` 在 `running`/`unmanaged` 时额外用一次短连接调用 `turn.list`，按出现顺序去重输出活跃
+`sessionId`（只读，查询失败不改变退出码）；模板命令、`sessions` 命令经短连接调用 `template.*` /
+`session.list` / `session.read` /
 `turn.list` / `turn.cancel`（详见 `docs/templates.md`、`docs/cli.md`）；`sessions export` 按
 `nextCursor` 分页输出 JSONL（每行一个 `SessionNode`，不包装），默认整棵树、`--node <id>` 只输出根到该
 节点的祖先链；`sessions cancel` 用 `turn.list` 按 `sessionId` 选择活跃 turn 后逐个 `turn.cancel`，无活跃
@@ -1980,7 +1982,7 @@ turn 时输出 `no active turn` 并退出 0，`{cancelled:false}` 映射为 CLI 
 
 | 命令 | 路径 |
 |---|---|
-| `start` / `stop` / `status` | 本地 daemon 生命周期（已实现） |
+| `start` / `stop` / `status` | 本地 daemon 生命周期（已实现；`status` 另读 `turn.list` 的活跃会话） |
 | `run` | 经协议创建/读取会话、入队、订阅、`turn.start`/`turn.cancel`（已实现） |
 | `sessions list` | 经协议 `session.list`（已实现） |
 | `sessions export` | 经协议 `session.read` 输出 JSONL（已实现） |
@@ -2109,6 +2111,11 @@ CLI 生命周期约定（已实现）：
   记录（防止 PID 复用误杀）。身份只由推导路径证明，记录里的 `socketPath` 仅作诊断，`status`/
   `stop` 的输出与 `status --json` 也只输出推导路径。必须先 `ps -p <pid>` 确认该进程身份；是本
   dataDir 的 daemon 才可人工 SIGTERM，否则只删除 `daemon.pid`。详见 `docs/cli.md` §7。
+- `status`：`running`/`unmanaged` 时用一次短连接调用 `turn.list`，按出现顺序去重输出活跃
+  `sessionId`。人类输出在状态行后追加 `sessions: <id...>`（无活跃 turn 为 `sessions: none`，查询
+  失败为 `sessions: unavailable`）；`--json` 仅在查询成功时增加 `sessions` 数组，失败或未查询
+  （`stopped`/`stale`/`unresponsive` 与 `daemon.unknown_owner` 早退）时省略。查询失败不改变退出码、
+  不写 stderr，也不输出 turnId、时间戳或错误原文。
 - `stop` 先握手再发信号，握手失败不调用 `kill`；`stop` 输出 `stopped (pid N, socket S)`，其中 `S`
   是推导路径；`stop` 超时保留记录并以 `daemon.stop_timeout` 退出 `1`；无记录但 socket 应答时报
   `daemon.unmanaged`（`1`），同样不发送信号。

@@ -1115,7 +1115,7 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
 
 - `start`：启动 daemon 服务。
 - `stop`：停止 daemon 服务；中止进行中的热会话并等待写盘完成。
-- `status`：查看 daemon 服务状态。
+- `status`：查看 daemon 服务状态；`running`/`unmanaged` 时经 `turn.list` 附带活跃会话的 `sessionId`。
 - `client`：客户端管理。
   - `list`：列出已注册客户端。
   - `start <id>`：启动指定客户端。
@@ -1176,7 +1176,9 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
 子进程启动 daemon，写入 pid 记录与日志，只有子进程存活、pid 记录仍指向它、且本 dataDir 的 socket
 完成 `protocol.hello` 握手后才报告成功（总预算 10 s，轮询 50 ms）；`status` 结合进程存活、socket
 探测与 pid 记录给出 `running`/`stopped`/`stale`/`unresponsive`/`unmanaged`，`--json` 输出同名
-`state`；`stop` 仅在记录中的 pid 存活且同一 socket 应答后发送 `SIGTERM`，最多等待 10 s，陈旧记录与
+`state`；`running`/`unmanaged` 时再经一次 `turn.list` 短连接附带去重后的活跃 `sessionId`（人类输出
+`sessions:` 行，`--json` 增加 `sessions` 数组，查询失败不改变退出码）；`stop` 仅在记录中的 pid 存活且
+同一 socket 应答后发送 `SIGTERM`，最多等待 10 s，陈旧记录与
 PID 复用防护见 §8.1。模板命令经单个短连接调用 `template.*`，`apply` 必须显式 `--confirm`，
 详见 `docs/templates.md`。`config` 直接读写全局与工作区配置层，`extensions list` 只做本地发现
 且不加载代码，`sessions list` 经协议 `session.list` 列出已落盘会话，`sessions export` 经协议
