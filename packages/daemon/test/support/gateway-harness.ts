@@ -42,6 +42,7 @@ const NOW = "2026-11-08T05:00:00.000Z";
 
 export interface GatewayHarnessOptions {
   defaults?: SessionDefaults;
+  templates?: GatewayDeps["templates"];
   execute?: ExecuteProvider;
   adapter?: LlmAdapter;
   validateWorkspace?: (workspace: string) => Promise<boolean>;
@@ -207,6 +208,7 @@ export async function createGatewayHarness(
     events: gatewayBus,
     markers,
     ...(options.defaults ? { defaults: options.defaults } : {}),
+    ...(options.templates ? { templates: options.templates } : {}),
     ...(options.validateWorkspace ? { validateWorkspace: options.validateWorkspace } : {}),
     ...(options.newSessionId ? { newSessionId: options.newSessionId } : {}),
     ...(options.createTools ? { createTools: options.createTools } : {}),

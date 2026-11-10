@@ -12,6 +12,7 @@ import type {
   SessionId,
   SessionMeta,
   SessionNode,
+  TemplateInfo,
   TurnId,
 } from "@pisces/core";
 import type { ActiveTurn } from "../runtime/concurrency.js";
@@ -170,4 +171,25 @@ export interface QueueClearParams {
 
 export interface QueueClearResult {
   ids: QueueEntryId[];
+}
+
+export interface TemplateListResult {
+  templates: TemplateInfo[];
+}
+
+export interface TemplatePreviewParams {
+  templateId: string;
+  workspace: string;
+}
+
+export interface TemplateApplyParams {
+  templateId: string;
+  workspace: string;
+  confirmed: true;
+  overwrite?: boolean;
+}
+
+export interface TemplateApplyResult {
+  projectId: string;
+  sessionId: SessionId;
 }

@@ -1,5 +1,6 @@
 import type { Socket } from "node:net";
 import { PiscesError } from "@pisces/core";
+import { createExecHost } from "../exec/exec-host.js";
 import { createExtensions } from "../extensions/extensions.js";
 import type { ExtensionsOptions } from "../extensions/types.js";
 import { createActiveTurnStore } from "../gateway/active-turn.js";
@@ -9,6 +10,7 @@ import { createConcurrency } from "../runtime/concurrency.js";
 import { createEventBus } from "../runtime/event-bus.js";
 import type { RecoveryIssue } from "../session-store/session-store.js";
 import { createSessionStore } from "../session-store/session-store.js";
+import { createTemplateStore } from "../templates/store.js";
 import { type Connection, createConnection } from "../transport/connection.js";
 import {
   assertLinuxPlatform,
@@ -17,6 +19,7 @@ import {
   probePeerCredentials,
   type UnixTransport,
 } from "../transport/unix-transport.js";
+import { createWorkspaceAccess } from "../workspace/access.js";
 import { acquireDaemonLock, type DaemonLock } from "./lock.js";
 import { clearStaleSocket, prepareRuntimePaths } from "./runtime-paths.js";
 
@@ -86,6 +89,11 @@ export type StartDaemonOptions = { dataDir: string } & Pick<
      * above; mixing them fails startup instead of merging.
      */
     extensions?: ExtensionsOptions;
+    /**
+     * Directory holding one `<id>.json` per declarative template (the store's `configDir`).
+     * Independent of `extensions`; a missing directory is an empty list, not a failure.
+     */
+    templates?: { configDir: string };
   };
 
 export interface DaemonHostStatus {
@@ -237,6 +245,18 @@ export async function startDaemonWithSeams(
     // the Gateway bootstrap; the Gateway installs the Task 8 mutual-exclusion contract too.
     const extensionService =
       options.extensions === undefined ? undefined : createExtensions(options.extensions);
+    // Templates are configuration, not session state: one store per daemon, built before the
+    // Gateway bootstrap so `template.*` is routed from the first accepted frame.
+    const templateStore =
+      options.templates === undefined
+        ? undefined
+        : createTemplateStore({
+            configDir: options.templates.configDir,
+            dataDir: options.dataDir,
+            workspaceAccess: createWorkspaceAccess,
+            exec: createExecHost(),
+            ...(options.now === undefined ? {} : { now: options.now }),
+          });
     const bootstrapped = await bootstrapGateway({
       store,
       markers,
@@ -245,6 +265,7 @@ export async function startDaemonWithSeams(
       providers: options.providers,
       providerHost: options.providerHost,
       ...(extensionService !== undefined ? { extensions: extensionService } : {}),
+      ...(templateStore !== undefined ? { templates: templateStore } : {}),
       ...(options.defaults !== undefined ? { defaults: options.defaults } : {}),
       ...(options.createTools !== undefined ? { createTools: options.createTools } : {}),
       ...(options.entries !== undefined ? { entries: options.entries } : {}),

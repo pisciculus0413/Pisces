@@ -29,6 +29,7 @@ import {
   type SessionNode,
   type Sessions,
   type Skills,
+  type TemplatePreview,
   type Tools,
   type TurnId,
   type WorkspaceAccess,
@@ -41,6 +42,7 @@ import type { ProviderHost } from "../provider/provider-host.js";
 import type { Concurrency } from "../runtime/concurrency.js";
 import { createSessionEventClock } from "../runtime/event-clock.js";
 import type { SessionStore } from "../session-store/session-store.js";
+import type { TemplateDefaults, TemplateStore } from "../templates/store.js";
 import { createWorkspaceAccess } from "../workspace/access.js";
 import type { ActiveTurnStore } from "./active-turn.js";
 import {
@@ -52,7 +54,6 @@ import {
 } from "./extension-session.js";
 import { extensionSnapshot } from "./extension-view.js";
 import type {
-  CreateSessionParams,
   EntriesSnapshotResult,
   GatewayRequest,
   GatewayResponse,
@@ -65,6 +66,8 @@ import type {
   QueueRemoveResult,
   SessionDefaults,
   SessionReadResult,
+  TemplateApplyResult,
+  TemplateListResult,
   TurnListResult,
   TurnStartResult,
 } from "./protocol.js";
@@ -79,6 +82,8 @@ export interface GatewayDeps {
   markers: ActiveTurnStore;
   /** Configuration-driven mode; mutually exclusive with the manual injections below. */
   extensions?: Extensions;
+  /** Declarative templates; absent means every `template.*` method is unknown. */
+  templates?: Templates;
   defaults?: SessionDefaults;
   createTools?: () => Tools;
   entries?: ContextEntries;
@@ -101,6 +106,56 @@ export interface Gateway {
   attach(connectionId: string, enqueue: (event: ProtocolEvent) => void): void;
   detach(connectionId: string): void;
   dispose(): void;
+}
+
+/** The narrow template surface the Gateway needs; the store owns every side effect. */
+export type Templates = Pick<TemplateStore, "list" | "preview" | "inspect" | "resolve" | "apply">;
+
+/** One new session after template and host defaults are layered under explicit values. */
+interface SessionSpec {
+  workspace?: string;
+  provider?: string;
+  model?: string;
+  extensions?: EntryName[];
+  /** Final prompt list; an explicit prompt list already suppresses the template prompt. */
+  prompts: string[];
+}
+
+/** A fully validated session: turning it into a runtime performs no further validation. */
+interface NewSession {
+  workspace: string;
+  provider: string;
+  model: string;
+  prompts: string[];
+  binding?: ExtensionBinding;
+  initial?: QueueEntryInput[];
+}
+
+interface SessionParams {
+  workspace?: string;
+  provider?: string;
+  model?: string;
+  extensions?: EntryName[];
+  systemPrompt?: string[];
+}
+
+function promptsFor(explicit: string[] | undefined, templatePrompt: string | undefined): string[] {
+  if (explicit !== undefined) return explicit;
+  return templatePrompt === undefined ? [] : [templatePrompt];
+}
+
+/** Template defaults sit under explicit request values but over host defaults. */
+function sessionSpec(params: SessionParams, template?: TemplateDefaults): SessionSpec {
+  const provider = params.provider ?? template?.provider;
+  const model = params.model ?? template?.model;
+  const extensions = params.extensions ?? (template?.extensions as EntryName[] | undefined);
+  return {
+    ...(params.workspace === undefined ? {} : { workspace: params.workspace }),
+    ...(provider === undefined ? {} : { provider }),
+    ...(model === undefined ? {} : { model }),
+    ...(extensions === undefined ? {} : { extensions }),
+    prompts: promptsFor(params.systemPrompt, template?.systemPrompt),
+  };
 }
 
 interface Connection {
@@ -308,6 +363,8 @@ export function createGateway(deps: GatewayDeps): Gateway {
   const newQueueEntryId = deps.newQueueEntryId ?? (() => randomUUID() as QueueEntryId);
   const newSessionId = deps.newSessionId ?? (() => randomUUID() as SessionId);
   const newTurnId = deps.newTurnId ?? (() => randomUUID() as TurnId);
+  const validateWorkspace = deps.validateWorkspace ?? defaultValidateWorkspace;
+  const templateService = deps.templates;
   const baseSessions = createSessions({ repository: deps.store, newId: newNodeId, now });
   const runtimes = new Map<SessionId, SessionRuntime>();
   const connections = new Map<string, Connection>();
@@ -404,41 +461,37 @@ export function createGateway(deps: GatewayDeps): Gateway {
     return runtime;
   }
 
-  /** Creates a session in configuration-driven mode; prepare finishes before any runtime. */
-  async function createConfiguredSession(
-    extensions: Extensions,
-    params: CreateSessionParams,
-  ): Promise<SessionMeta> {
-    const prepared = await prepareExtensionSession(
-      extensions,
-      params,
-      deps.validateWorkspace ?? defaultValidateWorkspace,
-    );
-    const { provider, model } = resolvedModelPair(prepared);
-    if (!deps.providers.select(provider, model))
-      throw new PiscesError("session.invalid_model", "Invalid model");
+  /** Absent configuration keeps the existing `protocol.unknown_method` answer. */
+  function templateStore(): Templates {
+    if (templateService === undefined)
+      throw new PiscesError("protocol.unknown_method", "Unknown protocol method");
+    return templateService;
+  }
 
-    const prompts = params.systemPrompt ?? [];
-    const entries: QueueEntryInput[] = prompts.map((text) => ({
+  /**
+   * The single session-creation path shared by `session.create` and `template.apply`.
+   * Every caller passes an already validated `NewSession`; nothing here re-validates, so
+   * `template.apply` can run all preflight checks before the store writes anything.
+   */
+  function createSessionFrom(input: NewSession): Promise<SessionMeta> {
+    const sessionId = newSessionId();
+    const meta: SessionMeta = {
+      id: sessionId,
+      model: input.model,
+      provider: input.provider,
+      workspace: input.workspace,
+      createdAt: now(),
+      schemaVersion: 1,
+    };
+    const entries: QueueEntryInput[] = input.prompts.map((text) => ({
       kind: "agent",
       role: "system",
       source: CREATE_ENTRY_SOURCE,
       content: [{ type: "text", text }],
     }));
-    // Enrichment is pure and runs before the runtime exists: a failure leaves no session.
-    entries.push(...initialDeclarationEntries(prepared.binding, prepared.extensions));
-
-    const sessionId = newSessionId();
-    const meta: SessionMeta = {
-      id: sessionId,
-      model,
-      provider,
-      workspace: prepared.workspace,
-      createdAt: now(),
-      schemaVersion: 1,
-    };
+    if (input.initial !== undefined) entries.push(...input.initial);
     return deps.concurrency.runExclusive(sessionId, async () => {
-      const runtime = createRuntime(meta, false, prepared.binding);
+      const runtime = createRuntime(meta, false, input.binding);
       runtimes.set(sessionId, runtime);
       try {
         // Prompts and the single declaration enter the queue in one atomic call.
@@ -449,6 +502,65 @@ export function createGateway(deps: GatewayDeps): Gateway {
       }
       return structuredClone(meta);
     });
+  }
+
+  /** Validates a configured-mode session and freezes its binding; creates nothing. */
+  async function prepareConfiguredSession(
+    extensions: Extensions,
+    spec: SessionSpec,
+  ): Promise<NewSession> {
+    const prepared = await prepareExtensionSession(
+      extensions,
+      {
+        ...(spec.workspace === undefined ? {} : { workspace: spec.workspace }),
+        ...(spec.provider === undefined ? {} : { provider: spec.provider }),
+        ...(spec.model === undefined ? {} : { model: spec.model }),
+        ...(spec.extensions === undefined ? {} : { extensions: spec.extensions }),
+      },
+      validateWorkspace,
+    );
+    const { provider, model } = resolvedModelPair(prepared);
+    if (!deps.providers.select(provider, model))
+      throw new PiscesError("session.invalid_model", "Invalid model");
+    // Enrichment is pure and runs before the runtime exists: a failure leaves no session.
+    return {
+      workspace: prepared.workspace,
+      provider,
+      model,
+      prompts: spec.prompts,
+      binding: prepared.binding,
+      initial: initialDeclarationEntries(prepared.binding, prepared.extensions),
+    };
+  }
+
+  /** Validates a manual-mode session from explicit values and host defaults; creates nothing. */
+  async function prepareManualSession(spec: SessionSpec): Promise<NewSession> {
+    const workspace = spec.workspace ?? deps.defaults?.workspace;
+    if (workspace === undefined)
+      throw new PiscesError("session.workspace_required", "Workspace is required");
+    if (!(await validateWorkspace(workspace)))
+      throw new PiscesError("session.invalid_workspace", "Invalid workspace");
+
+    const provider = spec.provider ?? deps.defaults?.provider;
+    const model = spec.model ?? deps.defaults?.model;
+    if (provider === undefined || model === undefined)
+      throw new PiscesError("session.model_required", "Provider and model are required");
+    if (!deps.providers.select(provider, model))
+      throw new PiscesError("session.invalid_model", "Invalid model");
+
+    const extensions = (spec.extensions ?? deps.defaults?.extensions ?? []) as EntryName[];
+    const names = new Set<string>();
+    for (const extension of extensions) {
+      if (!ENTRY_NAME.test(extension))
+        throw new PiscesError("queue.invalid_control", "Invalid extension name");
+      if (names.has(extension))
+        throw new PiscesError("queue.duplicate_name", "Duplicate extension name");
+      names.add(extension);
+    }
+    if (extensions.length)
+      throw new PiscesError("queue.invalid_control", "Extensions are not available");
+
+    return { workspace, provider, model, prompts: spec.prompts };
   }
 
   function hasCancel(nodes: SessionNode[], turnId: TurnId): boolean {
@@ -585,10 +697,59 @@ export function createGateway(deps: GatewayDeps): Gateway {
       return { providers };
     },
 
+    async "template.list"(): Promise<TemplateListResult> {
+      return { templates: await templateStore().list() };
+    },
+
+    async "template.preview"(params): Promise<TemplatePreview> {
+      const templates = templateStore();
+      const templateId = params.templateId;
+      if (typeof templateId !== "string" || templateId.length === 0) invalidRequest();
+      const workspace = params.workspace;
+      if (typeof workspace !== "string" || workspace.length === 0) invalidRequest();
+      return templates.preview(templateId, workspace);
+    },
+
+    async "template.apply"(params): Promise<TemplateApplyResult> {
+      const templates = templateStore();
+      const templateId = params.templateId;
+      if (typeof templateId !== "string" || templateId.length === 0) invalidRequest();
+      const workspace = params.workspace;
+      if (typeof workspace !== "string" || workspace.length === 0) invalidRequest();
+      const overwrite = params.overwrite;
+      if (overwrite !== undefined && typeof overwrite !== "boolean") invalidRequest();
+      // Confirmation is checked before any store call: a refused apply must write nothing.
+      if (params.confirmed !== true) invalidRequest();
+
+      // Preflight: `inspect` writes nothing and never reads the prompt file, so every
+      // session-configuration failure happens before the first file or directory exists.
+      const plan = await templates.inspect(templateId, workspace);
+      const spec = sessionSpec({ workspace }, plan.defaults);
+      const prepared =
+        deps.extensions === undefined
+          ? await prepareManualSession(spec)
+          : await prepareConfiguredSession(deps.extensions, spec);
+
+      const resolution = await templates.apply(templateId, workspace, {
+        confirmed: true,
+        ...(overwrite === undefined ? {} : { overwrite }),
+      });
+      // Only apply's post-write read can see a prompt file the template itself created; the
+      // provider/model/extensions above came from the same template config that was validated.
+      const prompt = resolution.defaults.systemPrompt;
+      const meta = await createSessionFrom({
+        ...prepared,
+        prompts: prompt === undefined ? [] : [prompt],
+      });
+      return { projectId: resolution.projectId, sessionId: meta.id };
+    },
+
     async "session.create"(params): Promise<SessionMeta> {
-      if (params.templateId !== undefined) invalidRequest();
       const workspace = params.workspace;
       if (workspace !== undefined && typeof workspace !== "string") invalidRequest();
+      const templateId = params.templateId;
+      if (templateId !== undefined && (typeof templateId !== "string" || templateId.length === 0))
+        invalidRequest();
       const explicitProvider = params.provider;
       if (explicitProvider !== undefined && typeof explicitProvider !== "string") invalidRequest();
       const explicitModel = params.model;
@@ -607,71 +768,37 @@ export function createGateway(deps: GatewayDeps): Gateway {
       )
         invalidRequest();
 
-      if (deps.extensions !== undefined)
-        return createConfiguredSession(deps.extensions, {
+      // Without a template store the existing rejection stands, before any store access.
+      if (templateId !== undefined && templateService === undefined) invalidRequest();
+
+      // A template contributes defaults beneath the explicit request. Resolving it reads the
+      // prompt file and never writes; the workspace must already be valid when it happens.
+      let template: TemplateDefaults | undefined;
+      if (templateId !== undefined && templateService !== undefined) {
+        const resolvedWorkspace = workspace ?? deps.defaults?.workspace;
+        if (resolvedWorkspace === undefined)
+          throw new PiscesError("session.workspace_required", "Workspace is required");
+        if (!(await validateWorkspace(resolvedWorkspace)))
+          throw new PiscesError("session.invalid_workspace", "Invalid workspace");
+        template = (await templateService.resolve(templateId, resolvedWorkspace)).defaults;
+      }
+
+      const spec = sessionSpec(
+        {
           ...(workspace === undefined ? {} : { workspace }),
           ...(explicitProvider === undefined ? {} : { provider: explicitProvider }),
           ...(explicitModel === undefined ? {} : { model: explicitModel }),
-          ...(systemPrompt === undefined ? {} : { systemPrompt }),
           ...(explicitExtensions === undefined
             ? {}
             : { extensions: explicitExtensions as EntryName[] }),
-        });
+          ...(systemPrompt === undefined ? {} : { systemPrompt: systemPrompt as string[] }),
+        },
+        template,
+      );
 
-      const resolvedWorkspace = workspace ?? deps.defaults?.workspace;
-      if (resolvedWorkspace === undefined)
-        throw new PiscesError("session.workspace_required", "Workspace is required");
-      const validateWorkspace = deps.validateWorkspace ?? defaultValidateWorkspace;
-      if (!(await validateWorkspace(resolvedWorkspace)))
-        throw new PiscesError("session.invalid_workspace", "Invalid workspace");
-
-      const resolvedProvider = explicitProvider ?? deps.defaults?.provider;
-      const resolvedModel = explicitModel ?? deps.defaults?.model;
-      if (resolvedProvider === undefined || resolvedModel === undefined)
-        throw new PiscesError("session.model_required", "Provider and model are required");
-      if (!deps.providers.select(resolvedProvider, resolvedModel))
-        throw new PiscesError("session.invalid_model", "Invalid model");
-
-      const extensions = (explicitExtensions ?? deps.defaults?.extensions ?? []) as EntryName[];
-      const names = new Set<string>();
-      for (const extension of extensions) {
-        if (!ENTRY_NAME.test(extension))
-          throw new PiscesError("queue.invalid_control", "Invalid extension name");
-        if (names.has(extension))
-          throw new PiscesError("queue.duplicate_name", "Duplicate extension name");
-        names.add(extension);
-      }
-      if (extensions.length)
-        throw new PiscesError("queue.invalid_control", "Extensions are not available");
-
-      const sessionId = newSessionId();
-      const meta: SessionMeta = {
-        id: sessionId,
-        model: resolvedModel,
-        provider: resolvedProvider,
-        workspace: resolvedWorkspace,
-        createdAt: now(),
-        schemaVersion: 1,
-      };
-      const prompts = (systemPrompt as string[] | undefined) ?? [];
-      const entries: QueueEntryInput[] = prompts.map((text) => ({
-        kind: "agent",
-        role: "system",
-        source: CREATE_ENTRY_SOURCE,
-        content: [{ type: "text", text }],
-      }));
-
-      return deps.concurrency.runExclusive(sessionId, async () => {
-        const runtime = createRuntime(meta, false);
-        runtimes.set(sessionId, runtime);
-        try {
-          runtime.context.enqueue(entries);
-        } catch (error) {
-          runtimes.delete(sessionId);
-          throw error;
-        }
-        return structuredClone(meta);
-      });
+      if (deps.extensions !== undefined)
+        return createSessionFrom(await prepareConfiguredSession(deps.extensions, spec));
+      return createSessionFrom(await prepareManualSession(spec));
     },
 
     async "session.read"(params): Promise<SessionReadResult> {

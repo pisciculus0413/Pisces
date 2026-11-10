@@ -232,6 +232,42 @@ test("resolve reports a missing prompt file as invalid", async () => {
   expect(await exists(join(workspace, "README.md"))).toBe(false);
 });
 
+test("inspect never reads the prompt file and writes nothing", async () => {
+  // The prompt file is one the template is about to create, so a preflight apply must not
+  // depend on it existing yet.
+  await writeTemplate(
+    "notes",
+    notesTemplate({
+      config: {
+        provider: "openai",
+        model: "gpt-4o-mini",
+        systemPromptFile: "README.md",
+      },
+    }),
+  );
+  const { store, runs } = makeStore();
+  const plan = await store.inspect("notes", workspace);
+  expect(plan.preview).toEqual({
+    directories: ["docs", "docs/archive"],
+    files: [
+      { path: "README.md", content: "# Notes\n" },
+      { path: "docs/.gitkeep", content: "" },
+    ],
+    conflicts: [],
+  });
+  expect(plan.defaults).toEqual({ provider: "openai", model: "gpt-4o-mini" });
+  expect(await exists(join(workspace, "README.md"))).toBe(false);
+  expect(await exists(join(workspace, "docs"))).toBe(false);
+  expect(runs).toEqual([]);
+  expect(await exists(join(dataDir, "projects.json"))).toBe(false);
+});
+
+test("inspect reports an unknown template", async () => {
+  const { store } = makeStore();
+  const error = await rejection(store.inspect("notes", workspace));
+  expect(error.code).toBe("template.not_found");
+});
+
 test("apply writes directories then files and appends one project record", async () => {
   await writeTemplate("notes", notesTemplate());
   const log: string[] = [];

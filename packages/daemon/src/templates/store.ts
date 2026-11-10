@@ -37,6 +37,11 @@ export interface TemplateStoreOptions {
 export interface TemplateStore {
   list(): Promise<TemplateInfo[]>;
   preview(templateId: string, workspace: string): Promise<TemplatePreview>;
+  /**
+   * Read-only preflight: preview plus config defaults, and never the prompt file. An
+   * `apply` preflight must survive a prompt file the template is about to create.
+   */
+  inspect(templateId: string, workspace: string): Promise<TemplatePlan>;
   resolve(templateId: string, workspace: string): Promise<TemplatePlan>;
   apply(
     templateId: string,
@@ -180,6 +185,10 @@ export function createTemplateStore(options: TemplateStoreOptions): TemplateStor
     },
     async preview(templateId, workspace) {
       return (await prepare(templateId, workspace, false)).preview;
+    },
+    async inspect(templateId, workspace) {
+      const { preview, defaults } = await prepare(templateId, workspace, false);
+      return { preview, defaults };
     },
     async resolve(templateId, workspace) {
       const { preview, defaults } = await prepare(templateId, workspace, true);
