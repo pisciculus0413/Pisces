@@ -88,18 +88,22 @@ OpenAI 兼容示例：
 | `models[].modalities` | 是 | 非空，元素为 `text`、`image`、`audio` |
 | `defaults` | 否 | `{ "provider": ..., "model": ... }`，必须指向已声明的组合 |
 | `templatesDir` | 否 | 模板目录；绝对路径（支持 `~/`），`start` 作为第三个 argv 传给 daemon 子进程 |
+| `defaultWorkspace` | 否 | 新会话的默认工作区；必须是绝对路径（不做 `~` 展开），`start` 作为 daemon `defaults.workspace` 传入 |
 
 - `defaults` 是 CLI 与扩展层共用的唯一默认 provider/model 键；旧的 `defaultProvider`/`defaultModel`
   已移除（pre-release 变更，无迁移）：出现时按未知键退出 2。
-- 全局文件还允许扩展组的 `defaultWorkspace`、`extensions`、`entryConfig`。CLI 生命周期命令**接受
-  但不校验、不使用**扩展键；daemon 的扩展加载器忽略 CLI 键。`config` 命令同时按两侧规则校验，
-  因此它写出的全局文件对两个加载器都合法。
+- 全局文件还允许扩展组的 `defaultWorkspace`、`extensions`、`entryConfig`。生命周期命令读取并校验
+  `defaultWorkspace`（新会话默认工作区），由 `start` 合并进 daemon defaults；`extensions` 与
+  `entryConfig` 只由 daemon 扩展加载器使用。daemon 的扩展加载器忽略 CLI 键；`config` 命令同时按
+  两侧规则校验，因此它写出的全局文件对两个加载器都合法。
+- `defaultWorkspace` 只在 daemon 启动时读取：修改配置后需要 `stop` 再 `start`，新默认值才作用于
+  此后创建的会话；已在运行的 daemon 继续使用启动时的旧值。
 - 工作区 `<workspace>/.pisces/config.json` 只允许 `defaults`、`extensions`、`entryConfig`；出现
   `dataDir`、`providers`、`templatesDir` 或 `defaultWorkspace` 按未知键处理。
 - 工作区 `defaults` 在全局文件可读且含 `providers` 时也校验其指向；全局文件缺失时只校验格式。
 - 扩展键的语义见 `docs/extensions.md`。
 
-- 未知键、类型错误、重复 `id`、相对 `dataDir` 均视为不合法，退出 2。
+- 未知键、类型错误、重复 `id`、相对 `dataDir` 或相对 `defaultWorkspace` 均视为不合法，退出 2。
 - CLI 只暴露一种方言 `openai-chat`；`baseUrl` 必须能提供 OpenAI Chat Completions 兼容接口。
 - `dataDir` 也可以用 `--data-dir <path>` 临时覆盖（必须是绝对路径；相对路径在 `start` 时以
   `daemon.insecure_directory` 退出 2）。
@@ -351,7 +355,7 @@ no active turn
 
 ```bash
 pisces run [prompt] [--new | --continue | --session <id> [--create]]
-           [--model <id>] [--provider <id>]
+           [--workspace <dir>] [--model <id>] [--provider <id>]
            [--system-prompt <text> | --use-default-system-prompt]
            [--enable <package#name>]... [--disable <package#name>]...
            [--print | --json]
@@ -368,6 +372,12 @@ pisces run [prompt] [--new | --continue | --session <id> [--create]]
     `[A-Za-z0-9_-]+`，否则是用法错误。会话不存在且带 `--create` 时新建（服务端生成新 id）；不带
     `--create` 时按 `session.not_found` 退出 1。`--create` 只能与 `--session` 同用。
 - 会话选项：
+  - `--workspace <dir>`：只为本次新建的会话指定工作区，必须是绝对路径，优先于 daemon 启动时的默认
+    工作区；只传给 `session.create`（`--new`、缺省选择器、或 `--session --create` 且会话不存在）。
+    与既有会话同用（`--session` 命中或 `--continue`）时本地返回
+    `error: run.workspace_unsupported: Workspace can only be set for a new session`，退出 1，且不修改
+    会话、不入队、不启动 turn。省略时沿用 daemon 的默认工作区；两者都没有时仍是
+    `session.workspace_required`。相对或空值是用法错误（退出 2）。
   - `--model` / `--provider`：新会话交给 `session.create`；既有会话交给 `session.configure`。两者对既有
     会话必须成对给出，只给一个时 daemon 返回 `session.model_required`（退出 1）。
   - `--system-prompt <text>`：新会话走 `session.create.systemPrompt`；既有会话走
@@ -491,7 +501,7 @@ $ pisces models list --json
 |---|---|
 | 全部命令成功 | 0 |
 | `run` 完成 turn（`completed`） | 0 |
-| `config get` / `config unset` 未命中（`config.key_not_found`）；`sessions list|export|cancel` / `run` / `provider list` / `models list` 连接失败（`daemon.unreachable`）；`run` 的失败 turn、`client.protocol`、`queue.invalid_control` 等协议/会话/供应商错误；`sessions export|cancel`、`provider list`、`models list` 与人类模式的 `sessions list` 协议响应不合法（`client.protocol`；`sessions list --json` 与 `provider list --json` 原样透传、不做结构校验，但协议层/传输失败仍退出 1）；`sessions export` 的 `session.not_found` / `session.node_not_found`；`sessions cancel` 被拒绝（`turn.cancel_failed`）；`models list --provider` 未知 id（`provider.not_found`） | 1 |
+| `config get` / `config unset` 未命中（`config.key_not_found`）；`sessions list|export|cancel` / `run` / `provider list` / `models list` 连接失败（`daemon.unreachable`）；`run` 的失败 turn、`client.protocol`、`queue.invalid_control` 等协议/会话/供应商错误；`run --workspace` 用于既有会话（`run.workspace_unsupported`）；`sessions export|cancel`、`provider list`、`models list` 与人类模式的 `sessions list` 协议响应不合法（`client.protocol`；`sessions list --json` 与 `provider list --json` 原样透传、不做结构校验，但协议层/传输失败仍退出 1）；`sessions export` 的 `session.not_found` / `session.node_not_found`；`sessions cancel` 被拒绝（`turn.cancel_failed`）；`models list --provider` 未知 id（`provider.not_found`） | 1 |
 | 已在运行 / 未知属主 / 启动失败 / 停止超时 / socket 无属主 / pid 记录写入或清除失败 | 1 |
 | `run` 的 turn 被取消（Ctrl-C 或外部 `sessions cancel`） | 130 |
 | 用法错误、配置不合法、配置键未知、工作区不可用、缺少密钥、数据目录不可用 | 2 |
@@ -509,7 +519,7 @@ $ pisces models list --json
 | `--enable <name>` / `--disable <name>` | 启用/停用扩展条目，可重复（仅 `run`） |
 | `--print` | 只输出最终 turn 文本（仅 `run`；与 `--json` 互斥） |
 | `--scope <global\|workspace>` | `config` 的目标层，默认 `global` |
-| `--workspace <dir>` | 工作区目录（`config --scope workspace`、`extensions list`） |
+| `--workspace <dir>` | 工作区目录（`config --scope workspace`、`extensions list`）；新会话的工作区（仅 `run`，绝对路径，须为新建会话） |
 | `--json` | 机器可读输出：`status`、`templates`、`config list/get`、`extensions list`、`sessions list`、`run`、`provider list`、`models list` |
 | `--help` / `--version` | 帮助/版本；可在第一个参数位置或任一命令参数位置使用（`wat --help` 仍是用法错误） |
 
@@ -517,7 +527,7 @@ $ pisces models list --json
 `--node`、`--provider`、`--workspace`、`--scope`、`--session`、`--model`、`--system-prompt`、`--enable`、
 `--disable` 缺少取值或其取值以 `-` 开头、`--json` 用于不支持的子命令（含 `sessions export|cancel`）、
 `--node` 用于非 `sessions export`、`--provider` 用于 `provider list`（`models list` 与 `run` 接受它）、
-`--workspace` 与 `--scope global` 同用、`--print` 与 `--json` 同用、`--system-prompt` 与
+`--workspace` 与 `--scope global` 同用、`run --workspace` 不是绝对路径、`--print` 与 `--json` 同用、`--system-prompt` 与
 `--use-default-system-prompt` 同用、`run` 缺少/多余位置参数或会话选择器冲突时，同样按用法错误处理。
 
 ## 6. 文件位置
@@ -609,8 +619,9 @@ $ pisces models list --json
 
 - `client list|start`、`providers check`、`auth`。
 - `run` 的交互式 stdin 循环与多轮输入；本阶段只交付由位置参数驱动的单个非交互 turn。
-- 配置文件中的扩展配置对 CLI 生命周期命令只是“接受并忽略”；CLI 尚不装配扩展，也没有交互式配置
-  编辑器、配置迁移工具、凭据文件或扩展安装/更新。
+- CLI 尚不装配扩展：`defaultWorkspace` 已作为新会话默认工作区传入 daemon，`extensions` 与
+  `entryConfig` 仍只由 daemon 扩展加载器使用；也没有交互式配置编辑器、配置迁移工具、凭据文件或
+  扩展安装/更新。
 - macOS 与 Windows：仅 Linux x64 已实现并验证。
 - 多用户共享 dataDir、非本地（网络）socket、systemd 等进程管理器集成。
 
@@ -634,7 +645,10 @@ $ pisces models list --json
 `--json` 只输出一行对象；第二次 `--continue` 复用同一会话；失败 provider 使 turn `failed`、退出 1且
 不输出成功文本（`--json` 对象含 `error`、stderr 为空）；挂起 provider 上注入 Ctrl-C 后真实
 `turn.cancel` 让 turn 从 `turn.list` 消失并以 130 退出；daemon 停止后退出 1（`daemon.unreachable`）；
-未装配扩展的 daemon 上 `--enable` 得到 `queue.invalid_control` 且不启动 turn。构建后的 `dist/main.js`
+未装配扩展的 daemon 上 `--enable` 得到 `queue.invalid_control` 且不启动 turn。
+`packages/cli/test/default-workspace-e2e.test.ts` 用 `buildDaemonOptions` 启动真实 daemon，验收全局
+`defaultWorkspace` 生效、重启后新默认值生效、`run --workspace` 覆盖默认，以及既有会话上本地拒绝
+`--workspace`。构建后的 `dist/main.js`
 子进程另在同一进程内 daemon 上跑一次 `run ... --print` 并断言 stdout 与落盘会话。本地在 Node 26.13.0
 x64 上通过；远端 CI 未运行。运行方式：
 

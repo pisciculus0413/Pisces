@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import type { ProtocolEvent } from "@pisces/protocol";
 import { type Client, ClientError, connectClient, UNREACHABLE_MESSAGE } from "./client.js";
 import { type CommandIo, processIo } from "./commands.js";
@@ -18,6 +19,7 @@ const CONFIG_MESSAGE = "Invalid configuration";
 const PROTOCOL_MESSAGE = "Invalid response from daemon";
 const SESSION_NOT_FOUND_MESSAGE = "Session does not exist";
 const DEFAULT_PROMPT_MESSAGE = "Default system prompt applies only to new sessions";
+const WORKSPACE_UNSUPPORTED_MESSAGE = "Workspace can only be set for a new session";
 
 /** Same shape the daemon accepts for `session.read` and the other session methods. */
 const SESSION_ID = /^[A-Za-z0-9_-]+$/;
@@ -33,6 +35,8 @@ export interface RunOptions {
   continueSession: boolean;
   sessionId?: string;
   create: boolean;
+  /** Absolute workspace for a session this run creates; never applied to an existing one. */
+  workspace?: string;
   model?: string;
   provider?: string;
   systemPrompt?: string;
@@ -197,6 +201,7 @@ function parseTurnStart(value: unknown): { turnId: string; mode: "new" | "steer"
 function invalidUsage(options: RunOptions): boolean {
   if (options.prompt.trim() === "") return true;
   if (options.sessionId !== undefined && !SESSION_ID.test(options.sessionId)) return true;
+  if (options.workspace !== undefined && !isAbsolute(options.workspace)) return true;
   const selectors =
     Number(options.newSession) +
     Number(options.continueSession) +
@@ -219,6 +224,7 @@ async function createSession(client: Client, options: RunOptions): Promise<Sessi
   if (options.provider !== undefined) params.provider = options.provider;
   if (options.model !== undefined) params.model = options.model;
   if (options.systemPrompt !== undefined) params.systemPrompt = [options.systemPrompt];
+  if (options.workspace !== undefined) params.workspace = options.workspace;
   return parseMeta(await client.request("session.create", params));
 }
 
@@ -369,6 +375,9 @@ async function execute(
   }
 
   if (existing) {
+    if (options.workspace !== undefined) {
+      throw new ClientError("run.workspace_unsupported", WORKSPACE_UNSUPPORTED_MESSAGE);
+    }
     if (options.useDefaultSystemPrompt) {
       throw new ClientError("run.default_system_prompt_unsupported", DEFAULT_PROMPT_MESSAGE);
     }

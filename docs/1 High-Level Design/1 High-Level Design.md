@@ -1132,7 +1132,7 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
 - `config`：查看或修改配置，只影响此后创建的会话。
   - `list`、`get <key>`、`set <key> <value>`、`unset <key>`
   - 范围：新会话的默认扩展选择；默认 `provider`/`model`；默认工作区 `defaultWorkspace`；provider 与扩展声明；扩展清点只读
-  - `defaultWorkspace` 只校验绝对路径格式；存在性与可写性在 `session.create` 时检查；只影响此后创建的会话
+  - `defaultWorkspace` 只校验绝对路径格式；存在性与可写性在 `session.create` 时检查；`start` 把它合并进 daemon `defaults.workspace`，因此只影响启动后创建的会话；修改后需重启 daemon
 - `run [prompt]`：非交互执行一个 turn（已实现）；交互式 stdin 循环与多轮输入仍未实现。
   - 会话选择：`--new` 新建；`--continue` 取 `createdAt` 最大的已落盘会话；`--session <id>` 指定会话，
     配合 `--create` 在其不存在时新建；三者互斥，缺省等同 `--new`。
@@ -1143,6 +1143,7 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
   - `--use-default-system-prompt`：只对新会话有效；对既有会话本地报
     `run.default_system_prompt_unsupported`，不做静默 no-op。
   - `--model <name>` / `--provider <name>`：设置该会话的模型与供应商；既有会话两者必须成对。
+  - `--workspace <name>`：只为本次新建的会话指定工作区（绝对路径），经 `session.create` 显式传入并优先于 daemon 默认；既有会话本地报 `run.workspace_unsupported`（1），不修改会话；省略时沿用 daemon 启动时的默认工作区。
   - `--print`：只输出最终文本；`--json`：只输出一行 `{sessionId,turnId,reason,text,error?}`。
   - 退出码：完成 0；失败 turn、协议/会话/连接错误 1；用法或配置错误 2；取消（Ctrl-C 或外部
     `sessions cancel`）130。
@@ -1193,8 +1194,8 @@ PID 复用防护见 §8.1。模板命令经单个短连接调用 `template.*`，
 `provider.not_found` 退出 1。其余命令（`client`、`providers check`、`auth`）仍为目标设计，
 **未实现**。交互式 `run` 循环也未实现，但非交互 `run` 已按上述语义交付。全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir`
 与扩展组 `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 共存，两个加载器互不拒绝；
-默认 provider/model 只使用 `defaults`（旧 `defaultProvider`/`defaultModel` 已移除），CLI
-接受但不校验、不使用扩展键。CLI 仅支持 Linux x64，
+默认 provider/model 只使用 `defaults`（旧 `defaultProvider`/`defaultModel` 已移除）。CLI
+读取并校验 `defaultWorkspace` 并在 `start` 时并入 daemon defaults；其余扩展键由 daemon 扩展加载器使用。CLI 仅支持 Linux x64，
 只暴露 `openai-chat` 方言；配置、凭据与恢复步骤见 `docs/cli.md`。
 
 ### 6.9 模板接口

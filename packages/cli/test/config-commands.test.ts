@@ -118,6 +118,14 @@ test("list never reveals environment credential values", async () => {
   expect(io.out.join("\n")).not.toContain(SECRET);
 });
 
+test("list includes the global defaultWorkspace", async () => {
+  const { configPath, io, deps } = await fixture();
+  await writeConfig(configPath, fullConfig({ defaultWorkspace: "/tmp/pisces-ws" }));
+
+  expect(await configList({ configPath, io: io.io, json: true }, deps)).toBe(0);
+  expect(JSON.parse(io.out[0] ?? "")).toMatchObject({ defaultWorkspace: "/tmp/pisces-ws" });
+});
+
 test("list of a missing workspace file is an empty object", async () => {
   const { root, io, deps } = await fixture();
   expect(

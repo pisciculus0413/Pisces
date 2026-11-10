@@ -234,13 +234,19 @@ test("loadConfig accepts the global union of cli and extension keys", async () =
   expect(config.dataDir).toBe("/tmp/pisces");
   expect(config.defaults).toEqual({ provider: "openai", model: "m" });
   expect(config.templatesDir).toBe("/srv/pisces/templates");
-  expect(Object.keys(config).sort()).toEqual(["dataDir", "defaults", "providers", "templatesDir"]);
+  expect(config.defaultWorkspace).toBe("/home/u/projects/notes");
+  expect(Object.keys(config).sort()).toEqual([
+    "dataDir",
+    "defaultWorkspace",
+    "defaults",
+    "providers",
+    "templatesDir",
+  ]);
 });
 
 test("parseConfig accepts and ignores extension keys without validating them", () => {
   const config = parseConfig(
     raw({
-      defaultWorkspace: 3,
       extensions: "not-an-array",
       entryConfig: ["not", "an", "object"],
     }),
@@ -256,12 +262,20 @@ test("loadConfig ignores malformed extension keys on the lifecycle path", async 
   for (const extensionKeys of [
     { extensions: "pkg#a" },
     { extensions: [1] },
-    { defaultWorkspace: "relative/path" },
     { entryConfig: [] },
     { entryConfig: { "not an entry": {} } },
   ]) {
     await writeFile(path, JSON.stringify(raw(extensionKeys)));
     await expect(loadConfig(path)).resolves.toMatchObject({ dataDir: "/tmp/pisces" });
+  }
+});
+
+test("loadConfig rejects a relative or malformed defaultWorkspace", async () => {
+  const dir = await tempDir();
+  const path = join(dir, "config.json");
+  for (const value of ["relative/path", "", ".", 42, null]) {
+    await writeFile(path, JSON.stringify(raw({ defaultWorkspace: value })));
+    await expect(loadConfig(path)).rejects.toMatchObject({ code: "config.invalid" });
   }
 });
 
@@ -344,6 +358,18 @@ test("accepts an optional absolute templatesDir", () => {
 test("rejects a relative or malformed templatesDir", () => {
   for (const value of ["templates", "", ".", 42, null]) {
     expectInvalid(() => parseConfig(raw({ templatesDir: value })));
+  }
+});
+
+test("accepts an optional absolute defaultWorkspace without tilde expansion", () => {
+  const valid = parseConfig(raw({ defaultWorkspace: "/srv/pisces/workspace" }));
+  expect(valid.defaultWorkspace).toBe("/srv/pisces/workspace");
+  expect(parseConfig(raw()).defaultWorkspace).toBeUndefined();
+});
+
+test("rejects a relative, empty or malformed defaultWorkspace", () => {
+  for (const value of ["workspace", "", ".", "~/workspace", 42, null, ["/ws"]]) {
+    expectInvalid(() => parseConfig(raw({ defaultWorkspace: value })));
   }
 });
 

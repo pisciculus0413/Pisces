@@ -1681,7 +1681,7 @@ interface Inventory {
 - 配置来源优先级：工作区 `.pisces/config.json` > 软件配置目录 > 内置默认。
 - 默认 provider/model 从 `defaults` 读取，供 `session.create` 使用；工作区配置可覆盖软件配置。`defaults` 必须成对出现；旧的 `defaultProvider`/`defaultModel` 已移除。
 - `defaultWorkspace` 只来自全局配置，供 `session.create` 在省略 `workspace` 时使用；工作区配置需要先确定工作区才能读取，因此不提供 `defaultWorkspace`，也不参与默认工作区解析；若出现按未知配置键处理。
-- `defaultWorkspace` 必须是绝对路径；`config` 只校验格式，存在性与可写性在 `session.create` 时检查。
+- `defaultWorkspace` 必须是绝对路径；`config` 与 CLI 加载器只校验格式（不做 `~` 展开），存在性与可写性在 `session.create` 时检查。CLI `start` 将它合并进 daemon `defaults.workspace`；daemon 只在启动时读取，修改后需重启才对之后创建的会话生效。
 - `config` CLI 只影响此后创建的会话；不修改既有会话的 `SessionMeta`。
 - 新会话的默认扩展选择来自配置；`session.create.extensions` 显式列表替换默认选择。
 - `entryConfig` 的键必须是当前清点中存在的 `wrapper` 条目，否则 `config.invalid`；它的合并顺序为 sidecar `config.defaults` < 用户覆盖（深合并），schema 校验合并结果：无用户覆盖时不合法只丢弃该包装器（`extensions.invalid`），有用户覆盖时不合法使整个 `prepare` 以 `config.invalid` 失败。
@@ -1999,9 +1999,10 @@ turn 时输出 `no active turn` 并退出 0，`{cancelled:false}` 映射为 CLI 
 - `config` 只影响此后创建的会话，不改写既有会话。
 - CLI 不直接访问 `events.jsonl`；会话读取与导出经协议/服务层。
 - 全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir` 与扩展组
-  `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 共存；CLI 加载器接受但忽略扩展键，
-  扩展解析器忽略 CLI 键。默认 provider/model 只使用 `defaults`；旧 `defaultProvider`/`defaultModel`
-  按未知键拒绝。provider 方言固定为 `openai-chat`。
+  `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 共存；CLI 加载器解析并校验
+  `defaultWorkspace`（转发为 daemon 默认工作区），其余扩展键由扩展加载器使用，扩展解析器忽略 CLI 键。
+  默认 provider/model 只使用 `defaults`；旧 `defaultProvider`/`defaultModel` 按未知键拒绝。provider
+  方言固定为 `openai-chat`。
 
 ### 7.2 `run`
 
@@ -2011,7 +2012,7 @@ turn 时输出 `no active turn` 并退出 0，`{cancelled:false}` 映射为 CLI 
 
 ```text
 pisces run [prompt] [--new | --continue | --session <id> [--create]]
-           [--model <id>] [--provider <id>]
+           [--workspace <dir>] [--model <id>] [--provider <id>]
            [--system-prompt <text> | --use-default-system-prompt]
            [--enable <package#name>]... [--disable <package#name>]...
            [--print | --json] [--config <path>] [--data-dir <dir>]
@@ -2023,7 +2024,11 @@ pisces run [prompt] [--new | --continue | --session <id> [--create]]
   中 `createdAt` 最大的已落盘会话（并列取 daemon 返回顺序第一个），空则 `session.not_found`（1）；
   `--session <id>` 先做一次 `session.read {limit: 1}` 存在性检查，不存在且带 `--create` 时新建，
   否则 `session.not_found`（1）；`--create` 只能与 `--session` 同用；id 必须匹配 `[A-Za-z0-9_-]+`。
-- 会话选项：`--model`/`--provider` 对新会话交给 `session.create`、对既有会话交给
+- 会话选项：`--workspace` 必须是绝对路径，只传给本次新建的 `session.create`（`--new`、缺省选择器、
+  或 `--session --create` 且会话不存在），显式值优先于 daemon 启动时的默认工作区；既有会话（`--session`
+  命中或 `--continue`）与 `--workspace` 同用时本地返回 `run.workspace_unsupported`（1），不配置、
+  不入队、不启动 turn。省略时由 daemon 解析默认工作区，仍缺则 `session.workspace_required`。
+  `--model`/`--provider` 对新会话交给 `session.create`、对既有会话交给
   `session.configure`（既有会话两者必须成对，否则 daemon 返回 `session.model_required`）；
   `--system-prompt` 对新会话交给 `session.create.systemPrompt`、对既有会话交给
   `session.configure.systemPrompt`；`--use-default-system-prompt` 只对新会话有效，对既有会话本地返回

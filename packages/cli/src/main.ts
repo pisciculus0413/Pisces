@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import {
   type CommandDeps,
   type CommandIo,
@@ -69,7 +70,7 @@ export const USAGE = [
   "  --provider <id>     only list models of this provider (models list)",
   "  --node <id>         export only this node's branch (sessions export)",
   "  --scope <scope>     config scope: global (default) or workspace",
-  "  --workspace <dir>   workspace directory (config workspace scope, extensions list)",
+  "  --workspace <dir>   workspace directory (config workspace scope, extensions list, run)",
   "  --new               create a new session (run)",
   "  --continue          continue the newest session (run)",
   "  --session <id>      use an existing session (run)",
@@ -185,6 +186,7 @@ interface RunParsed {
   continueSession: boolean;
   sessionId?: string;
   create: boolean;
+  workspace?: string;
   model?: string;
   provider?: string;
   systemPrompt?: string;
@@ -561,6 +563,7 @@ function parseRun(argv: readonly string[]): RunParsed | "help" | "version" | und
   let configPath: string | undefined;
   let dataDir: string | undefined;
   let sessionId: string | undefined;
+  let workspace: string | undefined;
   let model: string | undefined;
   let provider: string | undefined;
   let systemPrompt: string | undefined;
@@ -607,6 +610,7 @@ function parseRun(argv: readonly string[]): RunParsed | "help" | "version" | und
       argument === "--config" ||
       argument === "--data-dir" ||
       argument === "--session" ||
+      argument === "--workspace" ||
       argument === "--model" ||
       argument === "--provider" ||
       argument === "--system-prompt" ||
@@ -618,6 +622,7 @@ function parseRun(argv: readonly string[]): RunParsed | "help" | "version" | und
       if (argument === "--config") configPath = value;
       else if (argument === "--data-dir") dataDir = value;
       else if (argument === "--session") sessionId = value;
+      else if (argument === "--workspace") workspace = value;
       else if (argument === "--model") model = value;
       else if (argument === "--provider") provider = value;
       else if (argument === "--system-prompt") systemPrompt = value;
@@ -638,6 +643,7 @@ function parseRun(argv: readonly string[]): RunParsed | "help" | "version" | und
   if (selectors > 1) return undefined;
   if (create && sessionId === undefined) return undefined;
   if (sessionId !== undefined && !RUN_SESSION_ID.test(sessionId)) return undefined;
+  if (workspace !== undefined && !isAbsolute(workspace)) return undefined;
   if (print && json) return undefined;
   if (systemPrompt !== undefined && useDefaultSystemPrompt) return undefined;
 
@@ -661,6 +667,7 @@ function parseRun(argv: readonly string[]): RunParsed | "help" | "version" | und
     ...(configPath !== undefined ? { configPath } : {}),
     ...(dataDir !== undefined ? { dataDir } : {}),
     ...(sessionId !== undefined ? { sessionId } : {}),
+    ...(workspace !== undefined ? { workspace } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(provider !== undefined ? { provider } : {}),
     ...(systemPrompt !== undefined ? { systemPrompt } : {}),
@@ -706,6 +713,7 @@ export async function runCli(
       json: parsed.json,
       ...(parsed.dataDir !== undefined ? { dataDir: parsed.dataDir } : {}),
       ...(parsed.sessionId !== undefined ? { sessionId: parsed.sessionId } : {}),
+      ...(parsed.workspace !== undefined ? { workspace: parsed.workspace } : {}),
       ...(parsed.model !== undefined ? { model: parsed.model } : {}),
       ...(parsed.provider !== undefined ? { provider: parsed.provider } : {}),
       ...(parsed.systemPrompt !== undefined ? { systemPrompt: parsed.systemPrompt } : {}),

@@ -383,6 +383,112 @@ test("a new session omits create fields that were not provided", async () => {
   expect(client.calls.some((call) => call.method === "session.configure")).toBe(false);
 });
 
+test("--workspace is sent to session.create for a new session", async () => {
+  const client = fakeClient(() => undefined);
+  client.setResponder(completedResponder(client, [endedEvent("completed")]));
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await runCommand(
+    runOptions(configPath, { io: rec.io, newSession: true, workspace: "/tmp/ws", print: true }),
+    client.deps,
+  );
+
+  expect(code).toBe(0);
+  expect(client.calls[0]).toEqual({
+    method: "session.create",
+    params: { workspace: "/tmp/ws" },
+  });
+  expect(client.calls.some((call) => call.method === "session.configure")).toBe(false);
+  expect(rec.err).toEqual([]);
+});
+
+test("--session --create passes --workspace to the replacement session", async () => {
+  const client = fakeClient((method) => {
+    if (method === "session.read")
+      throw new ClientError("session.not_found", "Session does not exist");
+    if (method === "session.create") return META_2;
+    if (method === "session.subscribe") return { sessionId: "s2" };
+    if (method === "queue.enqueue") return { ids: ["q1"] };
+    if (method === "turn.start")
+      return startAndEmit(client, [endedEvent("completed", { sessionId: "s2" })]);
+    throw new Error(`unexpected method ${method}`);
+  });
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await runCommand(
+    runOptions(configPath, {
+      io: rec.io,
+      sessionId: "missing",
+      create: true,
+      workspace: "/tmp/ws",
+      print: true,
+    }),
+    client.deps,
+  );
+
+  expect(code).toBe(0);
+  expect(client.calls[1]).toEqual({
+    method: "session.create",
+    params: { workspace: "/tmp/ws" },
+  });
+});
+
+test("--workspace on an existing session fails locally before any write", async () => {
+  const resolutions = [
+    {
+      name: "session-list",
+      respond: (method: string) => {
+        if (method === "session.list") return { sessions: [META] };
+        throw new Error(`unexpected method ${method}`);
+      },
+      options: { continueSession: true },
+    },
+    {
+      name: "session-read",
+      respond: (method: string) => {
+        if (method === "session.read") return { meta: META, seq: 0, records: [], queue: [] };
+        throw new Error(`unexpected method ${method}`);
+      },
+      options: { sessionId: "s1" },
+    },
+  ] as const;
+
+  for (const resolution of resolutions) {
+    const client = fakeClient(resolution.respond);
+    const { configPath } = await fixture();
+    const rec = recorder();
+
+    const code = await runCommand(
+      runOptions(configPath, { io: rec.io, workspace: "/tmp/ws", ...resolution.options }),
+      client.deps,
+    );
+
+    expect(code, resolution.name).toBe(1);
+    expect(rec.err, resolution.name).toEqual([
+      "error: run.workspace_unsupported: Workspace can only be set for a new session",
+    ]);
+    expect(rec.out).toEqual([]);
+    expect(client.calls.some((call) => call.method === "session.configure")).toBe(false);
+    expect(client.calls.some((call) => call.method === "queue.enqueue")).toBe(false);
+    expect(client.calls.some((call) => call.method === "turn.start")).toBe(false);
+    expect(client.calls.some((call) => call.method === "session.create")).toBe(false);
+  }
+});
+
+test("a relative or empty workspace is a usage error before connecting", async () => {
+  const { configPath } = await fixture();
+  const counter = { connects: 0 };
+
+  for (const workspace of ["relative/ws", "", "."]) {
+    expect(await runCommand(runOptions(configPath, { workspace }), unreachableDeps(counter))).toBe(
+      2,
+    );
+  }
+  expect(counter.connects).toBe(0);
+});
+
 test("--print emits only the final text", async () => {
   const client = fakeClient(() => undefined);
   client.setResponder(
@@ -1198,6 +1304,29 @@ test("default output falls back to io.out when io.write is absent", async () => 
   expect(rec.out).toEqual(["a", "b", ""]);
 });
 
+test("runCli forwards --workspace to a new session", async () => {
+  const client = fakeClient(() => undefined);
+  client.setResponder(completedResponder(client, [endedEvent("completed")]));
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  const code = await runCli(
+    ["run", "hello", "--workspace", "/tmp/ws", "--print", "--config", configPath],
+    rec.io,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    client.deps,
+  );
+
+  expect(code).toBe(0);
+  expect(client.calls[0]).toEqual({
+    method: "session.create",
+    params: { workspace: "/tmp/ws" },
+  });
+});
+
 test("runCli accepts a prompt before flags and dispatches run", async () => {
   const client = fakeClient(() => undefined);
   client.setResponder(completedResponder(client, [endedEvent("completed")]));
@@ -1232,6 +1361,9 @@ test("runCli rejects run usage errors without connecting", async () => {
     ["run", "hello", "--system-prompt", "x", "--use-default-system-prompt"],
     ["run", "hello", "--model"],
     ["run", "hello", "--model", ""],
+    ["run", "hello", "--workspace"],
+    ["run", "hello", "--workspace", ""],
+    ["run", "hello", "--workspace", "relative/ws"],
     ["run", "hello", "--enable", "a#x", "--disable", "a#x"],
     ["run", "hello", "--session", "bad id"],
     ["run", "hello", "--session", "bad/id"],

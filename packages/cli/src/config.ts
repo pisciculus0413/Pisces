@@ -24,6 +24,8 @@ export interface CliConfig {
   defaults?: { provider: string; model: string };
   /** Absolute directory holding `<id>.json` templates; absent means no templates. */
   templatesDir?: string;
+  /** Absolute default workspace for new sessions; absent means the daemon requires one. */
+  defaultWorkspace?: string;
 }
 
 const INVALID_MESSAGE = "Invalid configuration";
@@ -298,6 +300,10 @@ export function parseConfig(value: unknown): CliConfig {
   };
   if (value.defaults !== undefined) config.defaults = parseDefaults(value.defaults, providers);
   if (value.templatesDir !== undefined) config.templatesDir = parseDataDir(value.templatesDir);
+  // No `~` expansion: like the extension parser, only an absolute path is accepted.
+  if (value.defaultWorkspace !== undefined) {
+    config.defaultWorkspace = parseDataDir(value.defaultWorkspace);
+  }
   return config;
 }
 

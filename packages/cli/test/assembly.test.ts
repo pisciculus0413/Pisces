@@ -97,6 +97,46 @@ test("dataDir override wins and defaults are forwarded only when defined", () =>
   expect(Object.keys(withoutDefaults).sort()).toEqual(["dataDir", "providerHost", "providers"]);
 });
 
+test("forwards a default workspace as daemon defaults", () => {
+  const options = buildDaemonOptions(
+    config({ defaultWorkspace: "/tmp/workspace" }),
+    "/tmp/pisces",
+    { OPENAI_API_KEY: "sk-test" },
+  );
+  expect(options.defaults).toEqual({ workspace: "/tmp/workspace" });
+});
+
+test("merges the default workspace with provider and model defaults", () => {
+  const options = buildDaemonOptions(
+    config({
+      defaultWorkspace: "/tmp/workspace",
+      defaults: { provider: "openai", model: "gpt" },
+    }),
+    "/tmp/pisces",
+    { OPENAI_API_KEY: "sk-test" },
+  );
+  expect(options.defaults).toEqual({
+    workspace: "/tmp/workspace",
+    provider: "openai",
+    model: "gpt",
+  });
+});
+
+test("omits defaults entirely when there is nothing to forward", () => {
+  const options = buildDaemonOptions(config(), "/tmp/pisces", {});
+  expect(options).not.toHaveProperty("defaults");
+});
+
+test("keeps the templates path alongside daemon defaults", () => {
+  const options = buildDaemonOptions(
+    config({ defaultWorkspace: "/tmp/workspace", templatesDir: "/tmp/templates" }),
+    "/tmp/pisces",
+    {},
+  );
+  expect(options.defaults).toEqual({ workspace: "/tmp/workspace" });
+  expect(options.templates).toEqual({ configDir: "/tmp/templates" });
+});
+
 test("returns only StartDaemonOptions keys", () => {
   const options = buildDaemonOptions(
     config({ defaults: { provider: "openai", model: "gpt" } }),

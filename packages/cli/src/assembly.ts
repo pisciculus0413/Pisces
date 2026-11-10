@@ -4,7 +4,7 @@ import {
   type ProviderDescriptor,
   type ProviderManagement,
 } from "@pisces/core";
-import { createProviderHost, type StartDaemonOptions } from "@pisces/daemon";
+import { createProviderHost, type SessionDefaults, type StartDaemonOptions } from "@pisces/daemon";
 import type { CliConfig, CliProviderConfig } from "./config.js";
 import { createEnvCredentials } from "./credentials.js";
 
@@ -42,11 +42,15 @@ export function buildDaemonOptions(
 ): StartDaemonOptions {
   const providers = buildProviders(config);
   const credentials = createEnvCredentials(config, env);
+  const defaults: SessionDefaults = {
+    ...(config.defaultWorkspace !== undefined ? { workspace: config.defaultWorkspace } : {}),
+    ...(config.defaults ?? {}),
+  };
   return {
     dataDir,
     providers,
     providerHost: createProviderHost({ providers, credentials }),
-    ...(config.defaults ? { defaults: config.defaults } : {}),
+    ...(Object.keys(defaults).length > 0 ? { defaults } : {}),
     ...(templatesDir !== undefined ? { templates: { configDir: templatesDir } } : {}),
   };
 }
