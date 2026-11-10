@@ -1,10 +1,11 @@
+import { resolve } from "node:path";
 import {
   createProviderManagement,
   openAiChatAdapterFactory,
   type ProviderDescriptor,
   type ProviderManagement,
 } from "@pisces/core";
-import { createProviderHost, type SessionDefaults, type StartDaemonOptions } from "@pisces/daemon";
+import { createProviderHost, type StartDaemonOptions } from "@pisces/daemon";
 import type { CliConfig, CliProviderConfig } from "./config.js";
 import { createEnvCredentials } from "./credentials.js";
 
@@ -38,19 +39,20 @@ export function buildDaemonOptions(
   config: CliConfig,
   dataDir: string,
   env: NodeJS.ProcessEnv,
-  templatesDir: string | undefined = config.templatesDir,
+  options: { configPath: string; templatesDir?: string },
 ): StartDaemonOptions {
   const providers = buildProviders(config);
   const credentials = createEnvCredentials(config, env);
-  const defaults: SessionDefaults = {
-    ...(config.defaultWorkspace !== undefined ? { workspace: config.defaultWorkspace } : {}),
-    ...(config.defaults ?? {}),
-  };
+  const templatesDir = options.templatesDir ?? config.templatesDir;
   return {
     dataDir,
     providers,
     providerHost: createProviderHost({ providers, credentials }),
-    ...(Object.keys(defaults).length > 0 ? { defaults } : {}),
+    // Extension mode is the only composition. The daemon reads `defaults`,
+    // `defaultWorkspace`, `extensions` and `entryConfig` from this exact file at every
+    // `session.create`, so config edits apply without restarting. Manual `defaults` are
+    // mutually exclusive with extension mode and are deliberately never injected here.
+    extensions: { configPath: resolve(options.configPath) },
     ...(templatesDir !== undefined ? { templates: { configDir: templatesDir } } : {}),
   };
 }

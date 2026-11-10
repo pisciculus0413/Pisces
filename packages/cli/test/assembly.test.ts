@@ -1,8 +1,11 @@
+import { resolve } from "node:path";
 import { PiscesError } from "@pisces/core";
 import { afterEach, expect, test, vi } from "vitest";
 import { buildDaemonOptions, buildProviders } from "../src/assembly.js";
 import type { CliConfig, CliProviderConfig } from "../src/config.js";
 import { createEnvCredentials } from "../src/credentials.js";
+
+const CONFIG_PATH = "/tmp/pisces-config/config.json";
 
 const OPENAI: CliProviderConfig = {
   id: "openai",
@@ -38,7 +41,14 @@ afterEach(() => {
 });
 
 test("registers openai-chat providers and reads only the named env var", async () => {
-  const options = buildDaemonOptions(config(), "/tmp/pisces", { OPENAI_API_KEY: "sk-test" });
+  const options = buildDaemonOptions(
+    config(),
+    "/tmp/pisces",
+    { OPENAI_API_KEY: "sk-test" },
+    {
+      configPath: CONFIG_PATH,
+    },
+  );
   const descriptor = options.providers.get("openai");
   expect(descriptor).toMatchObject({
     dialect: "openai-chat",
@@ -84,57 +94,62 @@ test("never reads process.env itself", async () => {
   expect(await credentials.get("openai")).toBeUndefined();
 });
 
-test("dataDir override wins and defaults are forwarded only when defined", () => {
-  const withDefaults = buildDaemonOptions(
+test("dataDir override wins and defaults stay out of the options", () => {
+  const options = buildDaemonOptions(
     config({ defaults: { provider: "openai", model: "gpt" } }),
     "/tmp/pisces-override",
     { OPENAI_API_KEY: "sk-test" },
+    { configPath: CONFIG_PATH },
   );
-  expect(withDefaults.dataDir).toBe("/tmp/pisces-override");
-  expect(withDefaults.defaults).toEqual({ provider: "openai", model: "gpt" });
-
-  const withoutDefaults = buildDaemonOptions(config(), "/tmp/pisces-override", {});
-  expect(Object.keys(withoutDefaults).sort()).toEqual(["dataDir", "providerHost", "providers"]);
+  expect(options.dataDir).toBe("/tmp/pisces-override");
+  // Manual defaults are mutually exclusive with extension mode; the daemon reads
+  // the same values from the config file on every `session.create` instead.
+  expect(options).not.toHaveProperty("defaults");
 });
 
-test("forwards a default workspace as daemon defaults", () => {
-  const options = buildDaemonOptions(
-    config({ defaultWorkspace: "/tmp/workspace" }),
-    "/tmp/pisces",
-    { OPENAI_API_KEY: "sk-test" },
-  );
-  expect(options.defaults).toEqual({ workspace: "/tmp/workspace" });
-});
-
-test("merges the default workspace with provider and model defaults", () => {
+test("always assembles extensions from the config path, even with defaults", () => {
   const options = buildDaemonOptions(
     config({
       defaultWorkspace: "/tmp/workspace",
       defaults: { provider: "openai", model: "gpt" },
     }),
     "/tmp/pisces",
-    { OPENAI_API_KEY: "sk-test" },
+    {},
+    { configPath: CONFIG_PATH },
   );
-  expect(options.defaults).toEqual({
-    workspace: "/tmp/workspace",
-    provider: "openai",
-    model: "gpt",
-  });
+  expect(options.extensions).toEqual({ configPath: CONFIG_PATH });
 });
 
-test("omits defaults entirely when there is nothing to forward", () => {
-  const options = buildDaemonOptions(config(), "/tmp/pisces", {});
-  expect(options).not.toHaveProperty("defaults");
+test("absolutizes a relative config path", () => {
+  const relative = "nested/config.json";
+  const options = buildDaemonOptions(config(), "/tmp/pisces", {}, { configPath: relative });
+  expect(options.extensions?.configPath).toBe(resolve(relative));
+  expect(resolve(relative).startsWith("/")).toBe(true);
 });
 
-test("keeps the templates path alongside daemon defaults", () => {
+test("forwards templates from the explicit directory", () => {
   const options = buildDaemonOptions(
-    config({ defaultWorkspace: "/tmp/workspace", templatesDir: "/tmp/templates" }),
+    config({ templatesDir: "/tmp/config-templates" }),
     "/tmp/pisces",
     {},
+    { configPath: CONFIG_PATH, templatesDir: "/tmp/templates" },
   );
-  expect(options.defaults).toEqual({ workspace: "/tmp/workspace" });
   expect(options.templates).toEqual({ configDir: "/tmp/templates" });
+});
+
+test("falls back to the configured templates directory", () => {
+  const options = buildDaemonOptions(
+    config({ templatesDir: "/tmp/templates" }),
+    "/tmp/pisces",
+    {},
+    { configPath: CONFIG_PATH },
+  );
+  expect(options.templates).toEqual({ configDir: "/tmp/templates" });
+});
+
+test("omits templates when neither source defines one", () => {
+  const options = buildDaemonOptions(config(), "/tmp/pisces", {}, { configPath: CONFIG_PATH });
+  expect(options).not.toHaveProperty("templates");
 });
 
 test("returns only StartDaemonOptions keys", () => {
@@ -142,6 +157,12 @@ test("returns only StartDaemonOptions keys", () => {
     config({ defaults: { provider: "openai", model: "gpt" } }),
     "/tmp/pisces",
     { OPENAI_API_KEY: "sk-test" },
+    { configPath: CONFIG_PATH },
   );
-  expect(Object.keys(options).sort()).toEqual(["dataDir", "defaults", "providerHost", "providers"]);
+  expect(Object.keys(options).sort()).toEqual([
+    "dataDir",
+    "extensions",
+    "providerHost",
+    "providers",
+  ]);
 });

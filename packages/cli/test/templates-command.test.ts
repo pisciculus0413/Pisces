@@ -444,7 +444,7 @@ test("the child builds templates options from the forwarded directory", async ()
   const { configPath, dataDir } = await fixture({ templatesDir: "/tmp/templates" });
   const config = await loadConfig(configPath);
 
-  const options = buildDaemonOptions(config, dataDir, { [KEY_ENV]: "sk-test" });
+  const options = buildDaemonOptions(config, dataDir, { [KEY_ENV]: "sk-test" }, { configPath });
 
   expect(options.templates).toEqual({ configDir: "/tmp/templates" });
 });

@@ -110,7 +110,14 @@ async function makeFixture(): Promise<Fixture> {
 /** Builds the same options `pisces start` passes, then swaps in the stub provider. */
 async function startAcceptanceDaemon(fixture: Fixture): Promise<DaemonHost> {
   const config = await loadConfig(fixture.configPath);
-  const options = buildDaemonOptions(config, fixture.dataDir, { [KEY_ENV]: KEY_VALUE });
+  const options = buildDaemonOptions(
+    config,
+    fixture.dataDir,
+    { [KEY_ENV]: KEY_VALUE },
+    {
+      configPath: fixture.configPath,
+    },
+  );
   const host = await startDaemon({ ...options, providerHost: stubProviderHost() });
   hosts.push(host);
   return host;
@@ -161,20 +168,23 @@ function runOptions(fixture: Fixture, overrides: Partial<RunOptions> = {}): RunO
   };
 }
 
-test("buildDaemonOptions seeds daemon defaults with the configured workspace", {
+test("buildDaemonOptions assembles extension mode without manual defaults", {
   timeout: SOCKET_TIMEOUT_MS,
 }, async () => {
   const fixture = await makeFixture();
   const config = await loadConfig(fixture.configPath);
-  const options = buildDaemonOptions(config, fixture.dataDir, { [KEY_ENV]: KEY_VALUE });
-  // This is exactly the object `pisces start` passes to `startDaemon`; an
-  // implementation that only stored `defaultWorkspace` in the CLI config would
-  // leave the daemon without a workspace here.
-  expect(options.defaults).toEqual({
-    workspace: fixture.first,
-    provider: "stub",
-    model: "m",
-  });
+  const options = buildDaemonOptions(
+    config,
+    fixture.dataDir,
+    { [KEY_ENV]: KEY_VALUE },
+    {
+      configPath: fixture.configPath,
+    },
+  );
+  // This is exactly the object `pisces start` passes to `startDaemon`; the daemon
+  // reads `defaults` and `defaultWorkspace` from this file for every new session.
+  expect(options.extensions).toEqual({ configPath: fixture.configPath });
+  expect(options).not.toHaveProperty("defaults");
   expect(options.dataDir).toBe(fixture.dataDir);
 });
 
@@ -195,35 +205,36 @@ test("run without --workspace uses the configured default and persists it", {
   expect(sessions[0]?.workspace).toBe(fixture.first);
 });
 
-test("a running daemon keeps its startup default until restarted", {
+test("a running daemon reads a rewritten default workspace without restart", {
   timeout: SOCKET_TIMEOUT_MS,
 }, async () => {
   const fixture = await makeFixture();
   const first = await startAcceptanceDaemon(fixture);
+  expect(await runCommand(runOptions(fixture, { io: recorder().io }))).toBe(0);
 
-  // Rewrite the config while the daemon is still up: a running daemon keeps the
-  // defaults it read at startup, so this session must land in the old workspace.
+  // Rewrite the config while the daemon is still up: extension config is read on
+  // every `session.create`, so the next new session must land in the new workspace.
   await writeConfig(fixture, fixture.second);
   expect(await runCommand(runOptions(fixture, { io: recorder().io }))).toBe(0);
 
   const running = await openClient(first.socketPath);
   const beforeRestart = (await sessionList(running)).sessions;
-  expect(beforeRestart).toHaveLength(1);
-  expect(beforeRestart[0]?.workspace).toBe(fixture.first);
+  expect(beforeRestart.map((session) => session.workspace).sort()).toEqual(
+    [fixture.first, fixture.second].sort(),
+  );
 
   await first.stop();
   const index = hosts.indexOf(first);
   if (index !== -1) hosts.splice(index, 1);
 
-  // Only a restart picks up the rewritten config.
+  // A restart still works and keeps using the rewritten default.
   const restarted = await startAcceptanceDaemon(fixture);
   expect(await runCommand(runOptions(fixture, { io: recorder().io }))).toBe(0);
 
   const client = await openClient(restarted.socketPath);
   const sessions = (await sessionList(client)).sessions;
-  expect(sessions.map((session) => session.workspace).sort()).toEqual(
-    [fixture.first, fixture.second].sort(),
-  );
+  expect(sessions.filter((session) => session.workspace === fixture.first)).toHaveLength(1);
+  expect(sessions.filter((session) => session.workspace === fixture.second)).toHaveLength(2);
 });
 
 test("run --workspace overrides the configured default", {

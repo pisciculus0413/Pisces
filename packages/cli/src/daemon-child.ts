@@ -41,7 +41,10 @@ export async function daemonChildMain(argv: string[]): Promise<void> {
 
   try {
     const config = await loadConfig(configPath);
-    const options = buildDaemonOptions(config, dataDir, process.env, templatesDir);
+    const options = buildDaemonOptions(config, dataDir, process.env, {
+      configPath,
+      ...(templatesDir === undefined ? {} : { templatesDir }),
+    });
     run(await startDaemon(options));
   } catch (error) {
     process.stderr.write(`error: ${failureCode(error)}\n`);
