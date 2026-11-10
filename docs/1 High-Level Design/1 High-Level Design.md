@@ -1121,8 +1121,9 @@ daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路
   - `start <id>`：启动指定客户端。
 - `extensions`：扩展管理。
   - `list`：列出已安装扩展。
-- `providers`：供应商管理。
+- `provider`：供应商查询。
   - `list`：列出 daemon 已知的全部 provider 是否就绪（`id  ready|unready  models=<n>`）；只经协议 `provider.list`。
+- `providers`：供应商管理（目标设计）。
   - `check`：检查供应商就绪状态，输出具体原因；仅 CLI（未实现）。
 - `models`：模型管理。
   - `list`：列出全部 provider 的模型（含 `ready=false` 与空模型清单者），按 provider `id` 字典序展平，

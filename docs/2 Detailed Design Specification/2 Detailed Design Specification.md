@@ -629,7 +629,8 @@ interface TurnStartResult {
   行为。`provider list` 逐行输出 `id  ready|unready  models=<n>`，`--json` 原样输出 `{providers}`；
   `models list` 在 CLI 侧展平为 `{provider, ...model}`（provider 按 `id` 字典序，模型保持本方法
   返回的顺序），`--provider <id>` 只保留该 provider。两个命令都列出全部 provider，不按 `ready`
-  过滤；`pricing` 只在 `models list --json` 出现。
+  过滤；`pricing` 只出现在 `--json` 输出里（`provider list --json` 的 `models[]` 与
+  `models list --json`），人类模式从不输出。
 - `models list --provider <id>` 的 id 不在清单中时，`provider.not_found` 由 CLI 本地产生（见 §3.9），
   不通过本方法返回。
 
@@ -1979,7 +1980,7 @@ pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.
 | `sessions cancel` | 先解析活跃 turn，再 `turn.cancel` |
 | `client list/start` | 经协议 `client.list` / `client.start` |
 | `templates list/preview/apply` | 经协议模板方法（已实现） |
-| `provider.list` / `models list` | 经协议只读查询（已实现） |
+| `provider list` / `models list` | 经协议只读查询（已实现） |
 | `providers check` | 仅 CLI，直接检查本地凭据与配置 |
 | `extensions list` | 仅 CLI，读取扩展目录（已实现） |
 | `auth` | 仅 CLI，校验凭据 |

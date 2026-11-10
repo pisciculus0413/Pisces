@@ -288,6 +288,8 @@ pisces provider list [--config <path>] [--data-dir <dir>] [--json]
 - 列出 daemon 已知的**全部** provider，不按 `ready` 过滤：`ready` 只表示该 provider 的凭据当前
   可用。人类模式每行 `id  ready|unready  models=<n>`，顺序为 daemon 返回顺序（按 `id` 字典序）。
 - 模型清单为空的 provider 同样列出（`models=0`），daemon 对其恒返回 `ready=false`。
+  该状态只可能来自以编程方式装配的 daemon（协议允许空模型清单）：CLI 配置要求每个 provider 的模型
+  非空，所以由 `pisces start` 起的 daemon 不会出现 `models=0`。
 - `--json` 输出 daemon 原始结果 `{ "providers": [{ "id", "ready", "models": [...] }] }`；
   `pricing` 只可能出现在这里的 `models[]` 里（若 daemon 提供了定价）。
 - 不输出 `dialect`、`baseUrl`、`headers` 或任何凭据值。
@@ -318,7 +320,8 @@ pisces models list [--provider <id>] [--config <path>] [--data-dir <dir>] [--jso
   `pricing` 只出现在 `--json`。
 - `--provider <id>` 只保留该 provider。id 不存在时打印
   `error: provider.not_found: Unknown provider`，退出 1，stdout 为空。合法的空结果（例如该 provider
-  没有模型）人类模式打印 `no models`，退出 0。
+  没有模型）人类模式打印 `no models`，退出 0。与 `models=0` 一样，这样的 provider 只会出现在以编程
+  方式装配的 daemon 里，经 CLI 配置启动的 daemon 不会产生该空结果。
 - `--json` 输出
   `{ "models": [{ "provider", "id", "contextWindow", "maxOutput", "modalities", "pricing"? }] }`。
 - 配置不合法退出 2；daemon 未运行或握手失败退出 1（`daemon.unreachable`）。
