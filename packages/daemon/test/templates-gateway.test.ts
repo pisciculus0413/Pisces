@@ -322,8 +322,38 @@ test("template.apply creates the session from the store resolution", async () =>
   expect(await h.store.list()).toEqual([]);
 });
 
-test("template.apply builds the session from the apply resolution defaults", async () => {
-  // A deliberately divergent preflight: the session must follow apply's own defaults.
+test("template.apply validates the session exactly once per successful apply", async () => {
+  const validated: string[] = [];
+  const { store } = fakeTemplates({
+    inspect: async () => ({ preview: previewFixture(), defaults: defaultsFixture() }),
+    apply: async () => ({
+      projectId: "project-1",
+      preview: previewFixture(),
+      defaults: { ...defaultsFixture(), systemPrompt: "# Notes\n" },
+    }),
+  });
+  const workspace = await tempWorkspace();
+  const h = await openHarness({
+    templates: store,
+    validateWorkspace: async (value) => {
+      validated.push(value);
+      return true;
+    },
+  });
+
+  const response = await request(h, "template.apply", {
+    templateId: "notes",
+    workspace,
+    confirmed: true,
+  });
+
+  expect(response.error).toBeUndefined();
+  expect(validated).toEqual([workspace]);
+});
+
+test("template.apply keeps preflight provider and model and takes only the prompt from apply", async () => {
+  // Production `inspect` and `apply` read the same template, so provider/model/extensions
+  // cannot diverge; a fake that does must still never trigger a second validation pass.
   const providers = createProviderManagement();
   providers.registerProvider(descriptor({ models: [gatewayModel("m"), gatewayModel("m2")] }));
   const { store } = fakeTemplates({
@@ -346,7 +376,7 @@ test("template.apply builds the session from the apply resolution defaults", asy
   expect(response.error).toBeUndefined();
   const read = await request(h, "session.read", { sessionId: ID });
   const result = read.result as unknown as SessionReadResult;
-  expect(result.meta).toMatchObject({ provider: "p", model: "m2", workspace });
+  expect(result.meta).toMatchObject({ provider: "p", model: "m", workspace });
   expect(queuedPrompts(result)).toEqual([
     { role: "system", source: "template", text: { type: "text", text: "applied prompt" } },
   ]);

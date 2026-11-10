@@ -105,7 +105,11 @@ async function makeDirectory(target: string): Promise<void> {
 }
 
 export function createWorkspaceAccess(root: string): WorkspaceAccess {
-  const base = normalize(root);
+  // Canonicalize the root itself: callers may pass a path whose own components are
+  // symlinks, while every candidate below is canonicalized before the containment check.
+  // A missing root keeps its canonical prefix plus the missing tail, so preview works for
+  // workspaces that do not exist yet without ever creating them here.
+  const base = canonicalize(normalize(root), 0);
   const resolve = (path: string): string => {
     const segments = fold(path);
     return contain(base, canonicalize(segments.length === 0 ? base : join(base, ...segments), 0));

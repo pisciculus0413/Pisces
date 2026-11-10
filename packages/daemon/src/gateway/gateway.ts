@@ -741,18 +741,20 @@ export function createGateway(deps: GatewayDeps): Gateway {
       // Preflight: `inspect` writes nothing and never reads the prompt file, so every
       // session-configuration failure happens before the first file or directory exists.
       const plan = await templates.inspect(templateId, workspace);
-      await prepareSession(sessionSpec({ workspace }, plan.defaults));
+      const prepared = await prepareSession(sessionSpec({ workspace }, plan.defaults));
 
       const resolution = await templates.apply(templateId, workspace, {
         confirmed: true,
         ...(overwrite === undefined ? {} : { overwrite }),
       });
-      // The session takes provider/model/extensions/systemPrompt from apply's resolution:
-      // only its post-write read can see a prompt file the template itself created. The
-      // workspace stays the preflight one, since template defaults never carry a workspace.
-      const meta = await createSessionFrom(
-        await prepareSession(sessionSpec({ workspace }, resolution.defaults)),
-      );
+      // The preflight session is already fully validated, so nothing re-runs after the
+      // writes. Only the prompt comes from apply: its post-write read can see a prompt file
+      // the template itself created, and provider/model/extensions cannot diverge because
+      // `inspect` and `apply` read the same template. Prompt suppression is unchanged.
+      const meta = await createSessionFrom({
+        ...prepared,
+        prompts: promptsFor(undefined, resolution.defaults.systemPrompt),
+      });
       return { projectId: resolution.projectId, sessionId: meta.id };
     },
 

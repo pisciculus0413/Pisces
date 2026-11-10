@@ -1497,7 +1497,7 @@ interface SessionRuntime {
 - `turn.cancel`：不取会话锁，先按 `turnId` 在 `Concurrency.activeTurns()` 定位会话与运行时；未知 turn、已注销或运行时处于 `cleanup`/`cleanup_failed` 返回 `{ cancelled: false }`；运行时仍为 `running` 时委托唯一取消入口 `Concurrency.cancelTurn(turnId)` 并返回其布尔值。登记 handle 在 `registerTurn` 时保存，总是不阻塞、无锁、同步触发 driver 的协作式取消（中止供应商流、置位工具信号并停止新 step，见 §3.6.3），不强制终止，也不绕过 `Concurrency` 自行查找 driver。`{ cancelled: true }` 只表示请求已交给登记的 turn，不表示 turn 已结束；`running` 期间重复调用仍返回 `true`，handle 至多执行一次；忽略中止的 driver 保持 `running`、继续被 `turn.list` 列出并阻塞同会话新 turn，只能由自然结束或重启恢复解除。
 - turn 生命周期：`running -> cleanup -> (unregistered | cleanup_failed)`。driver 结束（含失败）后，`launch` 在会话锁内把阶段置为 `cleanup`；`turn.ended` 只把运行时移到 `cleanup`，不注销 turn、不删除标记。随后删除 `active-turn.json` 成功才注销；失败则发布安全数据的 `turn.cleanup_failed`（`{turnId, code:"storage.io", message}`，不含原始异常），在缺失时追加一条同 `turnId`、`reason="cleanup_failed"` 的 `cancel` 控制消息，重试删除一次；仍失败则保留标记并把阶段置为 `cleanup_failed`。`cleanup`/`cleanup_failed` 期间 `turn.list` 仍列出该 turn，`turn.start` 返回 `turn.active`，`turn.cancel` 返回 `{ cancelled:false }`，因此残留标记与登记项会阻塞该会话的新 turn，直到重启恢复删除标记；`cleanup_failed` cancel 已提交时恢复按同 `turnId` 去重，只删除标记而不追加 `daemon_restart` cancel。
 - `provider.list`：从 `ProviderManagement` 与 `CredentialStore` 生成；`ready` 由凭据状态计算。
-- `template.list` / `preview` / `apply`：委托 `TemplateStore`、`WorkspaceAccess`、`ExecHost`，并创建临时会话。`apply` 先用只读的 `inspect` 完成会话配置预检，再调用 store 写盘、跑脚本、记 `ProjectRef`，最后用 `apply` 返回的解析结果创建临时会话；未装配 `TemplateStore` 时仍返回 `protocol.unknown_method`。
+- `template.list` / `preview` / `apply`：委托 `TemplateStore`、`WorkspaceAccess`、`ExecHost`，并创建临时会话。`apply` 先用只读的 `inspect` 完成会话配置预检并保留预检结果，再调用 store 写盘、跑脚本、记 `ProjectRef`，最后用预检会话与 `apply` 返回的提示词创建临时会话（不重复校验）；未装配 `TemplateStore` 时仍返回 `protocol.unknown_method`。
 - `client.list` / `start`：委托 `ClientRegistry`。当前阶段未路由（目标设计）。
 - 未识别的方法名（包括 `constructor`、`toString`、`__proto__` 等原型属性名）在分派前按自有属性判定，统一返回 `protocol.unknown_method`，不进入任何处理函数，也不产生 `internal.error`。
 
@@ -1796,8 +1796,9 @@ interface Exec {
 #### 5.8.1 `TemplateStore`
 
 - 从软件配置目录的 `templates/` 读取模板；模板是声明式目录/文件/脚本。`startDaemon({ templates: { configDir } })` 在 lock 获取后、监听前构造 store，并注入 Gateway。
-- 接口分四段：`list()`；只读预检 `preview()` 与 `inspect()`（preview 加会话默认值，不读提示词文件，因而能在模板自身创建提示词文件前完成预检）；`resolve()`（含提示词读取）；`apply()`（校验、写盘、脚本、`ProjectRef`）。
+- 接口分五段：`list()`；`issues()`（加载器诊断，按 id 排序，只含 `id` 与安全错误码，不含路径或内容）；只读预检 `preview()` 与 `inspect()`（preview 加会话默认值，不读提示词文件，因而能在模板自身创建提示词文件前完成预检）；`resolve()`（含提示词读取）；`apply()`（校验、写盘、脚本、`ProjectRef`）。
 - `apply` 自行再校验 `confirmed`；Gateway 已在调用前完成会话配置预检，因此预检失败时 store 未写任何内容。返回值 `TemplateResolution = { projectId, preview, defaults }`，不包含 `sessionId`：会话由 Gateway 创建。
+- Gateway 复用预检得到的 `NewSession` 创建临时会话，只有提示词取自 `apply` 的 `defaults.systemPrompt`（写盘后才可读）；provider/model/extensions/binding 全部来自预检，因此 `apply` 成功后不再重跑会话校验，也不会有写盘后才发现会话配置非法的窗口。
 - `apply` 由 `WorkspaceAccess` 创建目录/文件，`ExecHost` 以 `cwd=工作区` 执行脚本；写盘前已生成 `projectId`，`ProjectRef` 在脚本成功后原子追加到 `<dataDir>/projects.json`；失败不追加、不创建会话。
 - 已创建文件不自动回滚；由用户处置。
 - 模板提示词文件在写盘后经 `WorkspaceAccess.readFile` 读取，进入队列（`source="template"`），不直接写入请求体；仍须经首次 `turn.start` 的确认与落盘流程。

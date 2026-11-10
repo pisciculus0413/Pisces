@@ -7,7 +7,9 @@ import {
   type WorkspaceAccess,
 } from "@pisces/core";
 import { appendProject } from "./projects.js";
-import { type LoadedTemplate, loadTemplates } from "./schema.js";
+import { type LoadedTemplate, loadTemplates, type TemplateIssue } from "./schema.js";
+
+export type { TemplateIssue };
 
 export interface TemplateDefaults {
   provider?: string;
@@ -36,6 +38,8 @@ export interface TemplateStoreOptions {
 
 export interface TemplateStore {
   list(): Promise<TemplateInfo[]>;
+  /** Loader diagnostics for templates rejected by validation, sorted by id. */
+  issues(): Promise<TemplateIssue[]>;
   preview(templateId: string, workspace: string): Promise<TemplatePreview>;
   /**
    * Read-only preflight: preview plus config defaults, and never the prompt file. An
@@ -112,9 +116,14 @@ export function createTemplateStore(options: TemplateStoreOptions): TemplateStor
     workspace: string,
     readPrompt: boolean,
   ): Promise<Prepared> {
-    const { templates } = await loadTemplates(configDir);
+    const { templates, issues } = await loadTemplates(configDir);
     const template = templates.find((entry) => entry.info.id === templateId);
-    if (!template) throw notFound();
+    if (!template) {
+      // A template that failed validation is invalid, not missing; diagnostics stay reachable
+      // through `issues()` and never carry file paths or contents.
+      if (issues.some((entry) => entry.id === templateId)) throw invalid();
+      throw notFound();
+    }
     const access = workspaceAccess(workspace);
     const cwd = resolvePath(access, ".");
     for (const directory of template.directories) resolvePath(access, directory);
@@ -182,6 +191,10 @@ export function createTemplateStore(options: TemplateStoreOptions): TemplateStor
     async list() {
       const { templates } = await loadTemplates(configDir);
       return templates.map((template) => template.info);
+    },
+    async issues() {
+      const { issues } = await loadTemplates(configDir);
+      return issues.map((entry) => ({ ...entry }));
     },
     async preview(templateId, workspace) {
       return (await prepare(templateId, workspace, false)).preview;

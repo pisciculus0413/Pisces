@@ -165,12 +165,35 @@ test("preview lists directories, files and conflicts without writing", async () 
   expect(await exists(join(dataDir, "projects.json"))).toBe(false);
 });
 
-test("reports not_found for a template rejected at load", async () => {
+test("reports invalid for a template rejected at load", async () => {
   await writeTemplate("notes", notesTemplate({ files: [{ path: "../escape.txt", content: "x" }] }));
   const { store } = makeStore();
   const error = await rejection(store.preview("notes", workspace));
-  expect(error.code).toBe("template.not_found");
+  expect(error.code).toBe("template.invalid");
+  expect(error.message).toBe("Invalid template");
   expect(await exists(join(root, "escape.txt"))).toBe(false);
+});
+
+test("reports not_found for an unknown template id", async () => {
+  await writeTemplate("notes", notesTemplate());
+  const { store } = makeStore();
+  const error = await rejection(store.preview("unknown", workspace));
+  expect(error.code).toBe("template.not_found");
+});
+
+test("exposes loader issues sorted by id without paths or contents", async () => {
+  await writeTemplate("notes", notesTemplate());
+  await writeFile(join(configDir, "broken.json"), "{ secret-content", "utf8");
+  await writeTemplate("oversized", {
+    id: "oversized",
+    name: "Oversized",
+    description: "x".repeat(1_100_000),
+  });
+  const { store } = makeStore();
+  expect(await store.issues()).toEqual([
+    { id: "broken", code: "template.invalid" },
+    { id: "oversized", code: "template.invalid" },
+  ]);
 });
 
 test("preview reports one conflicting file and leaves its mtime alone", async () => {

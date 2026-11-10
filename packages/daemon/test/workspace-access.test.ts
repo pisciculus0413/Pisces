@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, access as probe, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, access as probe, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PiscesError, type WorkspaceAccess } from "@pisces/core";
@@ -107,6 +107,41 @@ test("rejects a symlink ancestor outside the root even when the target does not 
     "workspace.path_outside",
     OUTSIDE,
   );
+});
+
+test("canonicalizes a symlinked root and still rejects an escaping symlink inside it", async () => {
+  const real = join(base, "real");
+  await mkdir(real);
+  const linked = join(base, "link");
+  await symlink(real, linked, "dir");
+  const linkedAccess = createWorkspaceAccess(linked);
+
+  expect(linkedAccess.resolve(".")).toBe(real);
+  expect(linkedAccess.resolve("nested/file.txt")).toBe(join(real, "nested/file.txt"));
+  await linkedAccess.ensureDirectory("nested");
+  await linkedAccess.writeFile("nested/file.txt", "inside");
+  await expect(linkedAccess.readFile("nested/file.txt")).resolves.toBe("inside");
+  expect(await readFile(join(real, "nested", "file.txt"), "utf8")).toBe("inside");
+
+  await symlink(outside, join(real, "escape"), "dir");
+  await expectFailure(
+    () => linkedAccess.resolve("escape/x.txt"),
+    "workspace.path_outside",
+    OUTSIDE,
+  );
+  await expectFailure(
+    () => linkedAccess.writeFile("escape/x.txt", "x"),
+    "workspace.path_outside",
+    OUTSIDE,
+  );
+});
+
+test("keeps a missing root resolvable without creating it", async () => {
+  const missing = join(base, "missing");
+  const missingAccess = createWorkspaceAccess(missing);
+  expect(missingAccess.resolve(".")).toBe(missing);
+  expect(missingAccess.resolve("new/file.txt")).toBe(join(missing, "new/file.txt"));
+  await expect(missingAccess.exists(".")).resolves.toBe(false);
 });
 
 test("resolves a symlink that stays inside the root", async () => {
