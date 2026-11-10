@@ -20,6 +20,12 @@ import {
 } from "./config-commands.js";
 import { isEntryPath } from "./entry.js";
 import { extensionsList } from "./extensions.js";
+import {
+  modelsList,
+  type ProvidersDeps,
+  productionProvidersDeps,
+  providerList,
+} from "./providers.js";
 import { productionSessionsDeps, type SessionsDeps, sessionsList } from "./sessions.js";
 import {
   productionTemplatesDeps,
@@ -50,13 +56,17 @@ export const USAGE = [
   "  config     list, get, set or unset configuration values",
   "  extensions list discovered extensions without loading them",
   "  sessions   list persisted sessions",
+  "  provider   list providers known to the daemon",
+  "  models     list models of every provider",
   "",
   "options:",
   "  --config <path>     configuration file (default: <config home>/pisces/config.json)",
   "  --data-dir <path>   override the configured data directory",
+  "  --provider <id>     only list models of this provider (models list)",
   "  --scope <scope>     config scope: global (default) or workspace",
   "  --workspace <dir>   workspace directory (config workspace scope, extensions list)",
-  "  --json              machine-readable output (status, templates, config, extensions, sessions)",
+  "  --json              machine-readable output (status, templates, config, extensions, sessions,",
+  "                      provider, models)",
   "  --help              show this help",
   "  --version           print the version",
 ].join("\n");
@@ -75,6 +85,9 @@ type ExtensionsSub = (typeof EXTENSIONS_SUBS)[number];
 
 const SESSIONS_SUBS = ["list"] as const;
 type SessionsSub = (typeof SESSIONS_SUBS)[number];
+
+const PROVIDER_SUBS = ["list"] as const;
+type ProviderSub = (typeof PROVIDER_SUBS)[number];
 
 interface LifecycleParsed {
   command: Command;
@@ -135,12 +148,23 @@ interface ExtensionsParsed {
   json: boolean;
 }
 
+interface ProviderCommon {
+  configPath?: string;
+  dataDir?: string;
+  json: boolean;
+}
+
+type ProvidersParsed =
+  | (ProviderCommon & { command: "provider"; sub: ProviderSub })
+  | (ProviderCommon & { command: "models"; sub: ProviderSub; provider?: string });
+
 type Outcome =
   | LifecycleParsed
   | TemplatesParsed
   | ConfigParsed
   | ExtensionsParsed
   | SessionsParsed
+  | ProvidersParsed
   | "help"
   | "version"
   | undefined;
@@ -159,6 +183,9 @@ const isExtensionsSub = (value: string | undefined): value is ExtensionsSub =>
 
 const isSessionsSub = (value: string | undefined): value is SessionsSub =>
   value !== undefined && (SESSIONS_SUBS as readonly string[]).includes(value);
+
+const isProviderSub = (value: string | undefined): value is ProviderSub =>
+  value !== undefined && (PROVIDER_SUBS as readonly string[]).includes(value);
 
 async function version(): Promise<string> {
   try {
@@ -181,6 +208,8 @@ async function parse(argv: readonly string[]): Promise<Outcome> {
   if (command === "config") return parseConfig(argv);
   if (command === "extensions") return parseExtensions(argv);
   if (command === "sessions") return parseSessions(argv);
+  if (command === "provider") return parseProviders(argv, "provider");
+  if (command === "models") return parseProviders(argv, "models");
   if (command === undefined || !isCommand(command)) return undefined;
 
   let configPath: string | undefined;
@@ -418,12 +447,61 @@ function parseSessions(argv: readonly string[]): SessionsParsed | "help" | "vers
   };
 }
 
+/** `provider list` and `models list`; `undefined` is always a usage error. */
+function parseProviders(
+  argv: readonly string[],
+  command: "provider" | "models",
+): ProvidersParsed | "help" | "version" | undefined {
+  const sub = argv[1];
+  if (sub === "--help") return "help";
+  if (sub === "--version") return "version";
+  if (!isProviderSub(sub)) return undefined;
+
+  let configPath: string | undefined;
+  let dataDir: string | undefined;
+  let provider: string | undefined;
+  let json = false;
+
+  for (let index = 2; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--help") return "help";
+    if (argument === "--version") return "version";
+    if (argument === "--json") {
+      json = true;
+      continue;
+    }
+    if (argument === "--config" || argument === "--data-dir" || argument === "--provider") {
+      // `--provider` only exists for `models list`; anywhere else it is unknown.
+      if (argument === "--provider" && command !== "models") return undefined;
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("-")) return undefined;
+      if (argument === "--config") configPath = value;
+      else if (argument === "--data-dir") dataDir = value;
+      else provider = value;
+      index += 1;
+      continue;
+    }
+    // `list` takes no positionals.
+    return undefined;
+  }
+
+  const common: ProviderCommon & { sub: ProviderSub } = {
+    sub,
+    json,
+    ...(configPath !== undefined ? { configPath } : {}),
+    ...(dataDir !== undefined ? { dataDir } : {}),
+  };
+  if (command === "provider") return { command, ...common };
+  return { command, ...common, ...(provider !== undefined ? { provider } : {}) };
+}
+
 export async function runCli(
   argv: string[],
   io: CommandIo = processIo,
   deps: CommandDeps = productionDeps,
   templateDeps: TemplatesDeps = productionTemplatesDeps,
   sessionDeps: SessionsDeps = productionSessionsDeps,
+  providerDeps: ProvidersDeps = productionProvidersDeps,
 ): Promise<number> {
   const parsed = await parse(argv);
 
@@ -478,6 +556,20 @@ export async function runCli(
         ...(parsed.dataDir !== undefined ? { dataDir: parsed.dataDir } : {}),
       },
       sessionDeps,
+    );
+  }
+
+  if (parsed.command === "provider" || parsed.command === "models") {
+    const common = {
+      configPath: parsed.configPath ?? defaultConfigPath(process.env),
+      io,
+      json: parsed.json,
+      ...(parsed.dataDir !== undefined ? { dataDir: parsed.dataDir } : {}),
+    };
+    if (parsed.command === "provider") return await providerList(common, providerDeps);
+    return await modelsList(
+      { ...common, ...(parsed.provider !== undefined ? { provider: parsed.provider } : {}) },
+      providerDeps,
     );
   }
 
