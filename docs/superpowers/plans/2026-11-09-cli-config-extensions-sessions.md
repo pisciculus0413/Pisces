@@ -39,6 +39,7 @@
 - Modify: `packages/daemon/src/extensions/types.ts`
 - Modify: `packages/daemon/src/extensions/config.ts`
 - Modify: `packages/daemon/src/extensions/extensions.ts`（默认 provider/model 改读 `config.defaults`）
+- Modify: `packages/daemon/src/gateway/extension-session.ts`（工作区/全局默认值改读 `defaults`）
 - Modify: `packages/daemon/src/index.ts`
 - Modify: `packages/cli/src/config.ts`
 - Test: `packages/daemon/test/extensions-config.test.ts`（新建或扩展既有）
