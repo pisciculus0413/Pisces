@@ -2,8 +2,9 @@
 
 本文件描述当前已实现并已被真实 Unix socket 端到端验收的扩展契约。它只覆盖本阶段交付的部分：
 目录发现、清点、声明式选择、冻结定义、按需装载、`entries.snapshot`、队列路由，以及仓库自带的
-内置 shell 工具与宿主注入的 `files`/`exec` 能力。CLI 的 `start` 始终把 `--config` 的绝对路径作为
-`extensions` 启动选项注入；配置内容与扩展目录都由 daemon 在 `session.create` 时读取与扫描。
+内置 shell 工具与宿主注入的 `files`/`exec` 能力。CLI 的 `start` 始终把 `--config` 路径作为
+`extensions` 启动选项交给子进程（子进程解析为绝对路径）；配置内容与扩展目录都由 daemon 在
+`session.create` 时读取与扫描。
 **未交付**的能力在文末“本阶段未交付”一节明确列出。权威设计见
 `docs/2 Detailed Design Specification/2 Detailed Design Specification.md` §5.5 与
 `docs/1 High-Level Design/1 High-Level Design.md` §5.4、§6.6。
