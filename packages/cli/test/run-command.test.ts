@@ -996,6 +996,57 @@ test("an interrupt before the turn id is known cancels once after turn.start res
   );
 });
 
+test("an interrupt before the turn is queued stops without enqueueing or starting", async () => {
+  // Both session resolutions can be interrupted: `--continue` lists,
+  // `--session` reads. Either way nothing is enqueued or started.
+  const resolutions = [
+    {
+      name: "session.list",
+      respond: (method: string) => {
+        if (method === "session.list") return { sessions: [META] };
+        throw new Error(`unexpected method ${method}`);
+      },
+      options: { continueSession: true },
+    },
+    {
+      name: "session.read",
+      respond: (method: string) => {
+        if (method === "session.read") return { meta: META, records: [], queue: [], selection: [] };
+        throw new Error(`unexpected method ${method}`);
+      },
+      options: { sessionId: "s1" },
+    },
+  ] as const;
+
+  for (const resolution of resolutions) {
+    let client: FakeClient | undefined;
+    client = fakeClient((method) => {
+      const response = resolution.respond(method);
+      // The signal arrives while the session resolution request is in flight.
+      client?.interrupt();
+      return response;
+    });
+    const { configPath } = await fixture();
+    const rec = recorder();
+
+    const code = await runCommand(
+      runOptions(configPath, { io: rec.io, print: true, ...resolution.options }),
+      client.deps,
+    );
+
+    expect(code, resolution.name).toBe(130);
+    expect(client.calls.filter((call) => call.method === "queue.enqueue")).toEqual([]);
+    expect(client.calls.filter((call) => call.method === "turn.start")).toEqual([]);
+    expect(client.calls.filter((call) => call.method === "session.subscribe")).toEqual([]);
+    expect(rec.err).toEqual([]);
+    expect(rec.out).toEqual([]);
+    // Cleanup still runs on the pre-start return path.
+    expect(client.closed).toBe(true);
+    expect(client.listenerCount()).toBe(0);
+    expect(client.log).toContain("interrupt:unregister");
+  }
+});
+
 test("a config failure exits 2 without connecting", async () => {
   const { root } = await fixture();
   const counter = { connects: 0 };

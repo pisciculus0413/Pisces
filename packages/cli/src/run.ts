@@ -416,6 +416,10 @@ async function execute(
     }
   }
 
+  // Ctrl-C before the turn exists has nothing to cancel: stop here so the
+  // prompt is neither enqueued nor started. Only the cleanup in `runCommand` runs.
+  if (interrupted) return 130;
+
   parseSubscribe(await client.request("session.subscribe", { sessionId }));
 
   const prompt = {

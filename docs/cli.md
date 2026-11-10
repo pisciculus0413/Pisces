@@ -372,6 +372,8 @@ pisces run [prompt] [--new | --continue | --session <id> [--create]]
     不发控制条目。手动模式（未装配扩展）的 daemon 会以 `queue.invalid_control` 拒绝该条目。
 - 所有输入先入队：提示词作为 `{kind:"agent",role:"user",source:"run"}` 经 `queue.enqueue` 提交，随后
   `turn.start`；提示词从不写入请求体。`session.subscribe` 在入队前建立，事件不会漏收。
+- 同一会话已有其他客户端正在运行的 turn 时，daemon 可能让 `turn.start` 返回 `mode:"steer"`；run 不对
+  该模式做特殊处理（只报告那一个 turn 的结局），因此不要在同一会话上并发执行 run。
 - 输出模式：
   - 默认：`turn.delta` 的文本增量直接写 stdout，结束时补一个换行。
   - `--print`：不写增量，结束后只写累积的最终文本加换行；失败的 turn 写累积文本（通常为空，即只输出一个换行）。

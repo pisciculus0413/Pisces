@@ -30,8 +30,9 @@ import { type RunDeps, type RunOptions, runCommand } from "../src/run.js";
  *
  * A genuine in-process daemon (native transport, real Unix socket, real
  * `SessionStore`) serves host defaults for workspace/provider/model and three
- * providers: `ok` streams two text deltas (so `--print` can be shown to write
- * only the concatenated final text, never the deltas), `blocked` keeps the turn
+ * providers: `ok` streams two text deltas that concatenate to "world" (so
+ * `--print` can be shown to write only the concatenated final text, never the
+ * deltas or the "hello" prompt), `blocked` keeps the turn
  * open until the turn is cancelled, and `fail` throws while parsing the provider
  * response. The CLI function runs with production dependencies against that
  * socket, so session creation, queued prompt, event subscription, `--print`/`--json`
@@ -44,8 +45,9 @@ const MAIN = fileURLToPath(new URL("../dist/main.js", import.meta.url));
 const BUILT = existsSync(MAIN);
 const KEY_ENV = "PISCES_TEST_KEY";
 const KEY_VALUE = "sk-test-not-real";
-const FIRST_DELTA = "hel";
-const SECOND_DELTA = "lo";
+const FIRST_DELTA = "wor";
+const SECOND_DELTA = "ld";
+/** Concatenated deltas; deliberately different from the prompt "hello". */
 const FINAL_TEXT = `${FIRST_DELTA}${SECOND_DELTA}`;
 const SOCKET_TIMEOUT_MS = 30_000;
 const CLI_TIMEOUT_MS = 60_000;
@@ -101,7 +103,7 @@ const adapter: LlmAdapter = {
   },
   parseChunk() {
     // Two content deltas make the accumulated final text distinguishable from
-    // the streamed increments.
+    // the streamed increments (and from the prompt echo).
     return [
       { type: "content", delta: FIRST_DELTA },
       { type: "content", delta: SECOND_DELTA },
@@ -298,8 +300,9 @@ test("run --print completes a real turn and persists the session with daemon def
   const printed = recorder();
   expect(await runCommand(runOptions(fixture, { io: printed.io, print: true }))).toBe(0);
   expect(printed.err).toEqual([]);
-  // The provider streams "hel" and "lo"; `--print` writes only the joined
-  // final text once, so a delta-per-line implementation would fail here.
+  // The provider streams "wor" and "ld"; `--print` writes only the joined
+  // final text once. A delta-per-line implementation would print two lines, and
+  // a prompt echo would print "hello": both fail here.
   expect(printed.out).toEqual([FINAL_TEXT]);
 
   const client = await openClient(host.socketPath);
@@ -333,6 +336,8 @@ test("run --json emits exactly one completed object", {
   const parsed = JSON.parse(line) as Record<string, unknown>;
   expect(Object.keys(parsed).sort()).toEqual(["reason", "sessionId", "text", "turnId"]);
   expect(parsed).toMatchObject({ reason: "completed", text: FINAL_TEXT });
+  // The JSON text is the provider's answer, not an echo of the prompt.
+  expect(parsed.text).not.toBe("hello");
   expect(typeof parsed.sessionId).toBe("string");
   expect(typeof parsed.turnId).toBe("string");
 
@@ -365,11 +370,13 @@ test("run --continue picks the persisted session", {
   expect(continued.out).toHaveLength(1);
   const parsed = JSON.parse(continued.out[0] ?? "") as Record<string, unknown>;
   expect(parsed).toMatchObject({ sessionId: firstId, reason: "completed", text: FINAL_TEXT });
+  expect(parsed.text).not.toBe("hello");
   // `--continue` reuses the session instead of creating another one.
   expect((await sessionList(client)).sessions.map((session) => session.id)).toEqual([firstId]);
   // The second turn was really appended to that session.
   const records = await readRecords(client, firstId);
   expect(records.map((node) => node.role)).toEqual(["user", "assistant", "user", "assistant"]);
+  // Each appended pair keeps the prompt and the provider answer distinct.
   expect(records.map((node) => node.content)).toEqual([
     [{ type: "text", text: "hello" }],
     [{ type: "text", text: FINAL_TEXT }],
