@@ -26,6 +26,7 @@ import {
   productionProvidersDeps,
   providerList,
 } from "./providers.js";
+import { productionRunDeps, type RunDeps, type RunOptions, runCommand } from "./run.js";
 import { sessionCancel } from "./session-cancel.js";
 import { sessionExport } from "./session-export.js";
 import { productionSessionsDeps, type SessionsDeps, sessionsList } from "./sessions.js";
@@ -60,6 +61,7 @@ export const USAGE = [
   "  sessions   list, export or cancel sessions",
   "  provider   list providers known to the daemon",
   "  models     list models of every provider",
+  "  run        run a turn non-interactively",
   "",
   "options:",
   "  --config <path>     configuration file (default: <config home>/pisces/config.json)",
@@ -68,8 +70,18 @@ export const USAGE = [
   "  --node <id>         export only this node's branch (sessions export)",
   "  --scope <scope>     config scope: global (default) or workspace",
   "  --workspace <dir>   workspace directory (config workspace scope, extensions list)",
+  "  --new               create a new session (run)",
+  "  --continue          continue the newest session (run)",
+  "  --session <id>      use an existing session (run)",
+  "  --create            create the session when --session is missing (run)",
+  "  --model <id>        session model (run)",
+  "  --system-prompt <text>  session system prompt (run)",
+  "  --use-default-system-prompt  keep the daemon default prompt (run)",
+  "  --enable <name>     enable an extension package#name (run)",
+  "  --disable <name>    disable an extension package#name (run)",
+  "  --print             print only the final turn text (run)",
   "  --json              machine-readable output (status, templates, config, extensions,",
-  "                      sessions list, provider, models)",
+  "                      sessions list, provider, models, run)",
   "  --help              show this help",
   "  --version           print the version",
 ].join("\n");
@@ -164,6 +176,25 @@ type ProvidersParsed =
   | (ProviderCommon & { command: "provider"; sub: ProviderSub })
   | (ProviderCommon & { command: "models"; sub: ProviderSub; provider?: string });
 
+interface RunParsed {
+  command: "run";
+  configPath?: string;
+  dataDir?: string;
+  prompt: string;
+  newSession: boolean;
+  continueSession: boolean;
+  sessionId?: string;
+  create: boolean;
+  model?: string;
+  provider?: string;
+  systemPrompt?: string;
+  useDefaultSystemPrompt: boolean;
+  enable: string[];
+  disable: string[];
+  print: boolean;
+  json: boolean;
+}
+
 type Outcome =
   | LifecycleParsed
   | TemplatesParsed
@@ -171,6 +202,7 @@ type Outcome =
   | ExtensionsParsed
   | SessionsParsed
   | ProvidersParsed
+  | RunParsed
   | "help"
   | "version"
   | undefined;
@@ -216,6 +248,7 @@ async function parse(argv: readonly string[]): Promise<Outcome> {
   if (command === "sessions") return parseSessions(argv);
   if (command === "provider") return parseProviders(argv, "provider");
   if (command === "models") return parseProviders(argv, "models");
+  if (command === "run") return parseRun(argv);
   if (command === undefined || !isCommand(command)) return undefined;
 
   let configPath: string | undefined;
@@ -520,6 +553,116 @@ function parseProviders(
   return { command, ...common, ...(provider !== undefined ? { provider } : {}) };
 }
 
+/** `run [prompt]`; the positional prompt may appear before or after any flag. */
+function parseRun(argv: readonly string[]): RunParsed | "help" | "version" | undefined {
+  let configPath: string | undefined;
+  let dataDir: string | undefined;
+  let sessionId: string | undefined;
+  let model: string | undefined;
+  let provider: string | undefined;
+  let systemPrompt: string | undefined;
+  let newSession = false;
+  let continueSession = false;
+  let create = false;
+  let useDefaultSystemPrompt = false;
+  let print = false;
+  let json = false;
+  const enable: string[] = [];
+  const disable: string[] = [];
+  const positionals: string[] = [];
+
+  for (let index = 1; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === undefined) return undefined;
+    if (argument === "--help") return "help";
+    if (argument === "--version") return "version";
+    if (argument === "--new") {
+      newSession = true;
+      continue;
+    }
+    if (argument === "--continue") {
+      continueSession = true;
+      continue;
+    }
+    if (argument === "--create") {
+      create = true;
+      continue;
+    }
+    if (argument === "--use-default-system-prompt") {
+      useDefaultSystemPrompt = true;
+      continue;
+    }
+    if (argument === "--print") {
+      print = true;
+      continue;
+    }
+    if (argument === "--json") {
+      json = true;
+      continue;
+    }
+    if (
+      argument === "--config" ||
+      argument === "--data-dir" ||
+      argument === "--session" ||
+      argument === "--model" ||
+      argument === "--provider" ||
+      argument === "--system-prompt" ||
+      argument === "--enable" ||
+      argument === "--disable"
+    ) {
+      const value = argv[index + 1];
+      if (value === undefined || value === "" || value.startsWith("-")) return undefined;
+      if (argument === "--config") configPath = value;
+      else if (argument === "--data-dir") dataDir = value;
+      else if (argument === "--session") sessionId = value;
+      else if (argument === "--model") model = value;
+      else if (argument === "--provider") provider = value;
+      else if (argument === "--system-prompt") systemPrompt = value;
+      else if (argument === "--enable") enable.push(value);
+      else disable.push(value);
+      index += 1;
+      continue;
+    }
+    // Unknown flags and extra positionals are both usage errors.
+    if (argument.startsWith("-")) return undefined;
+    positionals.push(argument);
+  }
+
+  const [prompt] = positionals;
+  if (positionals.length !== 1 || prompt === undefined || prompt.trim() === "") return undefined;
+  const selectors =
+    Number(newSession) + Number(continueSession) + (sessionId === undefined ? 0 : 1);
+  if (selectors > 1) return undefined;
+  if (create && sessionId === undefined) return undefined;
+  if (print && json) return undefined;
+  if (systemPrompt !== undefined && useDefaultSystemPrompt) return undefined;
+
+  const names = new Set<string>();
+  for (const name of [...enable, ...disable]) {
+    if (names.has(name)) return undefined;
+    names.add(name);
+  }
+
+  return {
+    command: "run",
+    prompt,
+    newSession,
+    continueSession,
+    create,
+    useDefaultSystemPrompt,
+    enable,
+    disable,
+    print,
+    json,
+    ...(configPath !== undefined ? { configPath } : {}),
+    ...(dataDir !== undefined ? { dataDir } : {}),
+    ...(sessionId !== undefined ? { sessionId } : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(provider !== undefined ? { provider } : {}),
+    ...(systemPrompt !== undefined ? { systemPrompt } : {}),
+  };
+}
+
 export async function runCli(
   argv: string[],
   io: CommandIo = processIo,
@@ -527,6 +670,7 @@ export async function runCli(
   templateDeps: TemplatesDeps = productionTemplatesDeps,
   sessionDeps: SessionsDeps = productionSessionsDeps,
   providerDeps: ProvidersDeps = productionProvidersDeps,
+  runDeps: RunDeps = productionRunDeps,
 ): Promise<number> {
   const parsed = await parse(argv);
 
@@ -541,6 +685,28 @@ export async function runCli(
   if (parsed === undefined) {
     io.err(USAGE);
     return 2;
+  }
+
+  if (parsed.command === "run") {
+    const options: RunOptions = {
+      configPath: parsed.configPath ?? defaultConfigPath(process.env),
+      io,
+      prompt: parsed.prompt,
+      newSession: parsed.newSession,
+      continueSession: parsed.continueSession,
+      create: parsed.create,
+      useDefaultSystemPrompt: parsed.useDefaultSystemPrompt,
+      enable: parsed.enable,
+      disable: parsed.disable,
+      print: parsed.print,
+      json: parsed.json,
+      ...(parsed.dataDir !== undefined ? { dataDir: parsed.dataDir } : {}),
+      ...(parsed.sessionId !== undefined ? { sessionId: parsed.sessionId } : {}),
+      ...(parsed.model !== undefined ? { model: parsed.model } : {}),
+      ...(parsed.provider !== undefined ? { provider: parsed.provider } : {}),
+      ...(parsed.systemPrompt !== undefined ? { systemPrompt: parsed.systemPrompt } : {}),
+    };
+    return await runCommand(options, runDeps);
   }
 
   if (parsed.command === "config") {

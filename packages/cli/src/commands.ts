@@ -114,6 +114,8 @@ export interface CommandDeps {
 export interface CommandIo {
   out(line: string): void;
   err(line: string): void;
+  /** Raw stdout write without an implied newline, for streamed turn deltas. */
+  write?(text: string): void;
 }
 
 export interface CommandOptions {
@@ -131,6 +133,9 @@ export type StatusState = "running" | "stopped" | "stale" | "unresponsive" | "un
 export const processIo: CommandIo = {
   out: (line) => process.stdout.write(`${line}\n`),
   err: (line) => process.stderr.write(`${line}\n`),
+  write: (text) => {
+    process.stdout.write(text);
+  },
 };
 
 const failureMessage = (code: string): string => MESSAGES[code] ?? MESSAGES[FALLBACK_CODE] ?? "";
