@@ -282,9 +282,14 @@ export async function startCommand(
     }
   }
 
+  // The template directory travels as an explicit argv element, like the data
+  // directory override, so the child never has to guess how it was resolved.
+  const childArgs = [options.configPath, dataDir];
+  if (resolved.config.templatesDir !== undefined) childArgs.push(resolved.config.templatesDir);
+
   let child: ChildHandle;
   try {
-    child = deps.spawnChild(CHILD_ENTRY, [options.configPath, dataDir], logPath);
+    child = deps.spawnChild(CHILD_ENTRY, childArgs, logPath);
   } catch (error) {
     // Only an unopenable log is a directory problem; everything else is a
     // failed spawn (EACCES, ENOMEM, EAGAIN) and points at the log.

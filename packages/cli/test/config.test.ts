@@ -277,3 +277,23 @@ test("defaultDataDir and defaultConfigPath honour XDG variables then HOME", () =
   expectInvalid(() => defaultDataDir({}));
   expectInvalid(() => defaultConfigPath({}));
 });
+
+test("accepts an optional absolute templatesDir", () => {
+  const valid = parseConfig(raw({ templatesDir: "/srv/pisces/templates" }));
+  expect(valid.templatesDir).toBe("/srv/pisces/templates");
+  expect(parseConfig(raw()).templatesDir).toBeUndefined();
+});
+
+test("rejects a relative or malformed templatesDir", () => {
+  for (const value of ["templates", "", ".", 42, null]) {
+    expectInvalid(() => parseConfig(raw({ templatesDir: value })));
+  }
+});
+
+test("loadConfig expands a leading tilde in templatesDir", async () => {
+  const dir = await tempDir();
+  vi.stubEnv("HOME", "/home/tester");
+  const path = join(dir, "config.json");
+  await writeFile(path, JSON.stringify(raw({ templatesDir: "~/templates" })));
+  expect((await loadConfig(path)).templatesDir).toBe("/home/tester/templates");
+});

@@ -21,10 +21,12 @@ export interface CliConfig {
   dataDir: string;
   providers: CliProviderConfig[];
   defaults?: { provider: string; model: string };
+  /** Absolute directory holding `<id>.json` templates; absent means no templates. */
+  templatesDir?: string;
 }
 
 const INVALID_MESSAGE = "Invalid configuration";
-const CONFIG_KEYS = ["dataDir", "providers", "defaults"] as const;
+const CONFIG_KEYS = ["dataDir", "providers", "defaults", "templatesDir"] as const;
 const PROVIDER_KEYS = ["id", "baseUrl", "apiKeyEnv", "headers", "models"] as const;
 const MODEL_KEYS = ["id", "contextWindow", "maxOutput", "modalities"] as const;
 const DEFAULTS_KEYS = ["provider", "model"] as const;
@@ -189,7 +191,9 @@ function applyEnvironmentDefaults(value: unknown, env: NodeJS.ProcessEnv): unkno
   if (!isRecord(value)) return value;
   const dataDir =
     value.dataDir === undefined ? defaultDataDir(env) : expandHome(value.dataDir, env);
-  return { ...value, dataDir };
+  const templatesDir =
+    value.templatesDir === undefined ? {} : { templatesDir: expandHome(value.templatesDir, env) };
+  return { ...value, dataDir, ...templatesDir };
 }
 
 export function defaultDataDir(env: NodeJS.ProcessEnv): string {
@@ -217,6 +221,7 @@ export function parseConfig(value: unknown): CliConfig {
     providers,
   };
   if (value.defaults !== undefined) config.defaults = parseDefaults(value.defaults, providers);
+  if (value.templatesDir !== undefined) config.templatesDir = parseDataDir(value.templatesDir);
   return config;
 }
 

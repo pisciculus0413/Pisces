@@ -38,6 +38,7 @@ export function buildDaemonOptions(
   config: CliConfig,
   dataDir: string,
   env: NodeJS.ProcessEnv,
+  templatesDir: string | undefined = config.templatesDir,
 ): StartDaemonOptions {
   const providers = buildProviders(config);
   const credentials = createEnvCredentials(config, env);
@@ -46,5 +47,6 @@ export function buildDaemonOptions(
     providers,
     providerHost: createProviderHost({ providers, credentials }),
     ...(config.defaults ? { defaults: config.defaults } : {}),
+    ...(templatesDir !== undefined ? { templates: { configDir: templatesDir } } : {}),
   };
 }

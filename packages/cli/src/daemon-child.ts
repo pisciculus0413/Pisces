@@ -5,7 +5,7 @@ import { loadConfig } from "./config.js";
 import { isEntryPath } from "./entry.js";
 
 /** Usage error: wrong argument count, nothing to start. */
-const USAGE = "usage: daemon-child <config-path> <data-dir>";
+const USAGE = "usage: daemon-child <config-path> <data-dir> [templates-dir]";
 /** Normalized code when the failure is not a PiscesError. */
 const START_FAILED = "daemon.start_failed";
 
@@ -32,8 +32,8 @@ function run(host: DaemonHost): void {
  * start the daemon, then stay alive until a signal stops it.
  */
 export async function daemonChildMain(argv: string[]): Promise<void> {
-  const [configPath, dataDir] = argv;
-  if (argv.length !== 2 || configPath === undefined || dataDir === undefined) {
+  const [configPath, dataDir, templatesDir] = argv;
+  if (argv.length < 2 || argv.length > 3 || configPath === undefined || dataDir === undefined) {
     process.stderr.write(`${USAGE}\n`);
     process.exitCode = 2;
     return;
@@ -41,7 +41,8 @@ export async function daemonChildMain(argv: string[]): Promise<void> {
 
   try {
     const config = await loadConfig(configPath);
-    run(await startDaemon(buildDaemonOptions(config, dataDir, process.env)));
+    const options = buildDaemonOptions(config, dataDir, process.env, templatesDir);
+    run(await startDaemon(options));
   } catch (error) {
     process.stderr.write(`error: ${failureCode(error)}\n`);
     process.exitCode = 1;
