@@ -2,6 +2,12 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import {
+  type ClientCommandsDeps,
+  clientList,
+  clientStart,
+  productionClientDeps,
+} from "./client-commands.js";
+import {
   type CommandDeps,
   type CommandIo,
   type CommandOptions,
@@ -60,6 +66,7 @@ export const USAGE = [
   "  config     list, get, set or unset configuration values",
   "  extensions list discovered extensions without loading them",
   "  sessions   list, export or cancel sessions",
+  "  client     list or start a client",
   "  provider   list providers known to the daemon",
   "  models     list models of every provider",
   "  run        run a turn non-interactively",
@@ -82,7 +89,7 @@ export const USAGE = [
   "  --disable <name>    disable an extension package#name (run)",
   "  --print             print only the final turn text (run)",
   "  --json              machine-readable output (status, templates, config, extensions,",
-  "                      sessions list, provider, models, run)",
+  "                      sessions list, client, provider, models, run)",
   "  --help              show this help",
   "  --version           print the version",
 ].join("\n");
@@ -101,6 +108,9 @@ type ExtensionsSub = (typeof EXTENSIONS_SUBS)[number];
 
 const SESSIONS_SUBS = ["list", "export", "cancel"] as const;
 type SessionsSub = (typeof SESSIONS_SUBS)[number];
+
+const CLIENT_SUBS = ["list", "start"] as const;
+type ClientSub = (typeof CLIENT_SUBS)[number];
 
 const PROVIDER_SUBS = ["list"] as const;
 type ProviderSub = (typeof PROVIDER_SUBS)[number];
@@ -177,6 +187,15 @@ type ProvidersParsed =
   | (ProviderCommon & { command: "provider"; sub: ProviderSub })
   | (ProviderCommon & { command: "models"; sub: ProviderSub; provider?: string });
 
+interface ClientParsed {
+  command: "client";
+  sub: ClientSub;
+  configPath?: string;
+  dataDir?: string;
+  json: boolean;
+  id?: string;
+}
+
 interface RunParsed {
   command: "run";
   configPath?: string;
@@ -203,6 +222,7 @@ type Outcome =
   | ConfigParsed
   | ExtensionsParsed
   | SessionsParsed
+  | ClientParsed
   | ProvidersParsed
   | RunParsed
   | "help"
@@ -223,6 +243,9 @@ const isExtensionsSub = (value: string | undefined): value is ExtensionsSub =>
 
 const isSessionsSub = (value: string | undefined): value is SessionsSub =>
   value !== undefined && (SESSIONS_SUBS as readonly string[]).includes(value);
+
+const isClientSub = (value: string | undefined): value is ClientSub =>
+  value !== undefined && (CLIENT_SUBS as readonly string[]).includes(value);
 
 const isProviderSub = (value: string | undefined): value is ProviderSub =>
   value !== undefined && (PROVIDER_SUBS as readonly string[]).includes(value);
@@ -248,6 +271,7 @@ async function parse(argv: readonly string[]): Promise<Outcome> {
   if (command === "config") return parseConfig(argv);
   if (command === "extensions") return parseExtensions(argv);
   if (command === "sessions") return parseSessions(argv);
+  if (command === "client") return parseClient(argv);
   if (command === "provider") return parseProviders(argv, "provider");
   if (command === "models") return parseProviders(argv, "models");
   if (command === "run") return parseRun(argv);
@@ -555,6 +579,52 @@ function parseProviders(
   return { command, ...common, ...(provider !== undefined ? { provider } : {}) };
 }
 
+/** `client list|start`; `undefined` is always a usage error. */
+function parseClient(argv: readonly string[]): ClientParsed | "help" | "version" | undefined {
+  const sub = argv[1];
+  if (sub === "--help") return "help";
+  if (sub === "--version") return "version";
+  if (!isClientSub(sub)) return undefined;
+
+  let configPath: string | undefined;
+  let dataDir: string | undefined;
+  let id: string | undefined;
+  let json = false;
+
+  for (let index = 2; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--help") return "help";
+    if (argument === "--version") return "version";
+    if (argument === "--json") {
+      json = true;
+      continue;
+    }
+    if (argument === "--config" || argument === "--data-dir") {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("-")) return undefined;
+      if (argument === "--config") configPath = value;
+      else dataDir = value;
+      index += 1;
+      continue;
+    }
+    // `list` takes no positionals; `start` takes exactly one client id.
+    if (sub !== "start" || id !== undefined) return undefined;
+    if (typeof argument !== "string" || argument.startsWith("-")) return undefined;
+    id = argument;
+  }
+
+  if (sub === "start" && id === undefined) return undefined;
+
+  return {
+    command: "client",
+    sub,
+    json,
+    ...(configPath !== undefined ? { configPath } : {}),
+    ...(dataDir !== undefined ? { dataDir } : {}),
+    ...(id !== undefined ? { id } : {}),
+  };
+}
+
 const RUN_SESSION_ID = /^[A-Za-z0-9_-]+$/;
 const RUN_ENTRY_NAME = /^[^#\s]+#[^#\s]+$/u;
 
@@ -682,6 +752,7 @@ export async function runCli(
   sessionDeps: SessionsDeps = productionSessionsDeps,
   providerDeps: ProvidersDeps = productionProvidersDeps,
   runDeps: RunDeps = productionRunDeps,
+  clientDeps: ClientCommandsDeps = productionClientDeps,
 ): Promise<number> {
   const parsed = await parse(argv);
 
@@ -771,6 +842,17 @@ export async function runCli(
       default:
         return await sessionCancel({ ...options, sessionId: parsed.sessionId }, sessionDeps);
     }
+  }
+
+  if (parsed.command === "client") {
+    const options = {
+      configPath: parsed.configPath ?? defaultConfigPath(process.env),
+      io,
+      json: parsed.json,
+      ...(parsed.dataDir !== undefined ? { dataDir: parsed.dataDir } : {}),
+    };
+    if (parsed.sub === "list") return await clientList(options, clientDeps);
+    return await clientStart({ ...options, id: parsed.id as string }, clientDeps);
   }
 
   if (parsed.command === "provider" || parsed.command === "models") {
