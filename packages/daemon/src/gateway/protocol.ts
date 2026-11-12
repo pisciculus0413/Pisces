@@ -15,6 +15,7 @@ import type {
   TemplateInfo,
   TurnId,
 } from "@pisces/core";
+import type { ClientRegistration } from "../extensions/types.js";
 import type { ActiveTurn } from "../runtime/concurrency.js";
 
 export interface ProtocolError {
@@ -179,6 +180,18 @@ export interface QueueClearParams {
 
 export interface QueueClearResult {
   ids: QueueEntryId[];
+}
+
+export interface ClientListResult {
+  clients: ClientRegistration[];
+}
+
+export interface ClientStartParams {
+  id: string;
+}
+
+export interface ClientStartResult {
+  pid: number;
 }
 
 export interface TemplateListResult {

@@ -36,6 +36,7 @@ import {
 } from "@pisces/core";
 import type { ProtocolEvent } from "@pisces/protocol";
 import { MAX_RESPONSE_BYTES } from "@pisces/protocol";
+import type { ClientRegistry } from "../client-registry/registry.js";
 import { createExecHost } from "../exec/exec-host.js";
 import type { ExtensionBinding, Extensions } from "../extensions/types.js";
 import type { ProviderHost } from "../provider/provider-host.js";
@@ -55,6 +56,8 @@ import {
 } from "./extension-session.js";
 import { extensionSnapshot } from "./extension-view.js";
 import type {
+  ClientListResult,
+  ClientStartResult,
   EntriesSnapshotResult,
   GatewayRequest,
   GatewayResponse,
@@ -86,6 +89,8 @@ export interface GatewayDeps {
   extensions?: Extensions;
   /** Declarative templates; absent means every `template.*` method is unknown. */
   templates?: Templates;
+  /** Extension clients; absent means every `client.*` method is unknown. */
+  clients?: ClientRegistry;
   defaults?: SessionDefaults;
   createTools?: () => Tools;
   entries?: ContextEntries;
@@ -474,6 +479,13 @@ export function createGateway(deps: GatewayDeps): Gateway {
   }
 
   /** Absent configuration keeps the existing `protocol.unknown_method` answer. */
+  function clientRegistry(): ClientRegistry {
+    if (deps.clients === undefined)
+      throw new PiscesError("protocol.unknown_method", "Unknown protocol method");
+    return deps.clients;
+  }
+
+  /** Absent configuration keeps the existing `protocol.unknown_method` answer. */
   function templateStore(): Templates {
     if (templateService === undefined)
       throw new PiscesError("protocol.unknown_method", "Unknown protocol method");
@@ -713,6 +725,16 @@ export function createGateway(deps: GatewayDeps): Gateway {
         });
       }
       return { providers };
+    },
+
+    async "client.list"(): Promise<ClientListResult> {
+      return { clients: await clientRegistry().list() };
+    },
+
+    async "client.start"(params): Promise<ClientStartResult> {
+      const id = params.id;
+      if (typeof id !== "string" || id.length === 0) invalidRequest();
+      return await clientRegistry().start(id);
     },
 
     async "template.list"(): Promise<TemplateListResult> {

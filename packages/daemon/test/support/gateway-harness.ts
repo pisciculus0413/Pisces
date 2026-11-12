@@ -45,6 +45,7 @@ export interface GatewayHarnessOptions {
   defaults?: SessionDefaults;
   extensions?: Extensions;
   templates?: GatewayDeps["templates"];
+  clients?: GatewayDeps["clients"];
   execute?: ExecuteProvider;
   adapter?: LlmAdapter;
   validateWorkspace?: (workspace: string) => Promise<boolean>;
@@ -212,6 +213,7 @@ export async function createGatewayHarness(
     ...(options.defaults ? { defaults: options.defaults } : {}),
     ...(options.extensions ? { extensions: options.extensions } : {}),
     ...(options.templates ? { templates: options.templates } : {}),
+    ...(options.clients ? { clients: options.clients } : {}),
     ...(options.validateWorkspace ? { validateWorkspace: options.validateWorkspace } : {}),
     ...(options.newSessionId ? { newSessionId: options.newSessionId } : {}),
     ...(options.createTools ? { createTools: options.createTools } : {}),
