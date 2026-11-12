@@ -595,26 +595,31 @@ participant "Gateway" as Gateway
 participant "AgentLoopDriver" as Driver
 participant "Context" as Context
 participant "Sessions" as Sessions
+participant "LLMAdapter" as LLMAdapter
 participant "ProviderHost" as ProviderHost
 participant "模型供应商" as Provider
 
 User -> Client : 发出确认信号
 Client -> Gateway : turn.start
-Gateway -> Driver : 触发 turn
+Gateway -> Driver : 触发
 Driver -> Context : 获取请求上下文
 Context -> Sessions : 读取活动分支
 Sessions --> Context : 事件与控制消息
 Context -> Context : 组装请求上下文
-critical create / 后续 append 原子持久化
+critical 原子化创建或更新会话记录
 Context -> Sessions : 请求创建或批量追加
 Sessions --> Context : 成功信号
 Context -> Context : 出队
 end
 Context --> Driver : 请求上下文
-Driver -> ProviderHost : execute(wireRequest)
+Driver -> LLMAdapter : 转换格式
+LLMAdapter --> Driver : 请求体
+Driver -> ProviderHost : 发送请求
 ProviderHost -> Provider : HTTP
 Provider --> ProviderHost : 流分块
 ProviderHost --> Driver : 流分块
+Driver -> LLMAdapter : 解析流分块
+LLMAdapter --> Driver : 解析结果
 Driver -> Sessions : 追加智能体回复、工具结果等消息
 Driver --> Gateway : 事件
 Gateway --> Client : 协议事件
