@@ -1814,7 +1814,7 @@ interface ClientRegistry {
 ```
 
 - 实现在 `packages/daemon/src/client-registry/registry.ts`：`createClientRegistry({ extensions?, socketPath, env?, spawn? })`。没有 `register`：清单是唯一事实来源，注册表自己读取，避免第二个写入点没有调用方。
-- 客户端登记来自扩展清单的 `clients`，由 `discoverClients(options)`（`packages/daemon/src/extensions/discovery.ts`）解析：源为内置目录与 `<configDir>/extensions`，工作区不参与；`entry` 必须是包目录内的脚本文件，否则记 `extensions.invalid` 并丢弃该声明；不同包复用同一 `id` 时两方都丢弃，每个包记一条 `extensions.duplicate`；结果按 `id` 排序。
+- 客户端登记来自扩展清单的 `clients`，由 `discoverClients(options)`（`packages/daemon/src/extensions/discovery.ts`）解析：源为内置目录与 `<configDir>/extensions`，工作区不参与；`entry` 必须是包目录内的脚本文件（相对包目录或绝对路径都接受，逐出包目录的符号链接同样被拒绝），否则静默丢弃该声明；不同包复用同一 `id` 时两方都丢弃；结果按 `id` 排序。本阶段不产生发现诊断（`discoverClients` 只返回可用客户端），坏声明只表现为该客户端不可见。
 - `list` 每次调用重新发现，因此装改扩展无需重启 daemon；`extensions` 缺省时恒返回空列表。
 - `start` 校验 id（`list` 中不存在即 `client.not_found`），以 `node <entry>` 启动子进程：`stdio` 为 `["ignore","inherit","inherit"]`（继承的 stdout/stderr 即 `<dataDir>/daemon.log`），env 只有 `PATH`、`PISCES_SOCKET_PATH`、`PISCES_CLIENT_ID`，不继承 daemon 环境。
 - `start` 等待子进程的 `spawn`/`error` 事件后 `unref()` 并返回 pid；spawn 失败返回 `client.launch_failed`。daemon 不保存句柄、不监听 `exit`，`stop` 不连带终止已启动的客户端。
@@ -1974,8 +1974,8 @@ turn 时输出 `no active turn` 并退出 0，`{cancelled:false}` 映射为 CLI 
 `id  ready|unready  models=<n>`；后者把模型展平为 `provider/model`（provider 按 `id` 字典序，
 模型保持 daemon 顺序），`--provider <id>` 只保留该 provider，未知 id 以 CLI 本地的
 `provider.not_found` 退出 1。`client list` 与 `client start` 经短连接调用 `client.list`/`client.start`：
-前者每行 `id  source`（空清单不输出），后者输出 `started <id> (pid <n>)`；`--json` 分别原样回显
-`{clients}` 与 `{pid}`，结果结构不合法为 CLI 本地的 `client.protocol`，`client.not_found`/
+前者每行 `id  source`（空清单不输出），后者输出 `started <id> (pid <n>)`；`--json` 先校验再回显
+规范化后的 `{clients}` 与 `{pid}`（丢弃多余字段），结果结构不合法为 CLI 本地的 `client.protocol`，`client.not_found`/
 `client.launch_failed` 原样转发并退出 1（详见 `docs/cli.md`）。表中其余命令为目标设计，**未实现**；
 `--help`、`--version` 已实现。
 

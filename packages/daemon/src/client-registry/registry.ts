@@ -60,7 +60,7 @@ export function createClientRegistry(options: ClientRegistryOptions): ClientRegi
 
   async function list(): Promise<ClientRegistration[]> {
     if (options.extensions === undefined) return [];
-    return (await discoverClients(options.extensions)).clients;
+    return await discoverClients(options.extensions);
   }
 
   async function start(id: string): Promise<{ pid: number }> {

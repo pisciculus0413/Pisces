@@ -145,6 +145,35 @@ test("client list rejects a malformed response", async () => {
   ).toBe(true);
 });
 
+test("client list validates before echoing json", async () => {
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  for (const responder of [
+    () => ({ clients: [{ id: "repl" }] }),
+    () => ({ clients: "nope" }),
+    () => ({}),
+  ]) {
+    expect(
+      await clientList({ configPath, io: rec.io, json: true }, fakeClient(responder).deps),
+    ).toBe(1);
+  }
+  expect(rec.out).toEqual([]);
+});
+
+test("client list --json drops unexpected fields", async () => {
+  const { configPath } = await fixture();
+  const rec = recorder();
+
+  expect(
+    await clientList(
+      { configPath, io: rec.io, json: true },
+      fakeClient(() => ({ clients: [{ ...REGISTRATION, extra: "x" }], ignored: true })).deps,
+    ),
+  ).toBe(0);
+  expect(JSON.parse(rec.out[0] ?? "")).toEqual({ clients: [REGISTRATION] });
+});
+
 test("client start prints the pid", async () => {
   const { configPath } = await fixture();
   const rec = recorder();

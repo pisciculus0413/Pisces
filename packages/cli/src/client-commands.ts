@@ -121,12 +121,12 @@ export async function clientList(
 ): Promise<number> {
   const io = options.io ?? processIo;
   return await withClient(options, deps, async (client) => {
-    const result = await client.request("client.list", {});
+    const clients = parseClients(await client.request("client.list", {}));
     if (options.json === true) {
-      io.out(JSON.stringify(result));
+      io.out(JSON.stringify({ clients }));
       return 0;
     }
-    for (const entry of parseClients(result)) io.out(`${entry.id}  ${entry.source}`);
+    for (const entry of clients) io.out(`${entry.id}  ${entry.source}`);
     return 0;
   });
 }

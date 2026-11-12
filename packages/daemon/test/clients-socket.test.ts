@@ -104,7 +104,9 @@ function daemonOptions(fixture: Fixture, withExtensions: boolean): StartDaemonOp
     dataDir: fixture.dataDir,
     providers: testProviders(),
     providerHost: readyProviderHost,
-    ...(withExtensions ? { extensions: { configDir: fixture.configDir } } : {}),
+    ...(withExtensions
+      ? { extensions: { configDir: fixture.configDir, builtinDir: join(fixture.root, "builtin") } }
+      : {}),
   };
 }
 

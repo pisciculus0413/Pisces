@@ -178,9 +178,9 @@ test.skipIf(!BUILT)(
     const fixture = await makeFixture();
 
     const started = await run(command(fixture, ["start"]));
-    expect(started.code).toBe(0);
 
     try {
+      expect(started.code).toBe(0);
       const listed = await run(command(fixture, ["client", "list"]));
       expect(listed.code).toBe(0);
       expect(listed.stdout.trim()).toBe("demo  @demo/x");

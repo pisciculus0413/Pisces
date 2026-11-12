@@ -30,11 +30,6 @@ export interface ClientRegistration {
   entry: string;
 }
 
-export interface ClientDiscoveryResult {
-  clients: ClientRegistration[];
-  issues: ExtensionIssue[];
-}
-
 export interface ExtensionConfig {
   defaults?: { provider: string; model: string };
   defaultWorkspace?: string;

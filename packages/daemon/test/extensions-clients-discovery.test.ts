@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -40,17 +40,14 @@ test("reads clients from the builtin and config sources", async () => {
   const result = await discoverClients({ configDir, builtinDir });
 
   const entry = await realpath(join(configDir, "extensions", "demo", "client.mjs"));
-  expect(result).toEqual({
-    clients: [
-      {
-        id: "built-repl",
-        source: "@builtin/shell",
-        entry: await realpath(join(builtinDir, "built", "client.mjs")),
-      },
-      { id: "repl", source: "@demo/x", entry },
-    ],
-    issues: [],
-  });
+  expect(result).toEqual([
+    {
+      id: "built-repl",
+      source: "@builtin/shell",
+      entry: await realpath(join(builtinDir, "built", "client.mjs")),
+    },
+    { id: "repl", source: "@demo/x", entry },
+  ]);
 });
 
 test("skips a client whose entry is missing", async () => {
@@ -59,10 +56,7 @@ test("skips a client whose entry is missing", async () => {
     manifest: { clients: [{ id: "repl", entry: "./absent.mjs" }] },
   });
 
-  const result = await discoverClients({ configDir, builtinDir });
-
-  expect(result.clients).toEqual([]);
-  expect(result.issues).toEqual([{ code: "extensions.invalid", source: "@demo/x" }]);
+  expect(await discoverClients({ configDir, builtinDir })).toEqual([]);
 });
 
 test("rejects an entry outside the package root", async () => {
@@ -72,10 +66,7 @@ test("rejects an entry outside the package root", async () => {
     manifest: { clients: [{ id: "repl", entry: "../evil.mjs" }] },
   });
 
-  const result = await discoverClients({ configDir, builtinDir });
-
-  expect(result.clients).toEqual([]);
-  expect(result.issues).toEqual([{ code: "extensions.invalid", source: "@demo/x" }]);
+  expect(await discoverClients({ configDir, builtinDir })).toEqual([]);
 });
 
 test("rejects an entry that is not a script", async () => {
@@ -85,10 +76,7 @@ test("rejects an entry that is not a script", async () => {
     files: { "data.json": "{}\n" },
   });
 
-  const result = await discoverClients({ configDir, builtinDir });
-
-  expect(result.clients).toEqual([]);
-  expect(result.issues).toEqual([{ code: "extensions.invalid", source: "@demo/x" }]);
+  expect(await discoverClients({ configDir, builtinDir })).toEqual([]);
 });
 
 test("drops every package that reuses a client id", async () => {
@@ -101,17 +89,35 @@ test("drops every package that reuses a client id", async () => {
     ...clientPackage("repl", "./client.mjs"),
   });
 
-  const result = await discoverClients({ configDir, builtinDir });
+  expect(await discoverClients({ configDir, builtinDir })).toEqual([]);
+});
 
-  expect(result.clients).toEqual([]);
-  expect(result.issues).toEqual([
-    { code: "extensions.duplicate", source: "@demo/first", name: "repl" },
-    { code: "extensions.duplicate", source: "@demo/second", name: "repl" },
+test("accepts an absolute entry inside the package root", async () => {
+  const packageRoot = join(configDir, "extensions", "demo");
+  await makePackage(packageRoot, {
+    name: "@demo/x",
+    manifest: { clients: [{ id: "repl", entry: join(packageRoot, "client.mjs") }] },
+    files: { "client.mjs": "process.exit(0);\n" },
+  });
+
+  expect(await discoverClients({ configDir, builtinDir })).toEqual([
+    { id: "repl", source: "@demo/x", entry: await realpath(join(packageRoot, "client.mjs")) },
   ]);
 });
 
-test("ignores missing extension directories", async () => {
-  const result = await discoverClients({ configDir, builtinDir });
+test("rejects a symlinked entry that resolves outside the package root", async () => {
+  const outside = join(configDir, "extensions", "outside.mjs");
+  await writeText(outside, "process.exit(0);\n");
+  const packageRoot = join(configDir, "extensions", "demo");
+  await makePackage(packageRoot, {
+    name: "@demo/x",
+    manifest: { clients: [{ id: "repl", entry: "./client.mjs" }] },
+  });
+  await symlink(outside, join(packageRoot, "client.mjs"));
 
-  expect(result).toEqual({ clients: [], issues: [] });
+  expect(await discoverClients({ configDir, builtinDir })).toEqual([]);
+});
+
+test("ignores missing extension directories", async () => {
+  expect(await discoverClients({ configDir, builtinDir })).toEqual([]);
 });

@@ -1,6 +1,6 @@
 # Pisces 实现缺口清单
 
-本文件按当前 `dev-pi` 分支（`db055d5`）的代码与 `docs/1 High-Level Design/1 High-Level Design.md`、`docs/2 Detailed Design Specification/2 Detailed Design Specification.md` 对照，汇总**设计中已描述、但尚未实现**的能力。
+本文件按当前 `dev-pi` 分支（`39030f5`）的代码与 `docs/1 High-Level Design/1 High-Level Design.md`、`docs/2 Detailed Design Specification/2 Detailed Design Specification.md` 对照，汇总**设计中已描述、但尚未实现**的能力。
 
 本文件是状态快照，不替代 HLD/DDS：契约冲突时以 HLD/DDS 为准；本文件只回答“现在缺什么”。
 

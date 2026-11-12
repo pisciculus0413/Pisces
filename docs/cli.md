@@ -570,6 +570,8 @@ error: client.not_found: Client is not registered
 - daemon 不跟踪、不回收已启动的客户端：`pisces stop` 不会终止它们，客户端需要在 daemon 不在时自行
   处理连接失败。
 - 启动失败返回 `client.launch_failed`；两个命令都不提供列表之外的客户端状态查询。
+- `--json` 先把 daemon 结果校验为 `{clients: [{id, source, entry}]}` / `{pid}` 再输出，多余字段被
+  丢弃；结构不合法一律退出 1 并输出 `client.protocol`，人类模式与 `--json` 一致。
 
 ## 6. 文件位置
 

@@ -64,9 +64,9 @@ demo/
 - 未知清单键、非法 glob、指到包外的路径或缺失的 `SKILL.md` 会产生 `extensions.invalid` 问题，
   该条目被丢弃，不影响其它条目。
 - `pisces` 字段中的 `clients` 由 `ClientRegistry` 独立读取，用来登记可启动客户端：`entry` 必须是
-  包目录内的脚本文件，缺失或越出包目录记 `extensions.invalid` 并丢弃该声明；不同包声明同一 `id` 时
-  两方都丢弃，各记一条 `extensions.duplicate`。客户端不进入清点、不参与会话选择，命令见
-  `docs/cli.md` 的 `client list|start`。
+  包目录内的脚本文件（相对包目录或绝对路径均可，越出包目录的路径与符号链接被拒绝），缺失或不合格时
+  该声明被静默丢弃；不同包声明同一 `id` 时两方都丢弃。本阶段不产生发现诊断：坏声明只表现为该
+  客户端不可见。客户端不进入清点、不参与会话选择，命令见 `docs/cli.md` 的 `client list|start`。
 - `pisces` 字段中的 `providers` 仍**不装配**，只记录 `extensions.unsupported_contribution`；
   声明它不会让 daemon 失败。
 - 客户端源只有内置扩展目录与软件配置目录的 `extensions/`：`client.list` 不携带工作区，工作区扩展

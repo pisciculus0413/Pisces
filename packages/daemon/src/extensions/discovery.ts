@@ -41,7 +41,6 @@ import {
   type WrapperValidator,
 } from "./metadata.js";
 import type {
-  ClientDiscoveryResult,
   ClientRegistration,
   DiscoveredEntry,
   DiscoveryResult,
@@ -593,15 +592,18 @@ export async function discoverExtensions(
   };
 }
 
-/** A client entry must be a script file inside its own package; nothing else is executable. */
+/**
+ * A client entry must be a script file inside its own package; nothing else is executable.
+ * Absolute literals are accepted like the other entry kinds, then checked by containment.
+ */
 async function clientEntry(packageRoot: string, entry: string): Promise<string | undefined> {
-  const logical = join(packageRoot, entry);
+  const logical = isAbsolute(entry) ? entry : join(packageRoot, entry);
   const canonical = await realpath(logical).catch(() => undefined);
   if (canonical === undefined) return undefined;
   const info = await stat(canonical).catch(() => undefined);
   if (info === undefined || !info.isFile()) return undefined;
   if (!within(packageRoot, canonical)) return undefined;
-  if (!isScriptFile(basename(logical))) return undefined;
+  if (!isScriptFile(basename(canonical))) return undefined;
   return canonical;
 }
 
@@ -611,8 +613,7 @@ async function clientEntry(packageRoot: string, entry: string): Promise<string |
  * workspace, so a workspace extension cannot contribute a client. No extension code is
  * imported and no configuration file is read.
  */
-export async function discoverClients(options: ExtensionsOptions): Promise<ClientDiscoveryResult> {
-  const issues: ExtensionIssue[] = [];
+export async function discoverClients(options: ExtensionsOptions): Promise<ClientRegistration[]> {
   const { configDir } = resolveConfigLocation(options);
   const sources = [
     { dir: options.builtinDir ?? defaultBuiltinDir(), label: "builtin" },
@@ -623,16 +624,12 @@ export async function discoverClients(options: ExtensionsOptions): Promise<Clien
 
   for (const source of sources) {
     const listed = await listPackageRoots(source.dir, source.label);
-    for (const failure of listed.failures) {
-      pushIssue(issues, "extensions.invalid", failure);
-    }
     for (const packageEntry of listed.roots) {
       let packageRoot: string;
       try {
         packageRoot = await realpath(packageEntry.dir);
         if (!(await stat(packageRoot)).isDirectory()) continue;
       } catch {
-        pushIssue(issues, "extensions.invalid", packageEntry.tag);
         continue;
       }
       if (seenRoots.has(packageRoot)) continue;
@@ -641,9 +638,7 @@ export async function discoverClients(options: ExtensionsOptions): Promise<Clien
       let packageJson: string;
       try {
         packageJson = await readFile(join(packageRoot, "package.json"), "utf8");
-      } catch (error) {
-        if (isNotFound(error)) continue;
-        pushIssue(issues, "extensions.invalid", packageEntry.tag);
+      } catch {
         continue;
       }
 
@@ -654,16 +649,12 @@ export async function discoverClients(options: ExtensionsOptions): Promise<Clien
         name = parsed.name;
         manifest = parsed.manifest;
       } catch {
-        pushIssue(issues, "extensions.invalid", packageEntry.tag);
         continue;
       }
 
       for (const client of manifest?.clients ?? []) {
         const entry = await clientEntry(packageRoot, client.entry);
-        if (entry === undefined) {
-          pushIssue(issues, "extensions.invalid", name);
-          continue;
-        }
+        if (entry === undefined) continue;
         declared.push({ id: client.id, source: name, entry });
       }
     }
@@ -673,17 +664,9 @@ export async function discoverClients(options: ExtensionsOptions): Promise<Clien
   // letting directory order decide which package wins.
   const counts = new Map<string, number>();
   for (const client of declared) counts.set(client.id, (counts.get(client.id) ?? 0) + 1);
-  const clients: ClientRegistration[] = [];
-  for (const client of declared) {
-    if ((counts.get(client.id) ?? 0) > 1) {
-      pushIssue(issues, "extensions.duplicate", client.source, client.id as EntryName);
-      continue;
-    }
-    clients.push(client);
-  }
+  const clients = declared.filter((client) => counts.get(client.id) === 1);
   clients.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
-
-  return { clients, issues };
+  return clients;
 }
 
 /**
@@ -725,7 +708,6 @@ export async function listExtensions(options: ListExtensionsOptions): Promise<Ex
 }
 
 export type {
-  ClientDiscoveryResult,
   ClientRegistration,
   DiscoveryResult,
   ExtensionConfig,

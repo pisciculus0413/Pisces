@@ -415,7 +415,6 @@ Clients --> Protocol
 [Gateway] --> [ProviderManagement]
 [Gateway] --> [ClientRegistry]
 [Gateway] --> [EventBus]
-[ClientRegistry] --> [Concurrency]
 [ProviderHost] --> [Credentials]
 [Gateway] --> [SessionStore]
 [SessionStore] ..> [Sessions]
@@ -439,7 +438,7 @@ endlegend
 - 扩展通过核心层注册表与客户端启动注册写入内容；核心层不反向依赖扩展。
 - `Context` 依赖 `Sessions` 读取事件并追加事件；`Sessions` 不依赖 `Context`。
 - 在上述模块设计中，“热会话”等同于 `AgentLoopDriver` 实例， “回合” 是 `AgentLoopDriver` 的核心工作过程。
-- `EventBus` 事件经 `Gateway` 推送客户端；`ClientRegistry` 自行按扩展清单发现客户端并负责启动，`Gateway` 只提供查询与启动入口。
+- `EventBus` 事件经 `Gateway` 推送客户端；`ClientRegistry` 自行读取扩展清单（不经 `Extensions` 服务实例）发现客户端并负责启动，除清单解析与 `node:child_process` 外不依赖其他服务层模块，`Gateway` 只提供查询与启动入口。
 
 ### 4.4 可替换点
 

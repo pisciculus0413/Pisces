@@ -27,7 +27,6 @@ export {
   listExtensions,
 } from "./extensions/discovery.js";
 export type {
-  ClientDiscoveryResult,
   ClientRegistration,
   DiscoveredEntry,
   ExtensionBinding,
