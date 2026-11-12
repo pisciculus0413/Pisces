@@ -16,10 +16,13 @@ export {
 } from "./extensions/config.js";
 export {
   defaultBuiltinDir,
+  discoverClients,
   discoverExtensions,
   listExtensions,
 } from "./extensions/discovery.js";
 export type {
+  ClientDiscoveryResult,
+  ClientRegistration,
   DiscoveredEntry,
   ExtensionBinding,
   ExtensionConfig,

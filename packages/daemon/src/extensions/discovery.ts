@@ -41,6 +41,8 @@ import {
   type WrapperValidator,
 } from "./metadata.js";
 import type {
+  ClientDiscoveryResult,
+  ClientRegistration,
   DiscoveredEntry,
   DiscoveryResult,
   ExtensionConfig,
@@ -591,6 +593,99 @@ export async function discoverExtensions(
   };
 }
 
+/** A client entry must be a script file inside its own package; nothing else is executable. */
+async function clientEntry(packageRoot: string, entry: string): Promise<string | undefined> {
+  const logical = join(packageRoot, entry);
+  const canonical = await realpath(logical).catch(() => undefined);
+  if (canonical === undefined) return undefined;
+  const info = await stat(canonical).catch(() => undefined);
+  if (info === undefined || !info.isFile()) return undefined;
+  if (!within(packageRoot, canonical)) return undefined;
+  if (!isScriptFile(basename(logical))) return undefined;
+  return canonical;
+}
+
+/**
+ * Read-only collection of `pisces.clients` contributions from the builtin and global
+ * extension directories. The workspace source is never read: `client.list` carries no
+ * workspace, so a workspace extension cannot contribute a client. No extension code is
+ * imported and no configuration file is read.
+ */
+export async function discoverClients(options: ExtensionsOptions): Promise<ClientDiscoveryResult> {
+  const issues: ExtensionIssue[] = [];
+  const { configDir } = resolveConfigLocation(options);
+  const sources = [
+    { dir: options.builtinDir ?? defaultBuiltinDir(), label: "builtin" },
+    { dir: join(configDir, "extensions"), label: "config" },
+  ];
+  const seenRoots = new Set<string>();
+  const declared: ClientRegistration[] = [];
+
+  for (const source of sources) {
+    const listed = await listPackageRoots(source.dir, source.label);
+    for (const failure of listed.failures) {
+      pushIssue(issues, "extensions.invalid", failure);
+    }
+    for (const packageEntry of listed.roots) {
+      let packageRoot: string;
+      try {
+        packageRoot = await realpath(packageEntry.dir);
+        if (!(await stat(packageRoot)).isDirectory()) continue;
+      } catch {
+        pushIssue(issues, "extensions.invalid", packageEntry.tag);
+        continue;
+      }
+      if (seenRoots.has(packageRoot)) continue;
+      seenRoots.add(packageRoot);
+
+      let packageJson: string;
+      try {
+        packageJson = await readFile(join(packageRoot, "package.json"), "utf8");
+      } catch (error) {
+        if (isNotFound(error)) continue;
+        pushIssue(issues, "extensions.invalid", packageEntry.tag);
+        continue;
+      }
+
+      let name: string;
+      let manifest: PackageManifest | undefined;
+      try {
+        const parsed = parsePackageJson(packageJson);
+        name = parsed.name;
+        manifest = parsed.manifest;
+      } catch {
+        pushIssue(issues, "extensions.invalid", packageEntry.tag);
+        continue;
+      }
+
+      for (const client of manifest?.clients ?? []) {
+        const entry = await clientEntry(packageRoot, client.entry);
+        if (entry === undefined) {
+          pushIssue(issues, "extensions.invalid", name);
+          continue;
+        }
+        declared.push({ id: client.id, source: name, entry });
+      }
+    }
+  }
+
+  // A reused id has no defensible owner: drop every declaration of it rather than
+  // letting directory order decide which package wins.
+  const counts = new Map<string, number>();
+  for (const client of declared) counts.set(client.id, (counts.get(client.id) ?? 0) + 1);
+  const clients: ClientRegistration[] = [];
+  for (const client of declared) {
+    if ((counts.get(client.id) ?? 0) > 1) {
+      pushIssue(issues, "extensions.duplicate", client.source, client.id as EntryName);
+      continue;
+    }
+    clients.push(client);
+  }
+  clients.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+
+  return { clients, issues };
+}
+
 /**
  * Read-only listing over the same discovery pass the daemon uses, without
  * importing entry modules, building tools or reading credentials.
@@ -630,6 +725,8 @@ export async function listExtensions(options: ListExtensionsOptions): Promise<Ex
 }
 
 export type {
+  ClientDiscoveryResult,
+  ClientRegistration,
   DiscoveryResult,
   ExtensionConfig,
   ExtensionIssue,

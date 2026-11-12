@@ -23,6 +23,18 @@ export interface ExtensionsOptions {
   builtinDir?: string;
 }
 
+/** One client declared by an extension manifest, resolved to an absolute entry path. */
+export interface ClientRegistration {
+  id: string;
+  source: string;
+  entry: string;
+}
+
+export interface ClientDiscoveryResult {
+  clients: ClientRegistration[];
+  issues: ExtensionIssue[];
+}
+
 export interface ExtensionConfig {
   defaults?: { provider: string; model: string };
   defaultWorkspace?: string;
