@@ -19,7 +19,10 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-const clientPackage = (id: string, entry: string): { manifest: unknown; files: Record<string, string> } => ({
+const clientPackage = (
+  id: string,
+  entry: string,
+): { manifest: unknown; files: Record<string, string> } => ({
   manifest: { clients: [{ id, entry }] },
   files: { "client.mjs": "process.exit(0);\n" },
 });
@@ -39,7 +42,11 @@ test("reads clients from the builtin and config sources", async () => {
   const entry = await realpath(join(configDir, "extensions", "demo", "client.mjs"));
   expect(result).toEqual({
     clients: [
-      { id: "built-repl", source: "@builtin/shell", entry: await realpath(join(builtinDir, "built", "client.mjs")) },
+      {
+        id: "built-repl",
+        source: "@builtin/shell",
+        entry: await realpath(join(builtinDir, "built", "client.mjs")),
+      },
       { id: "repl", source: "@demo/x", entry },
     ],
     issues: [],
