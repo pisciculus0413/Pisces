@@ -1,5 +1,6 @@
 import type { Socket } from "node:net";
 import { PiscesError } from "@pisces/core";
+import { createClientRegistry } from "../client-registry/registry.js";
 import { createExecHost } from "../exec/exec-host.js";
 import { createExtensions } from "../extensions/extensions.js";
 import type { ExtensionsOptions } from "../extensions/types.js";
@@ -257,6 +258,12 @@ export async function startDaemonWithSeams(
             exec: createExecHost(),
             ...(options.now === undefined ? {} : { now: options.now }),
           });
+    // Extension clients are resolved from the same directories the extension service reads;
+    // the registry only reads manifests, so it is safe to build before the first socket byte.
+    const clientRegistry = createClientRegistry({
+      ...(options.extensions !== undefined ? { extensions: options.extensions } : {}),
+      socketPath: paths.socketPath,
+    });
     const bootstrapped = await bootstrapGateway({
       store,
       markers,
@@ -266,6 +273,7 @@ export async function startDaemonWithSeams(
       providerHost: options.providerHost,
       ...(extensionService !== undefined ? { extensions: extensionService } : {}),
       ...(templateStore !== undefined ? { templates: templateStore } : {}),
+      clients: clientRegistry,
       ...(options.defaults !== undefined ? { defaults: options.defaults } : {}),
       ...(options.createTools !== undefined ? { createTools: options.createTools } : {}),
       ...(options.entries !== undefined ? { entries: options.entries } : {}),
