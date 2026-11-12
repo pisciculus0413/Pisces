@@ -21,7 +21,6 @@
 |---|---|---|
 | `client list` | 未实现；协议 `client.list` 未路由，调用返回 `protocol.unknown_method` | HLD §6.8、§7；DDS §3.3、§7.1 |
 | `client start <id>` | 未实现；协议 `client.start` 未路由 | 同上 |
-| `client.launched` 事件 | 仅为目标设计，当前不推送 | DDS §3.3 |
 | `providers check` | 未实现；只能经 `provider list` 看 `ready`，没有具体不可用原因 | HLD §6.8；DDS §7.1 |
 | `auth` | 未实现；不能校验或刷新供应商凭据 | HLD §6.8；DDS §7.1 |
 | 交互式 `run` | 仅非交互单 turn；stdin 循环、多轮输入未实现 | HLD §6.8；DDS §7.2 |
@@ -35,7 +34,7 @@
 |---|---|
 | `ClientRegistry` | 未实现。没有客户端注册、查询与启动后端，因此 `client.*` 无法工作 |
 | 扩展清单中的 `providers` 贡献 | 不装配；只记录 `extensions.unsupported_contribution`，provider 仍由 CLI 配置构造 |
-| 扩展清单中的 `clients` 贡献 | 不装配；不登记客户端启动命令，也不产生 `client.launched` |
+| 扩展清单中的 `clients` 贡献 | 不装配；不登记客户端启动命令 |
 | `CredentialStore` | 未装配。当前只有 CLI 从 `apiKeyEnv` 指定的环境变量读取 API key，没有文件凭据存储、OAuth 获取/刷新 |
 | 已有会话热重载 | 未实现。扩展变更只影响之后新建的会话；旧会话只把哈希不匹配的条目显示为 `stale` |
 | 依赖树锁定 | 未实现。`definitionHash` 只覆盖条目文件本身，`configHash` 只覆盖包装器配置，不哈希依赖 |
@@ -71,7 +70,7 @@
 
 ## 6. 建议优先级
 
-1. `ClientRegistry` + `client list|start` + `client.launched`：补齐协议中唯一整块未路由的客户端能力。
+1. `ClientRegistry` + `client list|start`：补齐协议中唯一整块未路由的客户端能力。
 2. `providers check` + `auth` + `CredentialStore`：补齐供应商可用性与凭据管理，顺带支持 OAuth。
 3. 交互式 `run`：在现有非交互单 turn 之上增加 stdin 循环与多轮输入。
 4. `pisces storage migrate`：等出现第二个 schema 版本时再落地迁移函数与 CLI 入口。

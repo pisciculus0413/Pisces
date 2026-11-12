@@ -509,7 +509,7 @@ interface ConfigureSessionParams {
 
 - `session.subscribe`/`session.unsubscribe` 仅在请求带连接上下文时路由；不带连接上下文时与未识别方法一样返回 `protocol.unknown_method`。
 - 订阅在校验会话（含内存中的临时会话）后才安装，且与 `session.read` 快照使用同一会话锁；成功响应发出前订阅已生效，因此事件与响应可以交错。
-- 成功订阅后，该连接接收该会话的已知事件：`session.updated`、`queue.updated`、`selection.updated`、`turn.started`、`turn.delta`、`turn.step`、`turn.ended` 与 `turn.cleanup_failed`；`client.launched` 属于目标设计（客户端方法尚未路由）。
+- 成功订阅后，该连接接收该会话的已知事件：`session.updated`、`queue.updated`、`selection.updated`、`turn.started`、`turn.delta`、`turn.step`、`turn.ended` 与 `turn.cleanup_failed`。
 - 事件推送不等待 socket I/O：单个连接的编码或入队失败只关闭该连接并解除其订阅，不使已提交 turn 的 EventBus 发布失败。
 
 ```ts
@@ -732,12 +732,6 @@ interface TurnCleanupFailedEvent {
   message: string; // 固定安全文案，不包含原始异常
 }
 
-interface ClientLaunchedEvent {
-  at: string;
-  clientId: ClientId;
-  pid: number;
-}
-
 type ProtocolEvent =
   | Event<SessionUpdatedEvent> & { event: "session.updated" }
   | Event<TurnStartedEvent> & { event: "turn.started" }
@@ -746,8 +740,7 @@ type ProtocolEvent =
   | Event<TurnEndedEvent> & { event: "turn.ended" }
   | Event<QueueUpdatedEvent> & { event: "queue.updated" }
   | Event<SelectionUpdatedEvent> & { event: "selection.updated" }
-  | Event<TurnCleanupFailedEvent> & { event: "turn.cleanup_failed" }
-  | Event<ClientLaunchedEvent> & { event: "client.launched" }; // 目标设计
+  | Event<TurnCleanupFailedEvent> & { event: "turn.cleanup_failed" };
 ```
 
 事件规则：
@@ -763,9 +756,9 @@ type ProtocolEvent =
 - `turn.step` 的 `step` 从 1 开始；`usage` 在供应商提供时出现。
 - `turn.ended.reason` 为 `failed` 时带 `error`；线上 `error` 只含白名单 code 与固定安全文案（当前保留 `turn.empty`），其余 code 统一替换为 `internal.error` 与固定文案，绝不透传 adapter/供应商提供的原始 code、message、cause 或任意附加字段。`completed`/`cancelled` 的 `error` 即使存在也丢弃。
 - `turn.cleanup_failed` 在 `turn.ended` 之后、标记删除失败时发布，携带 `turnId`、固定 `code="storage.io"` 与固定安全文案；不携带原始异常、cause 或任意细节，也不表示 turn 已注销：标记与登记项仍会阻塞同会话新 turn，直到重启恢复。
-- 本阶段只转发上列八个会话事件；`client.launched`（客户端进程成功启动后推送）仍属目标设计，客户端方法尚未路由。
+- 本阶段只转发上列八个会话事件。
 - `Gateway` 把引擎事件投影为线上事件 `{ event: type, data: { sessionId, seq, at, ...payload } }`；`sessionId`、`seq`、`at` 以引擎事件为准，payload 中的同名键被丢弃。`turn.ended` 与 `turn.cleanup_failed` 例外：二者按固定字段显式构造，校验 `turnId`、`reason`、`endedAt` 等字段并丢弃所有其他附加字段。未知事件类型或缺失/非法路由字段的事件被忽略。
-- 事件只发送给订阅该会话的连接；`client.launched` 是连接级事件，不受会话订阅限制。
+- 事件只发送给订阅该会话的连接。
 - 事件不重放；重连后客户端重新 `session.read`。
 
 ### 3.9 错误码
@@ -1459,7 +1452,7 @@ interface EventBus {
 - `EventBus.publish` 同步、在调用栈内按订阅顺序 fan-out：每个 handler 都会被尝试，某个 handler 抛错不影响后续 handler 收到事件；全部 handler 执行完后原样重新抛出第一个异常。订阅变更只影响后续发布，不修改本次发布已取的快照；handler 只入队发送，不 await。
 - daemon 的 `EventBus` 只转发事件并原样重新抛出第一个 handler 失败，不包装、不清洗、不重新解释异常。`event.publish_failed` 映射及其原始 `cause` 由 core 的 `createEventPublisher`/`deliverEvent` 与 `createContextEvents` 负责，daemon 侧不在 bus 上重新包装 raw cause。
 - Context 的事件发布适配器与 driver 的 `EventPublisher` 都在同步 handler 抛错时抛出 `event.publish_failed`，原异常保存在 `cause`。Context 的提交状态与 driver 的持久化状态已完成后才发布，因此节点、队列状态、head 推进与已分配 `seq` 保留并允许序号空洞；不重试、不回滚。
-- Context、driver、Gateway 共享同会话 `SessionEventClock { current(): number; next(): number }`；每个会话事件的 `seq` 通过会话锁内 `next()` 分配，Context 快照读取 `current()`；`client.launched` 没有会话 `seq`。Context 仅依赖 `ContextEvents.publish` 发布端，不依赖订阅接口。
+- Context、driver、Gateway 共享同会话 `SessionEventClock { current(): number; next(): number }`；每个会话事件的 `seq` 通过会话锁内 `next()` 分配，Context 快照读取 `current()`。Context 仅依赖 `ContextEvents.publish` 发布端，不依赖订阅接口。
 - `Gateway` 把引擎事件转换为协议事件，并只发送给订阅该会话的连接。
 
 `Gateway` 把协议方法映射到 `Context`、`Sessions`、`AgentLoopDriver`、`Extensions` 与存储；本身不实现上下文组装或工具执行。
@@ -1517,7 +1510,6 @@ interface SessionRuntime {
 - 每个连接的 `enqueue` 异常（编码超限、队列溢出、连接已关闭）被捕获，仅移除该连接并解除其订阅；`EventBus.publish` 不因单个客户端失败而失败。
 - 事件都带 `sessionId`、`seq` 与 `at`；`queue.updated` 携带完整队列，`selection.updated` 携带完整名称集合。
 - `session.updated` 只携带本次追加节点；核心按完整 EngineEvent JSON 的 UTF-8 字节预算 4194304 拆分，每帧独立 seq；`meta` 变化时 nodes 可为空。队列与选择通知按最终状态各发布一次。
-- `client.launched` 是连接级事件，不受会话订阅限制；本阶段客户端方法未路由，该事件仍为目标设计。
 - 事件不重放；重连后客户端重新 `session.read`。
 
 #### 5.3.4 多客户端与临时状态
