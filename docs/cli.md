@@ -13,9 +13,9 @@ daemon 侧的安全边界见 `docs/daemon-linux.md`。
 
 - 仅 Linux x64；Node.js `>=22.19.0`，ESM。
 - 命令：`start`、`status`、`stop`、`templates list|preview|apply`、`config list|get|set|unset`、
-  `extensions list`、`sessions list|export|cancel`、`run`、`provider list`、`models list`（模板细节见
-  `docs/templates.md`，扩展配置见 `docs/extensions.md`）。没有 `client`、`providers check`、
-  `auth`（见 §8）。`run` 只执行单个非交互 turn，不读取 stdin、不循环。
+  `extensions list`、`sessions list|export|cancel`、`client list|start`、`run`、`provider list`、
+  `models list`（模板细节见 `docs/templates.md`，扩展配置见 `docs/extensions.md`）。没有
+  `providers check`、`auth`（见 §8）。`run` 只执行单个非交互 turn，不读取 stdin、不循环。
 - 本地只在 Node 26.13.0 x64 上验证。CI 配置了 Node 22.19.0 / 24 / 26 x64，但本阶段未 push，
   远端矩阵结果**未验证**。
 - macOS 与 Windows 不是当前实现；daemon 在绑定 socket 前以 `daemon.unsupported_platform` 失败，
@@ -515,7 +515,7 @@ $ pisces models list --json
 |---|---|
 | 全部命令成功 | 0 |
 | `run` 完成 turn（`completed`） | 0 |
-| `config get` / `config unset` 未命中（`config.key_not_found`）；`sessions list|export|cancel` / `run` / `provider list` / `models list` 连接失败（`daemon.unreachable`）；`run` 的失败 turn、`client.protocol`、`queue.invalid_control` 等协议/会话/供应商错误；`run --workspace` 用于既有会话（`run.workspace_unsupported`）；`sessions export|cancel`、`provider list`、`models list` 与人类模式的 `sessions list` 协议响应不合法（`client.protocol`；`sessions list --json` 与 `provider list --json` 原样透传、不做结构校验，但协议层/传输失败仍退出 1）；`sessions export` 的 `session.not_found` / `session.node_not_found`；`sessions cancel` 被拒绝（`turn.cancel_failed`）；`models list --provider` 未知 id（`provider.not_found`） | 1 |
+| `config get` / `config unset` 未命中（`config.key_not_found`）；`sessions list|export|cancel` / `run` / `provider list` / `models list` 连接失败（`daemon.unreachable`）；`run` 的失败 turn、`client.protocol`、`queue.invalid_control` 等协议/会话/供应商错误；`run --workspace` 用于既有会话（`run.workspace_unsupported`）；`sessions export|cancel`、`provider list`、`models list`、`client list|start` 与人类模式的 `sessions list` 协议响应不合法（`client.protocol`；`sessions list --json` 与 `provider list --json` 原样透传、不做结构校验，但协议层/传输失败仍退出 1）；`sessions export` 的 `session.not_found` / `session.node_not_found`；`sessions cancel` 被拒绝（`turn.cancel_failed`）；`models list --provider` 未知 id（`provider.not_found`）；`client start` 的 `client.not_found` / `client.launch_failed` | 1 |
 | 已在运行 / 未知属主 / 启动失败 / 停止超时 / socket 无属主 / pid 记录写入或清除失败 | 1 |
 | `run` 的 turn 被取消（Ctrl-C 或外部 `sessions cancel`） | 130 |
 | 用法错误、配置不合法、配置键未知、本地工作区不可用（仅指 `config`/`extensions`/`templates` 的本地解析，如 `config --scope workspace` 的 `config.no_workspace`、缺少必需 `--workspace` 的用法错误；`run` 的工作区缺失/不可用由 daemon 以 `session.workspace_required`/`session.invalid_workspace` 返回，计入上一行 1）、缺少密钥、数据目录不可用 | 2 |
@@ -525,7 +525,7 @@ $ pisces models list --json
 | 选项 | 说明 |
 |---|---|
 | `--config <path>` | 配置文件路径（所有命令接受） |
-| `--data-dir <path>` | 覆盖 `dataDir`（生命周期、`templates`、`sessions list|export|cancel`、`run`、`provider list`、`models list`） |
+| `--data-dir <path>` | 覆盖 `dataDir`（生命周期、`templates`、`sessions list|export|cancel`、`client`、`run`、`provider list`、`models list`） |
 | `--node <id>` | 只导出该节点的分支（仅 `sessions export`） |
 | `--provider <id>` | 只列出该 provider 的模型（仅 `models list`）；指定会话的供应商（仅 `run`） |
 | `--new` / `--continue` / `--session <id>` / `--create` | 会话选择（仅 `run`；前三者互斥，`--create` 只配 `--session`） |
@@ -534,15 +534,42 @@ $ pisces models list --json
 | `--print` | 只输出最终 turn 文本（仅 `run`；与 `--json` 互斥） |
 | `--scope <global\|workspace>` | `config` 的目标层，默认 `global` |
 | `--workspace <dir>` | 工作区目录（`config --scope workspace`、`extensions list`）；新会话的工作区（仅 `run`，绝对路径，须为新建会话，既有会话仅在已落盘时拒绝） |
-| `--json` | 机器可读输出：`status`、`templates`、`config list/get`、`extensions list`、`sessions list`、`run`、`provider list`、`models list` |
+| `--json` | 机器可读输出：`status`、`templates`、`config list/get`、`extensions list`、`sessions list`、`client`、`run`、`provider list`、`models list` |
 | `--help` / `--version` | 帮助/版本；可在第一个参数位置或任一命令参数位置使用（`wat --help` 仍是用法错误） |
 
-未知命令（如 `client`、`providers check`、`auth`）打印 usage 并以 2 退出；`--config`、`--data-dir`、
+未知命令（如 `providers check`、`auth`）、`client` 的未知子命令或 `client start` 缺少/多余 id
+打印 usage 并以 2 退出；`--config`、`--data-dir`、
 `--node`、`--provider`、`--workspace`、`--scope`、`--session`、`--model`、`--system-prompt`、`--enable`、
 `--disable` 缺少取值或其取值以 `-` 开头、`--json` 用于不支持的子命令（含 `sessions export|cancel`）、
 `--node` 用于非 `sessions export`、`--provider` 用于 `provider list`（`models list` 与 `run` 接受它）、
 `--workspace` 与 `--scope global` 同用、`run --workspace` 不是绝对路径、`--print` 与 `--json` 同用、`--system-prompt` 与
 `--use-default-system-prompt` 同用、`run` 缺少/多余位置参数或会话选择器冲突时，同样按用法错误处理。
+
+### `client list|start`
+
+`client list` 列出 daemon 已登记的客户端，每行 `id  source`（`source` 是声明它的扩展包名），
+空清单不输出任何行。`client start <id>` 让 daemon 启动该客户端并输出 `started <id> (pid <n>)`。
+两个命令都经协议 `client.list` / `client.start`，只做一次短连接；CLI 不读扩展清单、不解析入口、
+不自己 spawn 进程。客户端来源是内置扩展目录与 `<configDir>/extensions`，工作区扩展不贡献客户端。
+
+```console
+$ pisces client list
+demo  @demo/x
+$ pisces client start demo
+started demo (pid 41231)
+$ pisces client list --json
+{"clients":[{"id":"demo","source":"@demo/x","entry":"/home/u/.config/pisces/extensions/demo/client.mjs"}]}
+$ pisces client start missing
+error: client.not_found: Client is not registered
+```
+
+- `client start` 的 pid 是 daemon 子进程的 pid，不是本命令的。daemon 以 `node <entry>` 启动客户端，
+  只传 `PATH`、`PISCES_SOCKET_PATH`、`PISCES_CLIENT_ID` 三个环境变量；daemon 的供应商密钥不会
+  进入客户端环境。
+- 客户端的 stdout/stderr 继承 daemon 的输出，写入 `<dataDir>/daemon.log`。
+- daemon 不跟踪、不回收已启动的客户端：`pisces stop` 不会终止它们，客户端需要在 daemon 不在时自行
+  处理连接失败。
+- 启动失败返回 `client.launch_failed`；两个命令都不提供列表之外的客户端状态查询。
 
 ## 6. 文件位置
 
@@ -631,7 +658,7 @@ $ pisces models list --json
 
 ## 8. 本阶段未交付
 
-- `client list|start`、`providers check`、`auth`。
+- `providers check`、`auth`。
 - `run` 的交互式 stdin 循环与多轮输入；本阶段只交付由位置参数驱动的单个非交互 turn。
 - CLI 已装配目录驱动扩展：`start` 始终传 `extensions.configPath`，`run --enable` 与配置默认值可用。
   仍没有交互式配置编辑器、配置迁移工具、凭据文件，也没有 `extensions install/enable`（安装与

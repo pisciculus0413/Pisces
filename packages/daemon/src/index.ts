@@ -4,6 +4,12 @@
 
 export type { ProtocolEvent } from "@pisces/protocol";
 export {
+  type ClientRegistry,
+  type ClientRegistryOptions,
+  type ClientSpawn,
+  createClientRegistry,
+} from "./client-registry/registry.js";
+export {
   type ConfigLocation,
   type ConfigScope,
   mergeConfigLayers,
@@ -41,12 +47,6 @@ export {
 } from "./gateway/active-turn.js";
 export { type BootstrapResult, bootstrapGateway } from "./gateway/bootstrap.js";
 export { createGateway, type Gateway, type GatewayDeps } from "./gateway/gateway.js";
-export {
-  type ClientRegistry,
-  type ClientRegistryOptions,
-  type ClientSpawn,
-  createClientRegistry,
-} from "./client-registry/registry.js";
 export type * from "./gateway/protocol.js";
 export { type RecoveryDeps, recoverActiveTurns } from "./gateway/recovery.js";
 export {

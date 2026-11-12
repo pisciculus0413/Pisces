@@ -82,8 +82,9 @@ await host.stop();
   `sources` 任一同时出现即 `daemon.start_failed`，走既有失败清理（释放锁、不 unlink 存活 socket）。
   `builtinDir` 缺省由 daemon 模块 URL 推导到 `<repo>/extensions/builtin`，与进程工作目录无关。
 - 当前已路由的扩展相关方法：`session.create`（可带 `extensions` 数组）、`entries.snapshot`、
-  `queue.enqueue/edit/remove/clear`、`turn.start`（含 steer）、`session.list`。`template.*`、
-  `client.*` 仍未路由（`protocol.unknown_method`）。扩展契约见 `docs/extensions.md`。
+  `queue.enqueue/edit/remove/clear`、`turn.start`（含 steer）、`session.list`。`template.*` 仅在装配
+  `TemplateStore` 时路由；`client.*` 由 `ClientRegistry` 提供，`startDaemon` 恒定装配（无扩展源时列表
+  为空），未注入 registry 的嵌入模式仍返回 `protocol.unknown_method`。扩展契约见 `docs/extensions.md`。
 - 启动顺序：平台与 `getuid() === geteuid()` 检查 → 私有运行目录 → `run/pisces.lock` 的
   `flock` → 互斥检查 → 原生 peer 凭据自检 → 陈旧 socket 处理 → 构造扩展服务 → `bootstrapGateway`（存储初始化与 turn 恢复）
   → 绑定并校验 `pisces.sock` → 接受连接。任何一步失败都按逆序关闭已获取资源，并保留锁文件本身。

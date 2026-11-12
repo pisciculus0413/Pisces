@@ -63,8 +63,14 @@ demo/
 - `skills` 指向目录，目录内必须存在 `SKILL.md`。
 - 未知清单键、非法 glob、指到包外的路径或缺失的 `SKILL.md` 会产生 `extensions.invalid` 问题，
   该条目被丢弃，不影响其它条目。
-- `pisces` 字段中的 `providers`、`clients` 会被解析但**不装配**，只记录
-  `extensions.unsupported_contribution`；声明它们不会让 daemon 失败。
+- `pisces` 字段中的 `clients` 由 `ClientRegistry` 独立读取，用来登记可启动客户端：`entry` 必须是
+  包目录内的脚本文件，缺失或越出包目录记 `extensions.invalid` 并丢弃该声明；不同包声明同一 `id` 时
+  两方都丢弃，各记一条 `extensions.duplicate`。客户端不进入清点、不参与会话选择，命令见
+  `docs/cli.md` 的 `client list|start`。
+- `pisces` 字段中的 `providers` 仍**不装配**，只记录 `extensions.unsupported_contribution`；
+  声明它不会让 daemon 失败。
+- 客户端源只有内置扩展目录与软件配置目录的 `extensions/`：`client.list` 不携带工作区，工作区扩展
+  不贡献客户端。
 
 ### 1.2 sidecar 元数据
 
@@ -209,7 +215,7 @@ demo/
 | `session.read` | 返回 `meta/records/queue/selection/seq`；`selection` 只含已持久化声明 |
 | `provider.list`、`turn.list`、`turn.cancel`、`session.subscribe`、`session.unsubscribe` | 沿用既有契约，未因扩展改变 |
 
-未路由（仍返回 `protocol.unknown_method`）：`client.*`。`session.list` 与 `template.*` 已路由，
+已路由：`client.list` / `client.start`（客户端清单与启动，见 `docs/cli.md`）。`session.list` 与 `template.*` 已路由，
 分别是已落盘会话枚举与模板操作（未装配 `TemplateStore` 时 `template.*` 仍返回未知方法）。CLI 已交付
 `sessions list`（`session.list`）、`sessions export`（`session.read`，默认整棵树，`--node` 从根到该
 节点的祖先链）与 `sessions cancel`（`turn.list` + `turn.cancel`）。
@@ -444,7 +450,6 @@ await host.stop();
 
 - **providers 扩展装配**：清单中的 `providers` 只产生 `extensions.unsupported_contribution`，
   不注册供应商；provider 仍由宿主通过 `ProviderManagement` 注入。
-- **clients 扩展与 `client.*` 路由**：未装配，未路由。
 - **CLI**：已实现 `start`/`status`/`stop`、`run`、`extensions list` 与 `config list|get|set|unset`；
   `start` 启动的 daemon 始终装配目录驱动扩展。仍没有 `extensions install/enable`、交互式配置编辑器；
   安装与更新由 npm/git 完成。

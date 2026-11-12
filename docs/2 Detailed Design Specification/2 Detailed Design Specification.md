@@ -418,7 +418,7 @@ interface HelloResult {
 | `client.list` | `{}` | `{ clients: ClientRegistration[] }` |
 | `client.start` | `{ id }` | `{ pid: number }` |
 
-- 当前阶段实际路由的 `Gateway` 方法为 `session.create`、`session.list`、`session.read`、`session.configure`、`queue.enqueue`、`queue.edit`、`queue.remove`、`queue.clear`、`entries.snapshot`、`template.list`、`template.preview`、`template.apply`、`turn.start`、`turn.cancel`、`turn.list`、`provider.list`，以及仅在请求带连接上下文时路由的 `session.subscribe`/`session.unsubscribe`；`protocol.hello` 由连接分发器处理，不进入 `Gateway`。`template.*` 仅在宿主装配了 `TemplateStore`（`startDaemon({ templates })`）时路由，未装配时返回 `protocol.unknown_method`。不带连接上下文调用 `session.subscribe`/`session.unsubscribe` 仍返回 `protocol.unknown_method`。本表其余方法（`client.*`）为目标设计，尚未接入路由；当前调用返回 `protocol.unknown_method`。
+- 当前阶段实际路由的 `Gateway` 方法为 `session.create`、`session.list`、`session.read`、`session.configure`、`queue.enqueue`、`queue.edit`、`queue.remove`、`queue.clear`、`entries.snapshot`、`template.list`、`template.preview`、`template.apply`、`turn.start`、`turn.cancel`、`turn.list`、`provider.list`、`client.list`、`client.start`，以及仅在请求带连接上下文时路由的 `session.subscribe`/`session.unsubscribe`；`protocol.hello` 由连接分发器处理，不进入 `Gateway`。`template.*` 仅在宿主装配了 `TemplateStore`（`startDaemon({ templates })`）时路由，未装配时返回 `protocol.unknown_method`；`client.*` 在宿主未注入 `ClientRegistry` 时同样返回 `protocol.unknown_method`，`startDaemon` 总是注入（无扩展源时列表为空）。不带连接上下文调用 `session.subscribe`/`session.unsubscribe` 仍返回 `protocol.unknown_method`。
 - 方法分派只查自有属性：未识别的方法名（包括 `constructor`、`toString`、`__proto__`、`valueOf` 等原型属性名）一律返回 `protocol.unknown_method`，不会落回任何处理函数。
 
 ### 3.4 会话方法
@@ -653,12 +653,11 @@ interface TurnStartResult {
 
 #### 3.7.3 客户端方法
 
-- 当前阶段客户端方法（`client.list`/`client.start`）尚未路由；本节为目标设计，当前调用返回 `protocol.unknown_method`。
-
-- `client.list` 返回已注册客户端，不返回进程状态。
-- `client.start` 校验客户端 id，按注册信息启动进程，返回 pid。
-- 启动时通过环境变量传入 daemon socket 路径与客户端 id。
-- 客户端进程的 stdout/stderr 不进入协议流。
+- `client.list` 返回已注册客户端（`id`、`source`、`entry`），不返回进程状态，不校验会话。
+- `client.start` 要求 `id` 为非空字符串，否则 `protocol.invalid_request`；未注册返回 `client.not_found`；启动失败返回 `client.launch_failed`；成功返回 `pid`。
+- 注册来源只有内置扩展目录与 `<configDir>/extensions`；每次请求重新读取清单，不加载扩展代码。
+- 启动时通过环境变量传入 daemon socket 路径（`PISCES_SOCKET_PATH`）与客户端 id（`PISCES_CLIENT_ID`）。
+- 客户端进程的 stdout/stderr 不进入协议流；daemon 不跟踪已启动进程。
 
 ### 3.8 事件
 
@@ -1365,7 +1364,7 @@ daemon 是用户级单实例进程，负责监听、路由、持久化、扩展�
 - 已受理请求超时、仍有登记 turn（含 `turn.cleanup_failed`）、标记删除失败或监听器/锁释放失败统一抛 `daemon.stop_incomplete`，按其实际状态保留锁、socket、`Gateway` 与 `quiescing`，允许重试；不自动强杀进程，也不声称已优雅停止。操作者终止进程后由下一次启动按 §6.5 恢复。成功返回后 `stop()` 幂等。
 - daemon 崩溃后只恢复已落盘会话；临时会话与消息队列随进程退出丢失。
 - 未完成的热会话在恢复时标记为中断，由用户决定是否继续。
-- 本阶段尚未装配：`ClientRegistry`、`CredentialStore`，以及清单中的 `providers`/`clients` 扩展装配；这些仍为目标设计。已装配的是目录驱动模式的 `Extensions`：通过 `startDaemon({ extensions: { configDir } })` 或 `{ configPath }` 装配，配置层与目录在 `session.create` 时读取与扫描；模板通过 `startDaemon({ templates: { configDir } })` 装配；CLI 的配置加载器在 spawn daemon 之前运行，并把配置路径传给 daemon 子进程。
+- 本阶段尚未装配：`CredentialStore` 与清单中的 `providers` 扩展装配，仍为目标设计；`ClientRegistry` 由 `startDaemon` 按 `options.extensions` 的目录恒定装配（无扩展源时列表为空），`clients` 清单项因此不再记为 `extensions.unsupported_contribution`。已装配的是目录驱动模式的 `Extensions`：通过 `startDaemon({ extensions: { configDir } })` 或 `{ configPath }` 装配，配置层与目录在 `session.create` 时读取与扫描；模板通过 `startDaemon({ templates: { configDir } })` 装配；CLI 的配置加载器在 spawn daemon 之前运行，并把配置路径传给 daemon 子进程。
 
 #### 5.1.2 `Transport`
 
@@ -1498,7 +1497,7 @@ interface SessionRuntime {
 - turn 生命周期：`running -> cleanup -> (unregistered | cleanup_failed)`。driver 结束（含失败）后，`launch` 在会话锁内把阶段置为 `cleanup`；`turn.ended` 只把运行时移到 `cleanup`，不注销 turn、不删除标记。随后删除 `active-turn.json` 成功才注销；失败则发布安全数据的 `turn.cleanup_failed`（`{turnId, code:"storage.io", message}`，不含原始异常），在缺失时追加一条同 `turnId`、`reason="cleanup_failed"` 的 `cancel` 控制消息，重试删除一次；仍失败则保留标记并把阶段置为 `cleanup_failed`。`cleanup`/`cleanup_failed` 期间 `turn.list` 仍列出该 turn，`turn.start` 返回 `turn.active`，`turn.cancel` 返回 `{ cancelled:false }`，因此残留标记与登记项会阻塞该会话的新 turn，直到重启恢复删除标记；`cleanup_failed` cancel 已提交时恢复按同 `turnId` 去重，只删除标记而不追加 `daemon_restart` cancel。
 - `provider.list`：从 `ProviderManagement` 与 `CredentialStore` 生成；`ready` 由凭据状态计算。
 - `template.list` / `preview` / `apply`：委托 `TemplateStore`、`WorkspaceAccess`、`ExecHost`，并创建临时会话。`apply` 先用只读的 `inspect` 完成会话配置预检并保留预检结果，再调用 store 写盘、跑脚本、记 `ProjectRef`，最后用预检会话与 `apply` 返回的提示词创建临时会话（不重复校验）；未装配 `TemplateStore` 时仍返回 `protocol.unknown_method`。
-- `client.list` / `start`：委托 `ClientRegistry`。当前阶段未路由（目标设计）。
+- `client.list` / `start`：委托 `ClientRegistry`（§5.8.2）。`list` 不校验会话，`start` 只校验 `id` 为非空字符串；未注入 registry 的嵌入模式返回 `protocol.unknown_method`。
 - 未识别的方法名（包括 `constructor`、`toString`、`__proto__` 等原型属性名）在分派前按自有属性判定，统一返回 `protocol.unknown_method`，不进入任何处理函数，也不产生 `internal.error`。
 
 #### 5.3.3 事件路由
@@ -1664,7 +1663,7 @@ interface Inventory {
 - 发现阶段只读取清单、sidecar 元数据与资源文件，不执行扩展代码；工具/包装器/上下文来源的 sidecar 命名为 `<entry>.meta.json`（与脚本同目录，如 `tools/run.ts.meta.json`），技能为相邻的 `skills/<name>.meta.json` 加正文 `skills/<name>/SKILL.md`；sidecar 只允许 `name/description/parameters/config`。
 - 条目名称统一为 `package#name`：`package` 取扩展包名，`name` 取 sidecar 的 `name`；无 sidecar 时取文件/目录基名。
 - 同一 `package#name` 重复出现时，该条目不可用并记录 `extensions.duplicate`；不同包同名不冲突。
-- 清单中的 `providers`、`clients` 本阶段**不装配**：只记录 `extensions.unsupported_contribution`，不注册供应商或客户端，也不进入清点。
+- 清单中的 `providers` 本阶段**不装配**：只记录 `extensions.unsupported_contribution`，不注册供应商，也不进入清点。`clients` 不进入清点，由 `ClientRegistry` 按 §5.8.2 独立读取。
 - `tools`、`wrappers`、`context` 的代码按需导入；`skills` 读取目录内容并转为 text 块。
 - 工作区扩展在 `session.create` 确定 workspace 后清点，按 `realpath(workspace)` 缓存并冻结 `Inventory.hash`；`entries.snapshot` 使用冻结 inventory，新会话重扫。
 - `Tools.forInventory` 使用该 inventory；不同 workspace 的同名工具不共享注册表。
@@ -1690,7 +1689,7 @@ interface Inventory {
 - 宿主包 `@pisces/*` 映射到 daemon 内的宿主实例，扩展不打包宿主包。
 - 扩展依赖从其自身目录的 `node_modules` 解析。
 - 装载器不因文件位于 `node_modules` 而拒绝加载；扩展无需预构建。
-- 工具、包装器、上下文来源、技能按类型登记到对应注册表；`providers`/`clients` 不装配。
+- 工具、包装器、上下文来源、技能按类型登记到对应注册表；`providers` 不装配，`clients` 由 `ClientRegistry` 独立装配。
 - 包装器模块导出工厂与 `export const config`；工厂接收**合并后**的 sidecar defaults + 用户覆盖配置。模块只应在首次实际 invoke 时被导入，并且 `config` 必须描述 sidecar defaults（不是合并值），不一致时该次调用安全失败为 `tool.wrapper_invalid`，不透传模块异常文案。
 - 工具声明需要的 `description/parameters` 来自 sidecar，不执行代码；实现代码在首次 invoke 时加载并缓存 promise；上下文来源在首次被选中装配时导入并 `resolve`。
 - 一个扩展装载失败只标记该扩展不可用，不阻断 daemon 启动。
@@ -1809,15 +1808,16 @@ interface Exec {
 
 ```ts
 interface ClientRegistry {
-  register(registration: ClientRegistration): void;
-  list(): ClientRegistration[];
-  start(id: ClientId): Promise<{ pid: number }>;
+  list(): Promise<ClientRegistration[]>;
+  start(id: string): Promise<{ pid: number }>;
 }
 ```
 
-- 客户端登记来自扩展清单的 `clients`。
-- `start` 校验 id，按 `entry` 启动子进程，传入 daemon socket 路径与客户端 id。
-- 启动失败返回 `client.launch_failed`；已启动进程不进入协议流。
+- 实现在 `packages/daemon/src/client-registry/registry.ts`：`createClientRegistry({ extensions?, socketPath, env?, spawn? })`。没有 `register`：清单是唯一事实来源，注册表自己读取，避免第二个写入点没有调用方。
+- 客户端登记来自扩展清单的 `clients`，由 `discoverClients(options)`（`packages/daemon/src/extensions/discovery.ts`）解析：源为内置目录与 `<configDir>/extensions`，工作区不参与；`entry` 必须是包目录内的脚本文件，否则记 `extensions.invalid` 并丢弃该声明；不同包复用同一 `id` 时两方都丢弃，每个包记一条 `extensions.duplicate`；结果按 `id` 排序。
+- `list` 每次调用重新发现，因此装改扩展无需重启 daemon；`extensions` 缺省时恒返回空列表。
+- `start` 校验 id（`list` 中不存在即 `client.not_found`），以 `node <entry>` 启动子进程：`stdio` 为 `["ignore","inherit","inherit"]`（继承的 stdout/stderr 即 `<dataDir>/daemon.log`），env 只有 `PATH`、`PISCES_SOCKET_PATH`、`PISCES_CLIENT_ID`，不继承 daemon 环境。
+- `start` 等待子进程的 `spawn`/`error` 事件后 `unref()` 并返回 pid；spawn 失败返回 `client.launch_failed`。daemon 不保存句柄、不监听 `exit`，`stop` 不连带终止已启动的客户端。
 - 客户端 stdout/stderr 由 daemon 日志接收，不混入协议。
 
 ### 5.9 服务层装配
@@ -1825,7 +1825,7 @@ interface ClientRegistry {
 - 公开装配路径是 `startDaemon`（§5.1.1）：宿主用同一个 `dataDir` 构造 store/marker/EventBus/Concurrency，再调用 `bootstrapGateway(deps)` 完成 `SessionStore.initialize()`、`markers.scan()` 恢复（逐会话隔离损坏标记）与 `createGateway`，最后绑定并校验 socket。`bootstrapGateway` 本身不做锁、socket 或 `Transport` 装配；返回 `{ gateway, initializationIssues, recoveryIssues }`，且须在任何请求被服务前完成。
 - `Gateway` 依赖 `SessionStore`、`ActiveTurnStore`、`EventBus`、`Concurrency`、`ProviderManagement`、`ProviderHost`，以及可选的默认值、工具/条目/技能/来源工厂与 id/时间工厂。
 - 目录驱动模式已装配 `Extensions`：`startDaemon({ extensions })` 在 lock 获取后构造真实服务并传入 `GatewayDeps.extensions`；该模式与手动注入互斥。CLI 的 `start` 总是选择该模式并传 `{ configPath }`。`TemplateStore` 按 `startDaemon({ templates: { configDir } })` 装配，与 `extensions` 模式可共存；`ClientRegistry` 与 `CredentialStore` 仍未装配。
-- `Extensions` 依赖 `Tools`、`Skills`、`Context`；`providers`/`clients` 清单项本阶段不装配（`ClientRegistry` 为目标设计）。
+- `Extensions` 依赖 `Tools`、`Skills`、`Context`；`providers` 清单项本阶段不装配，`clients` 清单项由 `ClientRegistry` 独立装配。
 - `ProviderHost` 依赖 `CredentialStore` 与 `ProviderManagement`（目标设计）。
 - `TemplateStore` 依赖 `WorkspaceAccess`、`ExecHost`、`projects.json`，输入 `configDir` 与 `dataDir`；会话创建能力保留在 `Gateway`。
 - 核心层不引用服务层；服务层通过接口注入。
@@ -1956,8 +1956,8 @@ interface ClientRegistry {
 ### 7.1 CLI 与协议边界
 
 实现状态：本阶段已实现 `start`、`status`、`stop`、`templates list`/`preview`/`apply`、
-`config list|get|set|unset`、`extensions list`、`sessions list|export|cancel`、`run`、`provider list` 与
-`models list`。生命周期命令经
+`config list|get|set|unset`、`extensions list`、`sessions list|export|cancel`、`client list|start`、
+`run`、`provider list` 与 `models list`。生命周期命令经
 pid 记录、进程存活检查与对 `<dataDir>/run/pisces.sock` 的 `protocol.hello` 探测完成，使用协议做就绪/归属探测；
 `status` 在 `running`/`unmanaged` 时额外用一次短连接调用 `turn.list`，按出现顺序去重输出活跃
 `sessionId`（只读，查询失败不改变退出码）；模板命令、`sessions` 命令经短连接调用 `template.*` /
@@ -1973,7 +1973,11 @@ turn 时输出 `no active turn` 并退出 0，`{cancelled:false}` 映射为 CLI 
 `models list` 经短连接调用 `provider.list`，不读本地 provider 定义、不碰凭据：前者输出
 `id  ready|unready  models=<n>`；后者把模型展平为 `provider/model`（provider 按 `id` 字典序，
 模型保持 daemon 顺序），`--provider <id>` 只保留该 provider，未知 id 以 CLI 本地的
-`provider.not_found` 退出 1。表中其余命令为目标设计，**未实现**；`--help`、`--version` 已实现。
+`provider.not_found` 退出 1。`client list` 与 `client start` 经短连接调用 `client.list`/`client.start`：
+前者每行 `id  source`（空清单不输出），后者输出 `started <id> (pid <n>)`；`--json` 分别原样回显
+`{clients}` 与 `{pid}`，结果结构不合法为 CLI 本地的 `client.protocol`，`client.not_found`/
+`client.launch_failed` 原样转发并退出 1（详见 `docs/cli.md`）。表中其余命令为目标设计，**未实现**；
+`--help`、`--version` 已实现。
 
 | 命令 | 路径 |
 |---|---|
@@ -1982,7 +1986,7 @@ turn 时输出 `no active turn` 并退出 0，`{cancelled:false}` 映射为 CLI 
 | `sessions list` | 经协议 `session.list`（已实现） |
 | `sessions export` | 经协议 `session.read` 输出 JSONL（已实现） |
 | `sessions cancel` | 先解析活跃 turn，再 `turn.cancel`（已实现） |
-| `client list/start` | 经协议 `client.list` / `client.start` |
+| `client list/start` | 经协议 `client.list` / `client.start`（已实现） |
 | `templates list/preview/apply` | 经协议模板方法（已实现） |
 | `provider list` / `models list` | 经协议只读查询（已实现） |
 | `providers check` | 仅 CLI，直接检查本地凭据与配置 |
@@ -2001,7 +2005,7 @@ turn 时输出 `no active turn` 并退出 0，`{cancelled:false}` 映射为 CLI 
 
 ### 7.2 `run`
 
-非交互 `run` 已实现；`client`、`providers check`、`auth` 仍未实现。`sessions list|export|cancel`、
+非交互 `run` 与 `client list`/`client start` 已实现；`providers check`、`auth` 仍未实现。`sessions list|export|cancel`、
 `provider list`、`models list`、`config`、`extensions list` 与模板命令见 §7.1 与
 `docs/templates.md` / `docs/cli.md`。以下为当前行为，不再是目标设计。
 

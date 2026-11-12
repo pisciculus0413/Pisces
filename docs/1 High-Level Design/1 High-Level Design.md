@@ -336,9 +336,9 @@ client --> user : 展示
 | `CredentialStore` | 实现凭据访问接口 | `Credentials` |
 | `WorkspaceAccess` | 工作区访问 | 文件系统 |
 | `ExecHost` | 实现命令与子进程执行接口 | `Exec` |
-| `Extensions` | 清单发现与清点、扩展配置读写、内容注册分派、客户端启动注册 | `Tools`、`Skills`、`ProviderManagement`、`Context`、`ClientRegistry` |
+| `Extensions` | 清单发现与清点、扩展配置读写、内容注册分派 | `Tools`、`Skills`、`ProviderManagement`、`Context` |
 | `ProviderHost` | 实现 `ExecuteProvider`：HTTP、凭据注入、超时、重试与传输分帧 | `Credentials` |
-| `ClientRegistry` | 客户端注册信息的登记与查询 | 客户端启动 |
+| `ClientRegistry` | 客户端清单发现与登记、按注册信息启动客户端进程 | 扩展清单、子进程 |
 
 ### 4.3 依赖关系
 
@@ -415,7 +415,7 @@ Clients --> Protocol
 [Gateway] --> [ProviderManagement]
 [Gateway] --> [ClientRegistry]
 [Gateway] --> [EventBus]
-[Extensions] --> [ClientRegistry]
+[ClientRegistry] --> [Concurrency]
 [ProviderHost] --> [Credentials]
 [Gateway] --> [SessionStore]
 [SessionStore] ..> [Sessions]
@@ -439,7 +439,7 @@ endlegend
 - 扩展通过核心层注册表与客户端启动注册写入内容；核心层不反向依赖扩展。
 - `Context` 依赖 `Sessions` 读取事件并追加事件；`Sessions` 不依赖 `Context`。
 - 在上述模块设计中，“热会话”等同于 `AgentLoopDriver` 实例， “回合” 是 `AgentLoopDriver` 的核心工作过程。
-- `EventBus` 事件经 `Gateway` 推送客户端；`ClientRegistry` 由 `Extensions` 登记，`Gateway` 提供查询功能。
+- `EventBus` 事件经 `Gateway` 推送客户端；`ClientRegistry` 自行按扩展清单发现客户端并负责启动，`Gateway` 只提供查询与启动入口。
 
 ### 4.4 可替换点
 
@@ -657,9 +657,9 @@ store --> ui : 全树或分支记录（成型为界面视图）
 
 服务层 `Extensions` 在本地发现并读取清单，得到条目及其声明；该过程不执行扩展代码。扩展相关配置由 `Extensions` 读取，扩展代码不直接访问配置文件。
 
-内容条目按类型分派：工具、包装器、技能、上下文来源进入核心层注册表。本阶段**不装配** `providers`
-与 `clients`：清单里出现它们只记录 `extensions.unsupported_contribution`，不进入清点、不参与选择，
-也不登记客户端启动命令。
+内容条目按类型分派：工具、包装器、技能、上下文来源进入核心层注册表。`clients` 不进入清点、不参与
+选择，由 `ClientRegistry` 独立读取并登记为可启动客户端；`providers` 本阶段仍**不装配**，清单里出现
+它只记录 `extensions.unsupported_contribution`。
 
 各内容类型的生效行为：
 
@@ -1093,9 +1093,9 @@ interface Exec {
 - 加载器负责宿主包映射：`@pisces/*` 解析到宿主实例，扩展不打包宿主包；`tsconfig` 的 `paths` 与
   JSX 由加载器处理。
 - 扩展的依赖安装在其自身目录的 `node_modules` 中，加载器按扩展路径解析；本阶段不哈希依赖树。
-- 清单中的 `providers`、`clients` 不装配，只记录 `extensions.unsupported_contribution`；沙箱与已有
-  会话的热重载不在本阶段交付。CLI 的 `start` 始终注入 `extensions: { configPath }`，把扩展装配
-  交给 daemon 在 `session.create` 时读取与扫描。
+- 清单中的 `providers` 仍不装配，只记录 `extensions.unsupported_contribution`；`clients` 见 §6.7。
+  沙箱与已有会话的热重载不在本阶段交付。CLI 的 `start` 始终注入 `extensions: { configPath }`，把扩展
+  装配交给 daemon 在 `session.create` 时读取与扫描。
 
 ### 6.7 客户端命令与注册
 
@@ -1105,25 +1105,35 @@ daemon 提供专门的 `client` 命令，解析并校验请求的客户端，再
 interface ClientRegistration {
   id: string;
   source: string;   // 所属 package 名称
-  entry: string;    // 由 pisces 声明解析出的代码入口
+  entry: string;    // 由 pisces 声明解析出的代码入口绝对路径
 }
 
 interface ClientRegistry {
-  register(registration: ClientRegistration): void;
-  list(): ClientRegistration[];
+  list(): Promise<ClientRegistration[]>;
+  start(id: string): Promise<{ pid: number }>;
 }
 ```
 
-daemon 启动客户端进程时，通过环境变量传入 daemon 的 socket 路径与客户端 id；客户端据此建立协议连接。
+- 客户端来源只有内置扩展目录与软件配置目录的 `extensions/`；`client.list` 不携带工作区，工作区扩展
+  不贡献客户端。注册表每次 `list`/`start` 重新读取清单，只读 `package.json`，不加载扩展代码，因此
+  安装或更新客户端扩展不需要重启 daemon。
+- `entry` 必须是包目录内的脚本文件；缺失、越出包目录或非脚本的声明被丢弃并记为
+  `extensions.invalid`；不同包声明同一 `id` 时两方都不登记，`client.start` 对该 id 返回
+  `client.not_found`。
+- daemon 以 `node <entry>` 启动客户端进程，通过环境变量传入 daemon 的 socket 路径与客户端 id；
+  客户端据此建立协议连接。子进程环境只含 `PATH`、`PISCES_SOCKET_PATH`、`PISCES_CLIENT_ID`，不继承
+  daemon 的环境，因此 daemon 的供应商密钥不会进入客户端。
+- 子进程的 stdout/stderr 继承 daemon 的输出，即写入 `daemon.log`；daemon 不跟踪、不回收已启动的
+  客户端，`stop` 不连带终止它们。启动失败返回 `client.launch_failed`。
 
 ### 6.8 命令分类与约定
 
 - `start`：启动 daemon 服务。
 - `stop`：停止 daemon 服务；中止进行中的热会话并等待写盘完成。
 - `status`：查看 daemon 服务状态；`running`/`unmanaged` 时经 `turn.list` 附带活跃会话的 `sessionId`。
-- `client`：客户端管理。
-  - `list`：列出已注册客户端。
-  - `start <id>`：启动指定客户端。
+- `client`：客户端管理，经协议 `client.list`/`client.start`。
+  - `list`：列出已注册客户端，每行 `id  source`。
+  - `start <id>`：启动指定客户端，输出 pid；未知 id 为 `client.not_found`。
 - `extensions`：扩展管理。
   - `list`：列出已安装扩展。
 - `provider`：供应商查询。
@@ -1197,8 +1207,9 @@ PID 复用防护见 §8.1。模板命令经单个短连接调用 `template.*`，
 `models list` 都只经协议 `provider.list`（不读本地 provider 定义）：前者每行
 `id  ready|unready  models=<n>`，列出全部 provider；后者把模型展平为 `provider/model`，provider 按
 `id` 字典序、模型保持 daemon 顺序，`--provider <id>` 只保留该 provider，未知 id 由 CLI 以
-`provider.not_found` 退出 1。其余命令（`client`、`providers check`、`auth`）仍为目标设计，
-**未实现**。交互式 `run` 循环也未实现，但非交互 `run` 已按上述语义交付。全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir`
+`provider.not_found` 退出 1。`client list` 与 `client start` 经协议 `client.list`/`client.start`
+（见 §6.7），前者每行 `id  source`，后者输出 `started <id> (pid <n>)`。其余命令
+（`providers check`、`auth`）仍为目标设计，**未实现**。交互式 `run` 循环也未实现，但非交互 `run` 已按上述语义交付。全局配置为统一 schema：CLI 组 `dataDir`/`providers`/`defaults`/`templatesDir`
 与扩展组 `defaults`/`defaultWorkspace`/`extensions`/`entryConfig` 共存，两个加载器互不拒绝；
 默认 provider/model 只使用 `defaults`（旧 `defaultProvider`/`defaultModel` 已移除）。CLI 的 `start` 只把命令行给出的 `--config` 路径原样交给 daemon 子进程，由子进程解析为绝对路径并作为
 `extensions: { configPath }` 注入；daemon 在每次 `session.create`
@@ -1296,8 +1307,8 @@ interface ProjectRef {
   原样交给 daemon 子进程，由子进程解析为绝对路径并作为 `extensions: { configPath }` 传给扩展装配，扩展配置层与目录由 daemon 在 `session.create` 时读取与
   扫描（目录驱动模式）。嵌入程序调用 `startDaemon({ dataDir, providers, providerHost, ... })` 启动，
   返回的 `DaemonHost` 提供 `socketPath`、`initializationIssues`、`recoveryIssues`、`status()` 与
-  `stop()`。CLI 的 pid 记录、日志、socket/lock 文件与退出码约定见 DDS §7.5；`client`、
-  `providers check`、`auth` 命令未实现（非交互 `run` 已实现，交互式循环未实现）。daemon 只监听本地
+  `stop()`。CLI 的 pid 记录、日志、socket/lock 文件与退出码约定见 DDS §7.5；`providers check`、
+  `auth` 命令未实现（非交互 `run` 已实现，交互式循环未实现）。daemon 只监听本地
   Unix socket，不监听网络地址。
 - 连接在读取任何协议字节前用原生 `SO_PEERCRED` 校验 peer UID 必须等于 daemon 有效 UID；不一致只销毁该连接。原生插件为仓内 plain C Node-API，使用固定 `node-gyp` 编译为被忽略的 `packages/daemon/native/peercred.node`，需在测试前按当前 Node ABI 显式构建；缺失或构建失败以 `daemon.native_unavailable` 拒绝启动，无降级认证。
 - `stop()` 先阻断新帧并停止 accept，等待已受理请求与尽力取消活跃 turn，再关闭连接、按 inode 清理 socket、释放锁并 dispose `Gateway`；无法完成时以 `daemon.stop_incomplete` 失败并保留锁、标记与 `quiescing` 状态，不自动强杀进程，也不声称已优雅停止。
