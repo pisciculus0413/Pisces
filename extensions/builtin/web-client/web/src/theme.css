@@ -165,8 +165,18 @@ select {
 
 .records {
   flex: 1;
+  /* Without this the scrolling column refuses to shrink and pushes the active
+     turn block out of the viewport. */
+  min-height: 0;
   overflow-y: auto;
   padding: 20px 24px 8px;
+}
+
+/* The active turn block keeps its own height; only the record column scrolls. */
+.records.active-turn {
+  flex: 0 0 auto;
+  overflow: visible;
+  padding-bottom: 0;
 }
 
 .empty-state {
@@ -195,7 +205,15 @@ select {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 10px;
-  align-items: start;
+  align-items: stretch;
+}
+
+/* The rail must span the whole row so its lines reach the next node. */
+.rail {
+  display: block;
+  align-self: stretch;
+  height: 100%;
+  min-height: 16px;
 }
 
 .node {

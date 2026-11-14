@@ -15,25 +15,21 @@ const emit = defineEmits<{ branch: [nodeId: string]; copy: [text: string] }>();
 
 const AGENT_ROLES = new Set(["system", "user", "assistant", "tool"]);
 
-const rail = computed(() => computeRail(props.records));
-const laneOf = computed(() => new Map(rail.value.map((cell) => [cell.id, cell.lane])));
+// The pending branch point (if any) decides which chain stays vertical.
+const rail = computed(() => computeRail(props.records, props.branchNodeId ?? undefined));
 const maxLane = computed(() => rail.value.reduce((max, cell) => Math.max(max, cell.lane), 0));
 
+/** A system node injected by a source that is no longer selected reads as inactive. */
 const isMuted = (node: SessionNode): boolean =>
-  node.role === "system" &&
-  props.selection.includes(node.source) === false &&
-  node.source !== "create";
+  node.role === "system" && node.source !== "create" && !props.selection.includes(node.source);
 
-const parentLaneOf = (node: SessionNode): number | undefined => {
-  if (!rail.value.some((cell) => cell.branch && cell.id === node.id)) return undefined;
-  return laneOf.value.get(node.parentId);
-};
+const textOfNode = (node: SessionNode): string => textOf(node.content);
 </script>
 
 <template>
   <div class="records">
     <div v-for="(node, index) in records" :key="node.id" class="record-row">
-      <RailCell :cell="rail[index]!" :max-lane="maxLane" :parent-lane="parentLaneOf(node)" />
+      <RailCell :cell="rail[index]!" :max-lane="maxLane" />
       <ControlChip v-if="!AGENT_ROLES.has(node.role)" :node="node" />
       <MessageNode
         v-else
@@ -41,7 +37,7 @@ const parentLaneOf = (node: SessionNode): number | undefined => {
         :muted="isMuted(node)"
         :selected="branchNodeId === node.id"
         @branch="emit('branch', $event)"
-        @copy="emit('copy', $event)"
+        @copy="emit('copy', textOfNode(node))"
       />
     </div>
   </div>

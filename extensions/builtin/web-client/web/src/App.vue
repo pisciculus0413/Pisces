@@ -36,6 +36,7 @@ const workspace = ref("");
 const newProvider = ref("");
 const newModel = ref("");
 const composer = ref<InstanceType<typeof MessageComposer> | null>(null);
+const panelCollapsed = ref(false);
 
 let stopEvents: (() => void) | undefined;
 
@@ -353,8 +354,7 @@ onBeforeUnmount(() => stopEvents?.());
         />
         <div
           v-if="state.activeTurn !== null || state.live !== null"
-          class="records"
-          style="flex: 0; padding-bottom: 0"
+          class="records active-turn"
         >
           <ActiveTurn :live="state.live" :active-turn="state.activeTurn" @cancel="cancel" />
         </div>
@@ -369,20 +369,25 @@ onBeforeUnmount(() => stopEvents?.());
         </div>
       </template>
     </main>
-    <template v-if="currentId !== null">
-      <EntriesPanel
-        :entries="state.entries"
-        :selection="state.selection"
-        :effective="state.effective"
-        :pending="pendingNames"
-        @toggle="toggleEntry"
-      />
-      <ModelPanel
-        :providers="providers"
-        :meta="state.meta"
-        :busy="steering"
-        @configure="configure"
-      />
-    </template>
+    <aside v-if="currentId !== null" class="panel" :class="{ collapsed: panelCollapsed }">
+      <button class="link" type="button" @click="panelCollapsed = !panelCollapsed">
+        {{ panelCollapsed ? "«" : "»" }}
+      </button>
+      <template v-if="!panelCollapsed">
+        <EntriesPanel
+          :entries="state.entries"
+          :selection="state.selection"
+          :effective="state.effective"
+          :pending="pendingNames"
+          @toggle="toggleEntry"
+        />
+        <ModelPanel
+          :providers="providers"
+          :meta="state.meta"
+          :busy="steering"
+          @configure="configure"
+        />
+      </template>
+    </aside>
   </div>
 </template>
