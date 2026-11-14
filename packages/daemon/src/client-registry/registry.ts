@@ -36,13 +36,19 @@ export interface ClientRegistry {
 
 const defaultSpawn: ClientSpawn = (command, args, options) => spawn(command, [...args], options);
 
+/**
+ * The child sees the daemon's PATH and its own `PISCES_CLIENT_` namespace only: client-specific
+ * overrides are inherited, provider keys and every other daemon variable are not. The socket path
+ * and client id are written last so an inherited value can never spoof them.
+ */
 function childEnv(options: ClientRegistryOptions, id: string): NodeJS.ProcessEnv {
-  const path = (options.env ?? process.env).PATH;
-  return {
-    ...(path === undefined ? {} : { PATH: path }),
-    PISCES_SOCKET_PATH: options.socketPath,
-    PISCES_CLIENT_ID: id,
-  };
+  const env = options.env ?? process.env;
+  const forwarded: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (key === "PATH" || key.startsWith("PISCES_CLIENT_")) forwarded[key] = value;
+  }
+  return { ...forwarded, PISCES_SOCKET_PATH: options.socketPath, PISCES_CLIENT_ID: id };
 }
 
 /** Resolves once the child exists; a spawn failure maps to one fixed safe code. */

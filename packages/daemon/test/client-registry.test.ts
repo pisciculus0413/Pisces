@@ -106,6 +106,31 @@ test("spawns the entry with a whitelisted environment", async () => {
   });
 });
 
+test("forwards PISCES_CLIENT_ overrides without leaking anything else", async () => {
+  await declareClient("repl", "@demo/x");
+  const spawn = fakeSpawn();
+  const registry = createClientRegistry({
+    extensions: { configDir, builtinDir },
+    socketPath: SOCKET,
+    env: {
+      PATH: "/usr/bin:/bin",
+      PISCES_CLIENT_WEB_PORT: "7900",
+      PISCES_CLIENT_ID: "spoofed",
+      PISCES_API_KEY: "sk-secret",
+    },
+    spawn,
+  });
+
+  await registry.start("repl");
+
+  expect(spawn.captured?.options.env).toEqual({
+    PATH: "/usr/bin:/bin",
+    PISCES_CLIENT_WEB_PORT: "7900",
+    PISCES_SOCKET_PATH: SOCKET,
+    PISCES_CLIENT_ID: "repl",
+  });
+});
+
 test("rejects an unknown client without spawning", async () => {
   const spawn = fakeSpawn();
   const registry = createClientRegistry({
