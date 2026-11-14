@@ -67,6 +67,9 @@ export async function startServer(options: StartOptions = {}): Promise<ServerHan
     port,
     close: () =>
       new Promise<void>((resolve, reject) => {
+        // SSE streams stay open for as long as a tab is open; closing must not
+        // wait for them.
+        server.closeAllConnections();
         server.close((error) => {
           if (error === undefined) resolve();
           else reject(error);
@@ -101,12 +104,20 @@ async function main(): Promise<void> {
   // One upstream connection for the process lifetime: the daemon is expected to
   // outlive the console. A daemon restart needs `pisces client start web` again.
   let wire: WireClient | undefined;
+  let handle: ServerHandle | undefined;
+  // `/api/shutdown` stops this process only: the daemon and any running turn are
+  // untouched, so `pisces client start web` brings the console back.
+  const stopBridge = (): void => {
+    wire?.close();
+    void handle?.close().catch(() => {});
+    setTimeout(() => process.exit(0), 0);
+  };
   try {
     wire = await connectWire(socketPath);
-    const handle = await startServer({
+    handle = await startServer({
       ...(port === undefined ? {} : { port }),
       socketPath,
-      api: { wire, hub: createSubscriptionHub(wire) },
+      api: { wire, hub: createSubscriptionHub(wire), onShutdown: stopBridge },
     });
     process.stdout.write(`web client listening on http://${LOOPBACK}:${handle.port}/\n`);
   } catch (error) {

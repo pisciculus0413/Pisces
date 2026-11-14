@@ -54,6 +54,7 @@ browser ──HTTP/SSE──▶ web-client 进程 ──NDJSON over Unix socket�
 | `DELETE /api/sessions/:id/queue` | `queue.clear` | 活跃 turn 时 daemon 返回 `turn.active` |
 | `GET /api/sessions/:id/entries` | `entries.snapshot` | 条目清点与已持久化选择 |
 | `GET /api/sessions/:id/events` | `session.subscribe` + 事件流 | SSE |
+| `POST /api/shutdown` | （无） | bridge 自身：停止该进程，退出码 0；不碰 daemon 与 turn |
 
 - 错误：协议 `Response.error` 原样映射为 `{ error: { code, message } }`，HTTP 状态按码分类：
   `*.not_found`/`node_not_found` → 404；`turn.active`/`queue.entry_locked`/`queue.entry_not_found`/
@@ -70,7 +71,7 @@ browser ──HTTP/SSE──▶ web-client 进程 ──NDJSON over Unix socket�
 1. **Host 头校验**：`Host` 必须是 `127.0.0.1:<port>` 或 `localhost:<port>`，否则 403。这条挡住
    DNS rebinding（攻击者域名解析到 127.0.0.1）。
 2. **不发 CORS 头**：跨站页面读不到任何响应；写操作要求 `application/json`，跨站无法在不触发
-   预检的情况下发出。
+   预检的情况下发出。`POST /api/shutdown` 即使没有 body 也强制要求 JSON，因此别的页面无法替你停服。
 3. **仅回环监听**：不监听 `0.0.0.0`；socket 本身仍由 daemon 的 `SO_PEERCRED` 同 uid 校验保护。
 
 威胁模型之外写明：同一台机器上其他 uid 无法连 socket，但可以访问回环端口；本设计不防御本机其他用户
@@ -86,6 +87,7 @@ browser ──HTTP/SSE──▶ web-client 进程 ──NDJSON over Unix socket�
 - 按 `createdAt` 分组：今天 / 昨天 / 7 天内 / 更早；组内按时间倒序。
 - 每行：`provider/model`（`session.list` 只返回元数据，没有消息正文）+ 右侧状态点（该会话在
   `turn.list` 中即有活跃 turn）。
+- 底部：`停止服务器` 按钮，两段式确认（第二次点击才发请求），成功后整页覆盖"服务已停止，可以关闭此页面"。
 - 点击切换当前会话，切换时清空临时/流式状态并重新 `session.read`。
 
 ### 6.2 中栏：会话记录与 Active Turn（同栏分块）

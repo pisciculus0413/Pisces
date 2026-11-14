@@ -51,14 +51,21 @@ afterEach(async () => {
   }
 });
 
-async function serve(wire: WireClient): Promise<string> {
+async function serve(wire: WireClient, options: { onShutdown?: () => void } = {}): Promise<string> {
   let port = 0;
   const app = express();
   // The production middleware chain, so guard regressions surface here too.
   app.use(hostGuard(() => [`127.0.0.1:${port}`, `localhost:${port}`]));
   app.use("/api", requireJson());
   app.use("/api", express.json());
-  app.use("/api", createApiRouter({ wire, hub: createSubscriptionHub(wire) }));
+  app.use(
+    "/api",
+    createApiRouter({
+      wire,
+      hub: createSubscriptionHub(wire),
+      ...(options.onShutdown === undefined ? {} : { onShutdown: options.onShutdown }),
+    }),
+  );
   const server = app.listen(0, "127.0.0.1");
   servers.push(server);
   await new Promise<void>((resolve) => server.once("listening", () => resolve()));
@@ -262,6 +269,31 @@ test("never lets the body override the routed session id", async () => {
 
   expect(response.status).toBe(200);
   expect(wire.calls[0]?.params).toMatchObject({ sessionId: "A" });
+});
+
+test("stops the bridge only when a JSON shutdown request arrives", async () => {
+  let stopped = 0;
+  const wire = fakeWire();
+  const root = await serve(wire.client, { onShutdown: () => (stopped += 1) });
+
+  // A cross-site form post never carries JSON, so it cannot stop the console.
+  const form = await fetch(`${root}/api/shutdown`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: "x=1",
+  });
+  expect(form.status).toBe(415);
+  expect(stopped).toBe(0);
+
+  const accepted = await fetch(`${root}/api/shutdown`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  expect(accepted.status).toBe(200);
+  expect(await accepted.json()).toEqual({ stopping: true });
+  expect(stopped).toBe(1);
+  expect(wire.calls).toEqual([]);
 });
 
 test("maps unknown codes to 500 and keeps the code", async () => {

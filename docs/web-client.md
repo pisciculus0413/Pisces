@@ -37,7 +37,8 @@ $ curl -s http://127.0.0.1:7801/api/sessions
 
 三栏 + 底部输入区，浅色主题。
 
-- **左栏**：会话列表，按创建时间分组（今天 / 昨天 / 7 天内 / 更早）；每行标题是 `provider/model`
+- **左栏**：会话列表，按创建时间分组（今天 / 昨天 / 7 天内 / 更早）；底部是"停止服务器"按钮（点一次变
+  "确认停止？"，4 秒内再点一次才真正停止；成功后整页覆盖"服务已停止"）。每行标题是 `provider/model`
   （`session.list` 只返回元数据，不含消息正文），绿点表示该会话有活跃 turn。顶部"新建会话"要求工作区
   绝对路径，留空则使用配置中的 `defaultWorkspace`。
 - **中栏**：会话记录与 Active Turn 在同一列分块。
@@ -74,6 +75,7 @@ $ curl -s http://127.0.0.1:7801/api/sessions
 | `DELETE /api/sessions/:id/queue/:entryId` | `queue.remove` |
 | `DELETE /api/sessions/:id/queue` | `queue.clear` |
 | `GET /api/sessions/:id/events` | `session.subscribe` + 事件流（SSE） |
+| `POST /api/shutdown` | （无）bridge 自身：停止这个 Express 进程 |
 
 - 错误体为 `{ "error": { "code", "message" } }`。状态码：`*.not_found` → 404；`turn.active`、
   `queue.entry_locked`、`queue.entry_not_found`、`queue.invalid_control`、`queue.duplicate_name`、
@@ -81,6 +83,10 @@ $ curl -s http://127.0.0.1:7801/api/sessions
   `protocol.invalid_response` → 502；其余 500。
 - SSE 每帧为 `data: {"event":…,"data":{…}}`，首帧 `retry: 2000`，每 15 s 一条 `: keepalive` 注释。
   浏览器按会话 `seq` 丢弃旧事件；断线后自动退避重连（1 s 起、最长 8 s），重连成功即重新 `session.read`。
+- `POST /api/shutdown` 是唯一不对应协议方法的端点：它只停这个 Express 进程（退出码 0），不碰 daemon、不取消
+  正在运行的 turn；`client list` 里仍能看到 `web`，需要时再 `pisces client start web`。因为没有 body 也强制
+  要求 `application/json`（跨站简单请求无法设置该类型，会先撞上预检，而我们不发 CORS 头），所以别的页面无法
+  替你停服。
 - bridge 不缓存状态、不做锁：并发由 daemon 的 `Concurrency` 按会话串行化，同时开多个浏览器窗口与开多个
   CLI 进程等价。
 

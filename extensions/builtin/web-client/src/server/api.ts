@@ -12,6 +12,8 @@ import { isProtocolError, type WireClient } from "./wire.js";
 export interface ApiOptions {
   wire: WireClient;
   hub: SubscriptionHub;
+  /** Called after `/api/shutdown` answers; absent means the route is not served. */
+  onShutdown?: () => void;
 }
 
 const INVALID_REQUEST = {
@@ -22,7 +24,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 export function createApiRouter(options: ApiOptions): Router {
-  const { wire, hub } = options;
+  const { wire, hub, onShutdown } = options;
   const router = Router();
 
   const send = async (
@@ -175,6 +177,26 @@ export function createApiRouter(options: ApiOptions): Router {
   router.get("/providers", async (_request, response) => {
     await send(response, "provider.list", {});
   });
+
+  // Bridge-local: the protocol has no "stop the client" method. JSON is required
+  // even for an empty body so that a cross-site form post cannot reach it.
+  if (onShutdown !== undefined) {
+    router.post("/shutdown", (request, response) => {
+      const contentType = request.headers["content-type"] ?? "";
+      if (!contentType.toLowerCase().startsWith("application/json")) {
+        response.status(415).json({
+          error: {
+            code: "web.unsupported_media_type",
+            message: "Requests must be application/json",
+          },
+        });
+        return;
+      }
+      response.json({ stopping: true });
+      // Answer first, then tear the process down on the next turn of the loop.
+      setImmediate(onShutdown);
+    });
+  }
 
   router.get("/sessions/:id/events", eventStream(hub, wire));
 

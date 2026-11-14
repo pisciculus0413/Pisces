@@ -6,8 +6,10 @@ const props = defineProps<{
   sessions: SessionMeta[];
   activeSessionIds: string[];
   currentId: string | null;
+  /** Label for the bottom-left stop button; the parent owns the two-step confirm. */
+  shutdownLabel: string;
 }>();
-const emit = defineEmits<{ select: [id: string]; create: [] }>();
+const emit = defineEmits<{ select: [id: string]; create: []; shutdown: [] }>();
 
 const BUCKETS = ["今天", "昨天", "7 天内", "更早"] as const;
 
@@ -58,5 +60,14 @@ const title = (session: SessionMeta): string => `${session.provider}/${session.m
       </template>
       <p v-if="sessions.length === 0" class="group-label">还没有已落盘的会话</p>
     </div>
+    <footer class="sidebar-foot">
+      <button
+        :class="{ danger: shutdownLabel !== '停止服务器' }"
+        type="button"
+        @click="emit('shutdown')"
+      >
+        {{ shutdownLabel }}
+      </button>
+    </footer>
   </aside>
 </template>

@@ -37,6 +37,21 @@ const newProvider = ref("");
 const newModel = ref("");
 const composer = ref<InstanceType<typeof MessageComposer> | null>(null);
 const panelCollapsed = ref(false);
+const shutdownState = ref<"idle" | "confirm" | "stopping" | "stopped">("idle");
+let confirmTimer: ReturnType<typeof setTimeout> | undefined;
+
+const shutdownLabel = computed(() => {
+  switch (shutdownState.value) {
+    case "confirm":
+      return "确认停止？";
+    case "stopping":
+      return "正在停止…";
+    case "stopped":
+      return "已停止";
+    default:
+      return "停止服务器";
+  }
+});
 
 let stopEvents: (() => void) | undefined;
 
@@ -274,6 +289,30 @@ async function configure(provider: string, model: string): Promise<void> {
   }
 }
 
+/** Two-step confirm: the first click only arms the button for a few seconds. */
+async function shutdown(): Promise<void> {
+  if (shutdownState.value === "idle") {
+    shutdownState.value = "confirm";
+    if (confirmTimer !== undefined) clearTimeout(confirmTimer);
+    confirmTimer = setTimeout(() => {
+      if (shutdownState.value === "confirm") shutdownState.value = "idle";
+    }, 4000);
+    return;
+  }
+  if (shutdownState.value !== "confirm") return;
+  shutdownState.value = "stopping";
+  try {
+    // Only the bridge process stops; the daemon and running turns keep going.
+    await apiSend("POST", "/api/shutdown", {});
+    stopEvents?.();
+    stopEvents = undefined;
+    shutdownState.value = "stopped";
+  } catch (cause) {
+    report(cause);
+    shutdownState.value = "idle";
+  }
+}
+
 async function copy(text: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text);
@@ -299,7 +338,10 @@ onMounted(async () => {
   }
 });
 
-onBeforeUnmount(() => stopEvents?.());
+onBeforeUnmount(() => {
+  stopEvents?.();
+  if (confirmTimer !== undefined) clearTimeout(confirmTimer);
+});
 </script>
 
 <template>
@@ -308,8 +350,10 @@ onBeforeUnmount(() => stopEvents?.());
       :sessions="sessions"
       :active-session-ids="activeTurns.map((turn) => turn.sessionId)"
       :current-id="currentId"
+      :shutdown-label="shutdownLabel"
       @select="select"
       @create="creating = true"
+      @shutdown="shutdown"
     />
     <main class="center">
       <div v-if="error !== null" class="error-bar">{{ error }}</div>
@@ -389,5 +433,14 @@ onBeforeUnmount(() => stopEvents?.());
         />
       </template>
     </aside>
+    <div v-if="shutdownState === 'stopped'" class="stopped-overlay">
+      <div>
+        <strong>服务已停止</strong>
+        <p>
+          只停止了本地 Web 服务，daemon 与正在运行的 turn 不受影响。可以关闭此页面，
+          需要时再执行 <code>pisces client start web</code>。
+        </p>
+      </div>
+    </div>
   </div>
 </template>

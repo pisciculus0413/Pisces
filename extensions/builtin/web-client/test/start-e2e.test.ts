@@ -126,6 +126,28 @@ async function startBridge(socketPath: string): Promise<Bridge> {
   });
 }
 
+test.skipIf(!BUILT)("stops on request from the console", { timeout: 60_000 }, async () => {
+  const host = await startFixtureDaemon();
+  const bridge = await startBridge(host.socketPath);
+
+  const response = await fetch(new URL("/api/shutdown", bridge.url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ stopping: true });
+
+  const code = await new Promise<number | null>((resolve) => {
+    bridge.child.once("exit", (status) => resolve(status));
+  });
+  expect(code).toBe(0);
+  await expect(fetch(bridge.url)).rejects.toThrow();
+
+  // The daemon stays up; only the console went away.
+  expect(host.status().state).toBe("running");
+});
+
 test.skipIf(!BUILT)(
   "exits instead of lingering when the port is already taken",
   { timeout: 30_000 },
