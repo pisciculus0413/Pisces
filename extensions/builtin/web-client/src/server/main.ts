@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { ApiOptions } from "./api.js";
 import { createApp } from "./app.js";
 import { createSubscriptionHub } from "./sse.js";
-import { connectWire, WireError } from "./wire.js";
+import { connectWire, type WireClient, WireError } from "./wire.js";
 
 /**
  * Process entry for the web client. It is started by the daemon
@@ -98,10 +98,11 @@ async function main(): Promise<void> {
     return;
   }
   const port = configuredPort(process.env[PORT_ENV]);
+  // One upstream connection for the process lifetime: the daemon is expected to
+  // outlive the console. A daemon restart needs `pisces client start web` again.
+  let wire: WireClient | undefined;
   try {
-    // One upstream connection for the process lifetime: the daemon is expected to
-    // outlive the console. A daemon restart needs `pisces client start web` again.
-    const wire = await connectWire(socketPath);
+    wire = await connectWire(socketPath);
     const handle = await startServer({
       ...(port === undefined ? {} : { port }),
       socketPath,
@@ -109,6 +110,9 @@ async function main(): Promise<void> {
     });
     process.stdout.write(`web client listening on http://${LOOPBACK}:${handle.port}/\n`);
   } catch (error) {
+    // Release the upstream socket first: it is the only handle that would keep a
+    // failed start alive instead of letting the process exit with code 1.
+    wire?.close();
     if (error instanceof WireError) {
       process.stderr.write("web client: daemon is not reachable\n");
     } else if (isAddressInUse(error)) {

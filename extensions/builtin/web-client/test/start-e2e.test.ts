@@ -1,7 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -124,6 +125,47 @@ async function startBridge(socketPath: string): Promise<Bridge> {
     });
   });
 }
+
+test.skipIf(!BUILT)(
+  "exits instead of lingering when the port is already taken",
+  { timeout: 30_000 },
+  async () => {
+    const host = await startFixtureDaemon();
+    const blocker = createServer((_request, response) => response.end("taken"));
+    blocker.listen(0, "127.0.0.1");
+    await once(blocker, "listening");
+    try {
+      const address = blocker.address();
+      if (address === null || typeof address === "string") throw new Error("no port");
+
+      const child = spawn(process.execPath, [ENTRY], {
+        env: {
+          ...process.env,
+          PISCES_SOCKET_PATH: host.socketPath,
+          PISCES_CLIENT_WEB_PORT: String(address.port),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      children.add(child);
+      let stderr = "";
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+
+      // A failed start must leave no process behind: an open upstream socket
+      // would otherwise keep the event loop alive forever.
+      const code = await new Promise<number | null>((resolve) => {
+        child.once("exit", (status) => resolve(status));
+      });
+
+      expect(code).toBe(1);
+      expect(stderr).toContain(`port ${address.port} is already in use`);
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+  },
+);
 
 test.skipIf(!BUILT)(
   "the built bridge serves the console and the protocol API",
