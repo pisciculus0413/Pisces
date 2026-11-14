@@ -12,6 +12,10 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["packages/*/src/**/*.test.ts", "packages/*/test/**/*.test.ts"],
+    include: [
+      "packages/*/src/**/*.test.ts",
+      "packages/*/test/**/*.test.ts",
+      "extensions/builtin/*/test/**/*.test.ts",
+    ],
   },
 });

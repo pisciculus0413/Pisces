@@ -1,5 +1,6 @@
 packages:
   - packages/*
+  - extensions/builtin/*
 
 minimumReleaseAgeExclude:
   - '@biomejs/biome@2.5.15'
