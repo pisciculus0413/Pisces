@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { eventStream, type SubscriptionHub } from "./sse.js";
+import { statusForCode } from "./status.js";
 import { isProtocolError, type WireClient } from "./wire.js";
 
 /**
@@ -16,28 +17,6 @@ export interface ApiOptions {
 const INVALID_REQUEST = {
   error: { code: "protocol.invalid_request", message: "Invalid request parameters" },
 } as const;
-
-/** Error code → HTTP status. The code stays the contract; the status is a coarse class. */
-const NOT_FOUND = new Set(["session.not_found", "session.node_not_found"]);
-const CONFLICT = new Set([
-  "turn.active",
-  "turn.node_id_forbidden",
-  "queue.entry_locked",
-  "queue.entry_not_found",
-  "queue.invalid_control",
-  "queue.duplicate_name",
-  "queue.entry_too_large",
-  "queue.too_large",
-]);
-
-export function statusForCode(code: string): number {
-  if (NOT_FOUND.has(code)) return 404;
-  if (CONFLICT.has(code)) return 409;
-  if (code === "protocol.invalid_request") return 400;
-  if (code === "daemon.unreachable" || code === "daemon.timeout") return 503;
-  if (code === "protocol.invalid_response") return 502;
-  return 500;
-}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -97,11 +76,11 @@ export function createApiRouter(options: ApiOptions): Router {
       response.status(400).json(INVALID_REQUEST);
       return;
     }
-    const node = request.query.node;
+    const nodeId = request.query.node;
     const cursor = request.query.cursor;
     await send(response, "session.read", {
       sessionId,
-      ...(typeof node === "string" ? { node } : {}),
+      ...(typeof nodeId === "string" ? { nodeId } : {}),
       ...(typeof cursor === "string" ? { cursor } : {}),
       ...(limit === undefined ? {} : { limit }),
     });
@@ -113,10 +92,9 @@ export function createApiRouter(options: ApiOptions): Router {
       response.status(400).json(INVALID_REQUEST);
       return;
     }
-    await send(response, "session.configure", {
-      sessionId,
-      ...(isRecord(request.body) ? request.body : {}),
-    });
+    const body = isRecord(request.body) ? request.body : {};
+    // The routed id wins: a body cannot redirect the call to another session.
+    await send(response, "session.configure", { ...body, sessionId });
   });
 
   router.get("/sessions/:id/entries", async (request, response) => {

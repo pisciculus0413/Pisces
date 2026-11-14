@@ -84,7 +84,8 @@ browser ──HTTP/SSE──▶ web-client 进程 ──NDJSON over Unix socket�
 
 - 顶部"新建会话"按钮。
 - 按 `createdAt` 分组：今天 / 昨天 / 7 天内 / 更早；组内按时间倒序。
-- 每行：首条用户消息摘要（无则 `sessionId` 前 8 位）+ 右侧状态点（该会话在 `turn.list` 中即有活跃 turn）。
+- 每行：`provider/model`（`session.list` 只返回元数据，没有消息正文）+ 右侧状态点（该会话在
+  `turn.list` 中即有活跃 turn）。
 - 点击切换当前会话，切换时清空临时/流式状态并重新 `session.read`。
 
 ### 6.2 中栏：会话记录与 Active Turn（同栏分块）

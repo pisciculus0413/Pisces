@@ -4,7 +4,7 @@ import { join } from "node:path";
 import express from "express";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createSubscriptionHub, eventStream } from "../src/server/sse.js";
-import type { WireClient, WireEvent } from "../src/server/wire.js";
+import { ProtocolError, type WireClient, type WireEvent } from "../src/server/wire.js";
 
 /**
  * SSE is the only long-lived path. It must subscribe the shared upstream
@@ -174,6 +174,26 @@ test("releases the subscription when the browser disconnects", async () => {
     "session.unsubscribe",
   ]);
   expect(wire.listenerCount()).toBe(0);
+});
+
+test("reports a failed subscribe with its own status", async () => {
+  const failing: WireClient = {
+    async request() {
+      throw new ProtocolError("session.not_found", "Session not found");
+    },
+    onEvent() {
+      return () => {};
+    },
+    close() {},
+  };
+  const { base } = await serve(failing);
+
+  const response = await fetch(`${base}/sessions/missing/events`);
+
+  expect(response.status).toBe(404);
+  expect(await response.json()).toEqual({
+    error: { code: "session.not_found", message: "Session not found" },
+  });
 });
 
 test("keeps the stream alive with a comment frame", async () => {

@@ -37,8 +37,9 @@ $ curl -s http://127.0.0.1:7801/api/sessions
 
 三栏 + 底部输入区，浅色主题。
 
-- **左栏**：会话列表，按创建时间分组（今天 / 昨天 / 7 天内 / 更早）；绿点表示该会话有活跃 turn。
-  顶部"新建会话"要求工作区绝对路径，留空则使用配置中的 `defaultWorkspace`。
+- **左栏**：会话列表，按创建时间分组（今天 / 昨天 / 7 天内 / 更早）；每行标题是 `provider/model`
+  （`session.list` 只返回元数据，不含消息正文），绿点表示该会话有活跃 turn。顶部"新建会话"要求工作区
+  绝对路径，留空则使用配置中的 `defaultWorkspace`。
 - **中栏**：会话记录与 Active Turn 在同一列分块。
   - 记录按追加顺序排列，左侧是树形轨道：分叉节点在新轨道上出现，用彩色点 + 从父轨道弯过来的连线标记。
   - `declaration` / `compaction` / `cancel` 控制消息显示为窄条 chip，点击展开摘要。
@@ -84,7 +85,7 @@ $ curl -s http://127.0.0.1:7801/api/sessions
 ## 4. 安全边界
 
 - 只监听 `127.0.0.1`，不监听网络地址。
-- `Host` 头必须是 `127.0.0.1:<port>`、`localhost:<port>` 或 `[::1]:<port>`，否则 403
+- `Host` 头必须是 `127.0.0.1:<port>` 或 `localhost:<port>`，否则 403
   `web.host_forbidden`（挡住 DNS rebinding）。
 - 不发任何 `access-control-*` 头；写请求必须带 `application/json`，否则 415
   `web.unsupported_media_type`。跨站页面因此既发不出写请求，也读不到响应。
@@ -94,8 +95,8 @@ $ curl -s http://127.0.0.1:7801/api/sessions
 ## 5. 已知限制
 
 - 只支持 Linux x64（与 daemon 一致）。
-- 前端不打包进 daemon：`pnpm build:web` 是独立步骤，未构建时 `client list` 里能看到 `web`，但
-  `client start web` 会以 `client.launch_failed` 失败（入口 `dist/main.js` 不存在）。
+- 前端不打包进 daemon：`pnpm build:web` 是独立步骤。未构建时入口 `dist/main.js` 不存在，该声明会被
+  发现阶段丢弃，因此 `client list` 不显示 `web`，`client start web` 返回 `client.not_found`。
 - 没有登录与多用户、没有消息搜索、没有客户端侧缓存与事件重放。
 - daemon 重启后 bridge 的连接失效，需要重启客户端进程（见 §1）。
 - 前端组件没有 DOM 级测试：组件由 `vue-tsc` 把关，逻辑（store、轨道计算）与 bridge 由 vitest 覆盖。

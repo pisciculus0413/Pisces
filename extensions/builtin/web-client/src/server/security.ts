@@ -32,10 +32,21 @@ export function hostGuard(allowedHosts: () => readonly string[]): RequestHandler
   };
 }
 
-/** Writes must be JSON; reads must stay simple requests. */
+/**
+ * A request that carries a body must carry it as JSON; requests without a body
+ * (`DELETE`, `POST … {}` from a form-free client) pass untouched. Reads stay
+ * simple requests either way.
+ */
 export function requireJson(): RequestHandler {
   return (request, response, next) => {
     if (SAFE_METHODS.has(request.method)) {
+      next();
+      return;
+    }
+    const hasBody =
+      request.headers["transfer-encoding"] !== undefined ||
+      (request.headers["content-length"] ?? "0") !== "0";
+    if (!hasBody) {
       next();
       return;
     }

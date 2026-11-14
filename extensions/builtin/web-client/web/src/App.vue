@@ -109,7 +109,17 @@ async function readSession(sessionId: string): Promise<void> {
   ]);
   // A fresh read establishes the seq watermark; later events must be newer.
   state.value = applyEntries(applyRead(emptySession, read), entries);
+  // `turn.list` is re-read here: attaching mid-turn must restore the live block,
+  // and a turn that ended while disconnected must not leave a phantom active turn.
+  activeTurns.value = await apiGet<{ turns: ActiveTurnRecord[] }>("/api/turns").then(
+    (result) => result.turns,
+  );
   state.value = applyActiveTurns(state.value, activeTurns.value);
+  const active = state.value.activeTurn;
+  state.value =
+    active === null
+      ? state.value
+      : { ...state.value, live: { turnId: active.turnId, step: 0, text: "", reasoning: "" } };
 }
 
 async function select(sessionId: string): Promise<void> {
@@ -135,7 +145,9 @@ async function startTurn(): Promise<void> {
   const sessionId = currentId.value;
   if (sessionId === null) return;
   await apiSend("POST", `/api/sessions/${encodeURIComponent(sessionId)}/turns`, {
-    ...(branchNodeId.value === null ? {} : { nodeId: branchNodeId.value }),
+    // A steer must not carry a branch point: the daemon rejects that combination
+    // after the message is already queued.
+    ...(steering.value || branchNodeId.value === null ? {} : { nodeId: branchNodeId.value }),
   });
   branchNodeId.value = null;
   activeTurns.value = await apiGet<{ turns: ActiveTurnRecord[] }>("/api/turns").then(
@@ -154,6 +166,7 @@ async function send(text: string): Promise<void> {
       entries: [{ kind: "agent", role: "user", source: "web", content: [{ type: "text", text }] }],
     });
     await startTurn();
+    composer.value?.clear();
   } catch (cause) {
     report(cause);
   } finally {
@@ -338,7 +351,11 @@ onBeforeUnmount(() => stopEvents?.());
           @branch="pickBranch"
           @copy="copy"
         />
-        <div class="records" style="flex: 0; padding-bottom: 0">
+        <div
+          v-if="state.activeTurn !== null || state.live !== null"
+          class="records"
+          style="flex: 0; padding-bottom: 0"
+        >
           <ActiveTurn :live="state.live" :active-turn="state.activeTurn" @cancel="cancel" />
         </div>
         <div class="composer-area">

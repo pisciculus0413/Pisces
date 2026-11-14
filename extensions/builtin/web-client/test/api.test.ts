@@ -1,7 +1,9 @@
 import express from "express";
-import { afterEach, beforeEach, expect, test } from "vitest";
-import { createApiRouter, statusForCode } from "../src/server/api.js";
+import { afterEach, expect, test } from "vitest";
+import { createApiRouter } from "../src/server/api.js";
+import { hostGuard, requireJson } from "../src/server/security.js";
 import { createSubscriptionHub } from "../src/server/sse.js";
+import { statusForCode } from "../src/server/status.js";
 import { ProtocolError, type WireClient, WireError, type WireEvent } from "../src/server/wire.js";
 
 /**
@@ -43,10 +45,6 @@ function fakeWire(respond: (call: Call) => unknown = () => ({ ok: true })): Fake
 const servers: import("node:http").Server[] = [];
 let base = "";
 
-beforeEach(async () => {
-  // Each test builds its own app through `serve`.
-});
-
 afterEach(async () => {
   for (const server of servers.splice(0)) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -54,15 +52,20 @@ afterEach(async () => {
 });
 
 async function serve(wire: WireClient): Promise<string> {
+  let port = 0;
   const app = express();
-  app.use(express.json());
+  // The production middleware chain, so guard regressions surface here too.
+  app.use(hostGuard(() => [`127.0.0.1:${port}`, `localhost:${port}`]));
+  app.use("/api", requireJson());
+  app.use("/api", express.json());
   app.use("/api", createApiRouter({ wire, hub: createSubscriptionHub(wire) }));
   const server = app.listen(0, "127.0.0.1");
   servers.push(server);
   await new Promise<void>((resolve) => server.once("listening", () => resolve()));
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("no port");
-  base = `http://127.0.0.1:${address.port}`;
+  port = address.port;
+  base = `http://127.0.0.1:${port}`;
   return base;
 }
 
@@ -87,7 +90,7 @@ const CASES: Case[] = [
     path: "/api/sessions/s1?node=n2&limit=5&cursor=n1",
     expect: {
       method: "session.read",
-      params: { sessionId: "s1", node: "n2", limit: 5, cursor: "n1" },
+      params: { sessionId: "s1", nodeId: "n2", limit: 5, cursor: "n1" },
     },
   },
   {
@@ -245,6 +248,20 @@ test("propagates protocol error codes with a coarse status", async () => {
       error: { code: error.code, message: error.message },
     });
   }
+});
+
+test("never lets the body override the routed session id", async () => {
+  const wire = fakeWire();
+  const root = await serve(wire.client);
+
+  const response = await fetch(`${root}/api/sessions/A`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: "B", model: "m2" }),
+  });
+
+  expect(response.status).toBe(200);
+  expect(wire.calls[0]?.params).toMatchObject({ sessionId: "A" });
 });
 
 test("maps unknown codes to 500 and keeps the code", async () => {

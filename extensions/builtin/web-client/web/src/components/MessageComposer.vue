@@ -10,8 +10,9 @@ const input = ref<HTMLTextAreaElement | null>(null);
 function submit(): void {
   const text = draft.value.trim();
   if (text === "" || props.busy) return;
+  // The draft survives until the caller confirms the entry was queued, so a
+  // rejected send never loses the user's text.
   emit("send", text);
-  draft.value = "";
 }
 
 function onKeydown(event: KeyboardEvent): void {
@@ -21,7 +22,12 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
-defineExpose({ focus: () => input.value?.focus() });
+defineExpose({
+  focus: () => input.value?.focus(),
+  clear: () => {
+    draft.value = "";
+  },
+});
 </script>
 
 <template>

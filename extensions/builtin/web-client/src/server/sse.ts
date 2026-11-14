@@ -1,4 +1,5 @@
 import type { RequestHandler } from "express";
+import { statusForCode } from "./status.js";
 import type { WireClient, WireEvent } from "./wire.js";
 
 /**
@@ -119,7 +120,11 @@ export function eventStream(
         if (closed) return;
         const code =
           isRecord(error) && typeof error.code === "string" ? error.code : "daemon.unreachable";
-        response.status(503).json({ error: { code, message: "Daemon is not reachable" } });
+        const message =
+          isRecord(error) && typeof error.message === "string"
+            ? error.message
+            : "Daemon is not reachable";
+        response.status(statusForCode(code)).json({ error: { code, message } });
         cleanup();
       });
 

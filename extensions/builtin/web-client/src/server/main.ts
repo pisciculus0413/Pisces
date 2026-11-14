@@ -32,7 +32,7 @@ const LOOPBACK = "127.0.0.1";
 
 /** Both names the loopback interface answers to, for the port actually bound. */
 function allowedHosts(port: number): readonly string[] {
-  return [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`];
+  return [`127.0.0.1:${port}`, `localhost:${port}`];
 }
 
 function listen(server: Server, port: number): Promise<number> {
