@@ -1,7 +1,10 @@
 import { realpath } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { fileURLToPath } from "node:url";
+import type { ApiOptions } from "./api.js";
 import { createApp } from "./app.js";
+import { createSubscriptionHub } from "./sse.js";
+import { connectWire, WireError } from "./wire.js";
 
 /**
  * Process entry for the web client. It is started by the daemon
@@ -21,6 +24,8 @@ export interface StartOptions {
   port?: number;
   socketPath?: string;
   assetsDir?: string;
+  /** Tests inject a fake upstream; the entry always connects to `socketPath`. */
+  api?: ApiOptions;
 }
 
 const LOOPBACK = "127.0.0.1";
@@ -51,7 +56,11 @@ function listen(server: Server, port: number): Promise<number> {
 export async function startServer(options: StartOptions = {}): Promise<ServerHandle> {
   const assetsDir = options.assetsDir ?? fileURLToPath(new URL("./web/", import.meta.url));
   let port = options.port ?? DEFAULT_PORT;
-  const app = createApp({ assetsDir, allowedHosts: () => allowedHosts(port) });
+  const app = createApp({
+    assetsDir,
+    allowedHosts: () => allowedHosts(port),
+    ...(options.api === undefined ? {} : { api: options.api }),
+  });
   const server = createServer(app);
   port = await listen(server, port);
   return {
@@ -90,10 +99,19 @@ async function main(): Promise<void> {
   }
   const port = configuredPort(process.env[PORT_ENV]);
   try {
-    const handle = await startServer({ ...(port === undefined ? {} : { port }), socketPath });
+    // One upstream connection for the process lifetime: the daemon is expected to
+    // outlive the console. A daemon restart needs `pisces client start web` again.
+    const wire = await connectWire(socketPath);
+    const handle = await startServer({
+      ...(port === undefined ? {} : { port }),
+      socketPath,
+      api: { wire, hub: createSubscriptionHub(wire) },
+    });
     process.stdout.write(`web client listening on http://${LOOPBACK}:${handle.port}/\n`);
   } catch (error) {
-    if (isAddressInUse(error)) {
+    if (error instanceof WireError) {
+      process.stderr.write("web client: daemon is not reachable\n");
+    } else if (isAddressInUse(error)) {
       process.stderr.write(`web client: port ${port ?? DEFAULT_PORT} is already in use\n`);
     } else {
       process.stderr.write("web client: failed to start\n");

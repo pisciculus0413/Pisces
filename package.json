@@ -13,7 +13,9 @@
     "lint": "biome check --write .",
     "format": "biome format --write .",
     "test": "vitest run",
-    "cli": "node packages/cli/dist/main.js"
+    "cli": "node packages/cli/dist/main.js",
+    "build:web": "pnpm -C extensions/builtin/web-client build",
+    "typecheck:web": "pnpm -C extensions/builtin/web-client typecheck"
   },
   "keywords": [],
   "author": "Pisciculus",
