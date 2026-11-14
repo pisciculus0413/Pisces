@@ -1,4 +1,4 @@
-import { connect, type Socket } from "node:net";
+import { connect } from "node:net";
 import {
   createNdjsonDecoder,
   encodeFrame,
@@ -30,10 +30,10 @@ export interface WireClient {
 export const UNREACHABLE_CODE = "daemon.unreachable";
 export const TIMEOUT_CODE = "daemon.timeout";
 export const INVALID_RESPONSE_CODE = "protocol.invalid_response";
+export const INVALID_RESPONSE_MESSAGE = "Invalid response from daemon";
 
 const UNREACHABLE_MESSAGE = "Daemon is not reachable";
 const TIMEOUT_MESSAGE = "Daemon did not respond";
-const INVALID_RESPONSE_MESSAGE = "Invalid response from daemon";
 
 export const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -48,8 +48,6 @@ export class WireError extends Error {
 }
 
 const unreachable = (): WireError => new WireError(UNREACHABLE_CODE, UNREACHABLE_MESSAGE);
-const invalidResponse = (): WireError =>
-  new WireError(INVALID_RESPONSE_CODE, INVALID_RESPONSE_MESSAGE);
 
 /** Everything `request` can reject with: a transport failure or a daemon error code. */
 export type WireRequestError = WireError | ProtocolError;
