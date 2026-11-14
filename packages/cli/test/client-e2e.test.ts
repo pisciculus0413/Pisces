@@ -183,14 +183,17 @@ test.skipIf(!BUILT)(
       expect(started.code).toBe(0);
       const listed = await run(command(fixture, ["client", "list"]));
       expect(listed.code).toBe(0);
-      expect(listed.stdout.trim()).toBe("demo  @demo/x");
+      // The builtin web console is registered too; the config-dir client must be there.
+      expect(listed.stdout).toContain("demo  @demo/x");
 
       const json = await run(command(fixture, ["client", "list", "--json"]));
       expect(json.code).toBe(0);
       const parsed = JSON.parse(json.stdout) as { clients: { id: string; source: string }[] };
-      expect(parsed.clients.map((client) => [client.id, client.source])).toEqual([
-        ["demo", "@demo/x"],
-      ]);
+      expect(parsed.clients).toContainEqual({
+        id: "demo",
+        source: "@demo/x",
+        entry: expect.any(String),
+      });
 
       const launch = await run(command(fixture, ["client", "start", "demo"]));
       expect(launch.code).toBe(0);

@@ -479,7 +479,7 @@ test("normalizes a wrapper without sidecar config to empty defaults and schema",
   expect(Object.isFrozen(record?.wrapperConfigSpec?.schema)).toBe(true);
 });
 
-test("records providers and clients as unsupported contributions without entries", async () => {
+test("records providers as unsupported contributions and ignores clients without entries", async () => {
   const pkg = extensionsDir("contrib");
   await makePackage(pkg, {
     name: "contrib",
@@ -503,7 +503,7 @@ test("records providers and clients as unsupported contributions without entries
   );
   expect(
     result.issues.filter((issue) => issue.code === "extensions.unsupported_contribution"),
-  ).toHaveLength(2);
+  ).toHaveLength(1);
   expect(await exists(sentinel)).toBe(false);
 });
 

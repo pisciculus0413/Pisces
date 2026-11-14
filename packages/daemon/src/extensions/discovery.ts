@@ -462,13 +462,9 @@ export async function discoverExtensions(
         continue;
       }
 
-      if (manifest !== undefined) {
-        for (const _provider of manifest.providers ?? []) {
-          pushIssue(issues, "extensions.unsupported_contribution", name);
-        }
-        for (const _client of manifest.clients ?? []) {
-          pushIssue(issues, "extensions.unsupported_contribution", name);
-        }
+      // `providers` is still unassembled; `clients` is consumed by `discoverClients`.
+      for (const _provider of manifest?.providers ?? []) {
+        pushIssue(issues, "extensions.unsupported_contribution", name);
       }
 
       const reportFault = (): void => {
