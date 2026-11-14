@@ -25,6 +25,11 @@ export interface StartOptions {
 
 const LOOPBACK = "127.0.0.1";
 
+/** Both names the loopback interface answers to, for the port actually bound. */
+function allowedHosts(port: number): readonly string[] {
+  return [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`];
+}
+
 function listen(server: Server, port: number): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const onError = (error: Error): void => {
@@ -45,9 +50,10 @@ function listen(server: Server, port: number): Promise<number> {
 
 export async function startServer(options: StartOptions = {}): Promise<ServerHandle> {
   const assetsDir = options.assetsDir ?? fileURLToPath(new URL("./web/", import.meta.url));
-  const app = createApp({ assetsDir });
+  let port = options.port ?? DEFAULT_PORT;
+  const app = createApp({ assetsDir, allowedHosts: () => allowedHosts(port) });
   const server = createServer(app);
-  const port = await listen(server, options.port ?? DEFAULT_PORT);
+  port = await listen(server, port);
   return {
     port,
     close: () =>

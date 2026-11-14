@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import express, { type Express } from "express";
+import { hostGuard, requireJson } from "./security.js";
 
 /**
  * The bridge app: static SPA plus the `/api` surface.
@@ -12,6 +13,8 @@ import express, { type Express } from "express";
 export interface AppOptions {
   /** Absolute directory holding the built SPA (`index.html` + `assets/`). */
   assetsDir: string;
+  /** Accepted `Host: <host>:<port>` values; read per request so an ephemeral port works. */
+  allowedHosts: () => readonly string[];
 }
 
 /** Fixed body for an unknown `/api` path; the client contract is the code, not the status. */
@@ -22,7 +25,10 @@ const API_NOT_FOUND = {
 export function createApp(options: AppOptions): Express {
   const app = express();
   app.disable("x-powered-by");
+  app.use(hostGuard(options.allowedHosts));
   app.use(express.static(options.assetsDir, { index: "index.html" }));
+  app.use("/api", requireJson());
+  app.use("/api", express.json({ limit: "24mb" }));
   // Unknown API paths answer JSON before the SPA fallback can swallow them.
   app.use("/api", (_request, response) => {
     response.status(404).json(API_NOT_FOUND);
