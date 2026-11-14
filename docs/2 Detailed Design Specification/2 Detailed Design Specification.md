@@ -656,7 +656,7 @@ interface TurnStartResult {
 - `client.list` 返回已注册客户端（`id`、`source`、`entry`），不返回进程状态，不校验会话。
 - `client.start` 要求 `id` 为非空字符串，否则 `protocol.invalid_request`；未注册返回 `client.not_found`；启动失败返回 `client.launch_failed`；成功返回 `pid`。
 - 注册来源只有内置扩展目录与 `<configDir>/extensions`；每次请求重新读取清单，不加载扩展代码。
-- 启动时通过环境变量传入 daemon socket 路径（`PISCES_SOCKET_PATH`）与客户端 id（`PISCES_CLIENT_ID`）。
+- 启动时通过环境变量传入 daemon socket 路径（`PISCES_SOCKET_PATH`）与客户端 id（`PISCES_CLIENT_ID`）；daemon 环境中以 `PISCES_CLIENT_` 开头的键一并透传（客户端自有配置的命名空间），`PISCES_CLIENT_ID` 与 `PISCES_SOCKET_PATH` 由 daemon 覆盖写入，其余环境变量一律不传。
 - 客户端进程的 stdout/stderr 不进入协议流；daemon 不跟踪已启动进程。
 
 ### 3.8 事件
@@ -1816,7 +1816,7 @@ interface ClientRegistry {
 - 实现在 `packages/daemon/src/client-registry/registry.ts`：`createClientRegistry({ extensions?, socketPath, env?, spawn? })`。没有 `register`：清单是唯一事实来源，注册表自己读取，避免第二个写入点没有调用方。
 - 客户端登记来自扩展清单的 `clients`，由 `discoverClients(options)`（`packages/daemon/src/extensions/discovery.ts`）解析：源为内置目录与 `<configDir>/extensions`，工作区不参与；`entry` 必须是包目录内的脚本文件（相对包目录或绝对路径都接受，逐出包目录的符号链接同样被拒绝），否则静默丢弃该声明；不同包复用同一 `id` 时两方都丢弃；结果按 `id` 排序。本阶段不产生发现诊断（`discoverClients` 只返回可用客户端），坏声明只表现为该客户端不可见。
 - `list` 每次调用重新发现，因此装改扩展无需重启 daemon；`extensions` 缺省时恒返回空列表。
-- `start` 校验 id（`list` 中不存在即 `client.not_found`），以 `node <entry>` 启动子进程：`stdio` 为 `["ignore","inherit","inherit"]`（继承的 stdout/stderr 即 `<dataDir>/daemon.log`），env 只有 `PATH`、`PISCES_SOCKET_PATH`、`PISCES_CLIENT_ID`，不继承 daemon 环境。
+- `start` 校验 id（`list` 中不存在即 `client.not_found`），以 `node <entry>` 启动子进程：`stdio` 为 `["ignore","inherit","inherit"]`（继承的 stdout/stderr 即 `<dataDir>/daemon.log`），env 只有 `PATH`、daemon 环境中以 `PISCES_CLIENT_` 开头的键，以及 daemon 覆盖写入的 `PISCES_SOCKET_PATH`、`PISCES_CLIENT_ID`；其余 daemon 环境（含供应商密钥）不继承。
 - `start` 等待子进程的 `spawn`/`error` 事件后 `unref()` 并返回 pid；spawn 失败返回 `client.launch_failed`。daemon 不保存句柄、不监听 `exit`，`stop` 不连带终止已启动的客户端。
 - 客户端 stdout/stderr 由 daemon 日志接收，不混入协议。
 

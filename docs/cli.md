@@ -564,8 +564,9 @@ error: client.not_found: Client is not registered
 ```
 
 - `client start` 的 pid 是 daemon 子进程的 pid，不是本命令的。daemon 以 `node <entry>` 启动客户端，
-  只传 `PATH`、`PISCES_SOCKET_PATH`、`PISCES_CLIENT_ID` 三个环境变量；daemon 的供应商密钥不会
-  进入客户端环境。
+  只传 `PATH`、以 `PISCES_CLIENT_` 开头的 daemon 环境键与 `PISCES_SOCKET_PATH`、`PISCES_CLIENT_ID`；
+  daemon 的供应商密钥不会进入客户端环境。
+- 内置的 `web` 客户端（Express + Vue 操作台）随产品分发，见 `docs/web-client.md`。
 - 客户端的 stdout/stderr 继承 daemon 的输出，写入 `<dataDir>/daemon.log`。
 - daemon 不跟踪、不回收已启动的客户端：`pisces stop` 不会终止它们，客户端需要在 daemon 不在时自行
   处理连接失败。

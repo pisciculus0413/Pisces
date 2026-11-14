@@ -1120,8 +1120,9 @@ interface ClientRegistry {
   `extensions.invalid`；不同包声明同一 `id` 时两方都不登记，`client.start` 对该 id 返回
   `client.not_found`。
 - daemon 以 `node <entry>` 启动客户端进程，通过环境变量传入 daemon 的 socket 路径与客户端 id；
-  客户端据此建立协议连接。子进程环境只含 `PATH`、`PISCES_SOCKET_PATH`、`PISCES_CLIENT_ID`，不继承
-  daemon 的环境，因此 daemon 的供应商密钥不会进入客户端。
+  客户端据此建立协议连接。子进程环境只含 `PATH`、以 `PISCES_CLIENT_` 开头的 daemon 环境键，以及
+  daemon 覆盖写入的 `PISCES_SOCKET_PATH`、`PISCES_CLIENT_ID`；其余 daemon 环境不继承，因此供应商密钥
+  不会进入客户端。
 - 子进程的 stdout/stderr 继承 daemon 的输出，即写入 `daemon.log`；daemon 不跟踪、不回收已启动的
   客户端，`stop` 不连带终止它们。启动失败返回 `client.launch_failed`。
 
